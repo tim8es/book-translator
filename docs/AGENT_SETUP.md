@@ -2,98 +2,112 @@
 
 This document defines what an AI agent should do when a user gives it the Book Translator repository URL.
 
-The authoritative literary and state rules are in [`../AGENTS.md`](../AGENTS.md). Execution topology and bounded-context rules are in [`ORCHESTRATION.md`](ORCHESTRATION.md). This file focuses on bootstrap and environment handling.
+Literary and durable-state rules are in [`../AGENTS.md`](../AGENTS.md). Execution topology and bounded-context rules are in [`ORCHESTRATION.md`](ORCHESTRATION.md). This file controls bootstrap, version resolution, installation layout, capability handling, and resume setup.
 
-## Goal
+## Canonical contract order
 
-A user should not need to understand this repository before using it.
+`agent-manifest.json` is the machine-readable bootstrap contract. Its `contract_read_order` is the single canonical order for loading Book Translator instructions.
 
-The normal interaction is:
+Do not maintain or invent a competing read order in another document. Every contract file used for one run must come from the same resolved workflow revision.
 
-1. user gives the agent `https://github.com/tim8es/book-translator`;
-2. user provides a source book, now or later;
-3. user specifies the target language, now or later;
-4. the agent sets up everything else it can safely determine itself.
+The normal user-facing interaction remains:
 
-The agent should not push technical configuration or orchestration decisions back to the user merely because asking is easier.
+1. repository URL;
+2. source book;
+3. target language.
+
+The agent should determine technical defaults and orchestration choices itself.
 
 ## Bootstrap decision tree
 
-### 1. Read the repository contract
+### 1. Resolve the requested workflow ref
 
-Read, in this order:
+First derive the requested ref from user intent:
 
-1. `agent-manifest.json`;
-2. `SKILL.md` when the environment supports skill-style instructions or when bootstrap intent needs clarification;
-3. `AGENTS.md`;
-4. this document for environment/bootstrap details;
-5. `docs/ORCHESTRATION.md` before starting or resuming chapter execution.
+- if the user pinned a branch, tag, commit, or branch URL, preserve it exactly as the requested ref;
+- otherwise use the manifest default, currently `main`.
 
-### 2. Resolve the workflow version once
+When possible, resolve that requested ref once to a concrete commit SHA before doing writable work.
 
-If the user pinned a branch, tag, or commit, preserve that choice.
+Do not silently move to a newer `main` or another ref during an active book run.
 
-If the user did not specify a version, resolve the latest `main` at setup time.
+### 2. Read one coherent contract revision
 
-When the environment can resolve a concrete revision, record it in the writable project as `.book-translator-install.json`:
+Read the files listed by `agent-manifest.json.contract_read_order` from that same resolved revision.
 
-```json
-{
-  "schema_version": 1,
-  "canonical_repository": "https://github.com/tim8es/book-translator",
-  "requested_ref": "main",
-  "resolved_revision": "<concrete-commit-sha>"
-}
-```
-
-Use the actually requested ref instead of `main` when the user pinned one.
-
-Do not silently switch to a newer `main` during an active book run. Updating the workflow is an explicit upgrade step followed by compatibility/validation checks.
-
-If the environment cannot resolve a concrete revision, preserve the most specific ref/source information it has and state that exact reproducibility is unavailable there. Do not invent a commit SHA.
+If the environment cannot resolve a concrete revision, use the most specific requested ref available, keep all contract files on that same ref, and state that exact revision reproducibility is unavailable. Never invent a SHA.
 
 ### 3. Detect available capabilities
 
 Determine whether you can:
 
-- access the repository;
+- access the repository and the selected ref/revision;
 - write files;
 - use Git;
 - run Python;
 - read the supplied source format;
 - create isolated worker sessions/subagents;
-- create the final requested artifact format.
+- create the requested final artifact format.
 
-Do not ask the user to enumerate your capabilities. Inspect the environment yourself.
+Do not ask the user to enumerate your capabilities.
 
-Choose execution mode according to `agent-manifest.json` and `docs/ORCHESTRATION.md`:
+Choose execution mode automatically:
 
 - isolated workers available -> `isolated_workers`;
-- isolated workers unavailable -> `single_agent_bounded_context`.
+- otherwise -> `single_agent_bounded_context`.
 
-The fallback is automatic. Do not ask the user to orchestrate subagents manually.
+### 4. Obtain a writable installation
 
-### 4. Obtain the template
+#### Standalone filesystem + Git
 
-#### Filesystem + Git available
-
-Prefer cloning the resolved ref/revision:
+For a normal clone, resolve the requested ref to a concrete revision and then check out that exact revision:
 
 ```bash
 git clone https://github.com/tim8es/book-translator.git
 cd book-translator
-git checkout <resolved-revision>
+git checkout --detach <resolved-revision>
 ```
 
-A shallow clone is acceptable only when it still lets the agent resolve and preserve the selected revision correctly.
+Do not use a default-branch-only shallow clone when it would prevent the requested branch, tag, or commit from being resolved and checked out.
 
-If already inside a user repository and the user explicitly wants the workflow integrated there, copy the canonical workflow files deliberately instead of nesting an unrelated Git repository. Never copy user/example book contents from the canonical `books/` directory.
+For a standalone Book Translator repository, `install_root` is `.`.
 
-#### Repository API available, shell unavailable
+#### Repository API without shell
 
-Read files from the resolved canonical revision and create the equivalent workflow files in the writable target workspace.
+Read every runtime file from the same resolved revision and create the equivalent runtime installation in the writable target workspace. Never mix files fetched from different refs or revisions.
 
-For a normal runtime installation, copy this deterministic set:
+#### Existing repository collision policy
+
+When the user asks to integrate Book Translator into an existing repository, first inspect all runtime target paths.
+
+**Never overwrite a pre-existing unrelated file.** Use this deterministic policy:
+
+1. If all runtime target paths are absent, or already contain the same Book Translator-managed files, use `install_root = "."`.
+2. If any runtime path conflicts with an unrelated host file, do not replace or merge that file automatically.
+3. Instead, install the **entire** Book Translator runtime set under `install_root = ".book-translator"`.
+4. Never split one installation between the host root and `.book-translator/`.
+5. If `.book-translator/` itself contains an unrelated conflicting installation and safe ownership cannot be established, stop before writing and ask only for the minimum choice needed to avoid overwriting user data.
+
+For a namespaced installation, paths are relative to `.book-translator/`, for example:
+
+```text
+.book-translator/AGENTS.md
+.book-translator/docs/ORCHESTRATION.md
+.book-translator/scripts/book.py
+.book-translator/books/<book-slug>/
+```
+
+Run helper commands relative to the selected installation root, for example:
+
+```bash
+python .book-translator/scripts/book.py validate <book-slug>
+```
+
+when `install_root` is `.book-translator`.
+
+### 5. Copy the deterministic runtime set
+
+Relative to `install_root`, a normal runtime installation contains:
 
 - `SKILL.md`;
 - `AGENTS.md`;
@@ -105,7 +119,7 @@ For a normal runtime installation, copy this deterministic set:
 - `scripts/book.py`;
 - `books/.gitkeep` for an empty book root.
 
-For a development copy, additionally copy:
+A development copy additionally contains:
 
 - `tests/`;
 - `.github/`;
@@ -113,22 +127,29 @@ For a development copy, additionally copy:
 - `LICENSE`;
 - `README.md`.
 
-Do not use vague rules such as "copy scripts when useful". Select either the runtime installation set or the development-copy set from the user's actual intent.
+Never copy a real book workspace from the canonical repository.
 
-Do not copy any real book workspace from the canonical repository.
+### 6. Record installation provenance
+
+After `install_root` and the resolved workflow revision are known, write `<install_root>/.book-translator-install.json`:
+
+```json
+{
+  "schema_version": 1,
+  "canonical_repository": "https://github.com/tim8es/book-translator",
+  "requested_ref": "main",
+  "resolved_revision": "<concrete-commit-sha>",
+  "install_root": "."
+}
+```
+
+Use the real requested ref and the actual `install_root`. If a concrete revision cannot be resolved, use `null` for `resolved_revision`; never fabricate one.
+
+This file describes the currently installed workflow. It is **not** the only provenance for books that may have been created under older revisions.
 
 #### Read-only environment
 
-Read the repository and explain the smallest manual step that blocks execution.
-
-Examples:
-
-- upload the source book;
-- enable file/repository write access;
-- clone the repository locally;
-- provide a writable working directory.
-
-Do not claim files were created, commands were run, subagents were launched, or setup completed when they were not.
+If no writable installation is possible, identify the exact unavailable operation and the smallest manual step required. Do not claim setup, file writes, commands, workers, or artifacts were created when they were not.
 
 ## Required user inputs
 
@@ -139,31 +160,9 @@ Only these are mandatory for a real translation:
 
 Before asking, inspect the conversation, attachments, workspace, and source metadata.
 
-### Do not ask when you can infer safely
+Do not ask for values that can be derived safely, including book slug, directories, source format, title/author when available, source language when reliably detectable, chapter filenames, glossary/style-guide creation, validation, execution mode, or worker topology.
 
-Do not ask the user for:
-
-- a book slug — derive one;
-- output directory — use the repository convention;
-- source format — detect it;
-- title/author — read them when available;
-- source language — detect it when reliable;
-- chapter filenames — derive stable names;
-- whether to create glossary/style-guide files — always create them;
-- whether to validate state — always validate;
-- which execution mode to use — detect capabilities and choose it;
-- whether to create Translator/Reviewer workers — follow the orchestration contract;
-- which chapter to resume when exactly one incomplete book is active — use `progress.json`.
-
-### Ask when guessing would change the task
-
-Ask for the target language if it is genuinely absent.
-
-Ask for the source book if it is not accessible.
-
-If several incomplete book workspaces exist and the conversation does not identify which one to resume, ask only which book to use. Do not select one arbitrarily.
-
-Ask about other ambiguous user intent only when proceeding would risk translating the wrong material, overwriting existing work, or producing the wrong deliverable.
+If several incomplete books exist and user intent does not identify one, ask only which book to resume. Do not choose arbitrarily.
 
 ## Book initialization
 
@@ -173,28 +172,20 @@ When Python is available and the format is supported by the helper, prefer:
 python scripts/book.py extract /path/to/source.epub --target-language ru
 ```
 
-Optional flags:
-
-```text
---slug
---title
---author
---source-language
-```
-
-Do not request optional values from the user when they can be derived.
+Use the equivalent path under `.book-translator/` for a namespaced installation.
 
 After extraction:
 
 1. verify the immutable source copy exists;
 2. inspect chapter order and boundaries;
 3. run structural validation;
-4. populate an initial evidence-based `style-guide.md` from the source;
-5. populate glossary entries only when recurring decisions exist;
-6. load `docs/ORCHESTRATION.md`;
-7. begin the sequential chapter workflow.
+4. populate an initial evidence-based `style-guide.md`;
+5. add glossary entries only when recurring decisions exist;
+6. verify `metadata.json.workflow` records the workflow repository, requested ref, and resolved_revision used to initialize that book;
+7. load `docs/ORCHESTRATION.md`;
+8. begin the sequential chapter workflow.
 
-If the helper cannot be run, reproduce the same repository state directly according to `AGENTS.md` and `docs/TRANSLATION_GUIDE.md`.
+If the helper cannot be run, reproduce the same repository state directly according to `AGENTS.md` and `docs/TRANSLATION_GUIDE.md`, including per-book workflow provenance.
 
 ## Supported format behavior
 
@@ -208,22 +199,20 @@ Use explicit document structure. When chapter boundaries are ambiguous, preserve
 
 ### DOCX / PDF
 
-The repository structure still applies, but the included helper does not claim automatic extraction.
-
-If the active agent can reliably read the file, it may initialize the workspace itself. Otherwise state the specific extraction limitation and request only the minimal manual conversion/extraction step.
+The repository structure still applies, but the included helper does not claim automatic extraction. If the active agent cannot reliably read the file, request only the minimum conversion/extraction step required.
 
 ## Translation loop
 
-Use the orchestration protocol instead of carrying the whole book in one growing agent context.
+Follow `docs/ORCHESTRATION.md` rather than carrying the whole book in one growing context.
 
 Default sequence:
 
 1. orchestrator selects the next unreviewed chapter;
-2. fresh Translator worker (or bounded Translator role) receives the current source plus required canonical context;
-3. translation artifact is created and checked for existence/completeness;
-4. fresh independent Reviewer worker (or bounded Reviewer role) compares source and translation;
+2. Translator worker/role receives bounded canonical context;
+3. translation artifact is created and checked;
+4. independent Reviewer worker/role compares source and translation;
 5. corrections are applied;
-6. orchestrator accepts any glossary/style proposals;
+6. orchestrator accepts global glossary/style decisions;
 7. orchestrator updates `progress.json` and global state;
 8. structural validation runs;
 9. only then proceed to the next chapter.
@@ -234,28 +223,17 @@ Do not translate multiple chapters concurrently by default.
 
 Repository state is more authoritative than chat history.
 
-First determine the active book deterministically:
+First identify the installation root and active book deterministically. Then:
 
-1. if the user names/selects a book, use it;
-2. otherwise enumerate valid book workspaces;
-3. if exactly one incomplete book exists, use it;
-4. if multiple incomplete books exist, ask which one to resume;
-5. never choose arbitrarily.
+1. read `agent-manifest.json.contract_read_order` for the workflow revision associated with that book;
+2. read `<install_root>/.book-translator-install.json` when present;
+3. read the book's `metadata.json.workflow`;
+4. treat the book-level `workflow.resolved_revision` as the provenance of that book;
+5. if the installed workflow revision differs, do **not** silently upgrade the book — load the recorded book revision for its contract, or perform an explicit documented upgrade before continuing;
+6. read `progress.json`, `glossary.md`, `style-guide.md`, and only bounded continuity context;
+7. continue from the first chapter that is not `reviewed`, unless the user explicitly requests another scope.
 
-Then read:
-
-1. `.book-translator-install.json` when present;
-2. `AGENTS.md`;
-3. `docs/ORCHESTRATION.md`;
-4. the book's `metadata.json`;
-5. `progress.json`;
-6. `glossary.md`;
-7. `style-guide.md`;
-8. only the bounded existing translation/source context needed for continuity.
-
-Continue from the first chapter that is not `reviewed`, unless the user explicitly requests another chapter or a quality re-review.
-
-Do not retranslate reviewed chapters without a concrete reason.
+This allows different books in one workspace to retain the workflow revision under which each was initialized.
 
 ## Validation
 
@@ -265,9 +243,7 @@ When Python is available:
 python scripts/book.py validate <book-slug>
 ```
 
-The agent must still inspect literary quality itself. Structural validation cannot prove translation fidelity.
-
-If validation fails, do not start the next chapter until state is repaired and validation passes.
+Structural validation cannot prove literary fidelity. If validation fails, repair state before starting the next chapter.
 
 ## Building output
 
@@ -282,7 +258,7 @@ Only claim EPUB, DOCX, or PDF delivery if the active environment actually create
 ## Privacy and repository hygiene
 
 - Never modify the source file stored under `source/`.
-- Never publish a user's copyrighted book merely because the workflow repository is public.
+- Never publish a user's copyrighted book merely because the workflow repository is public or later becomes public.
 - Never copy private/example books from the canonical template into a new installation.
 - Never commit secrets or API keys.
 - The default workflow needs no LLM API key.
@@ -291,11 +267,10 @@ Only claim EPUB, DOCX, or PDF delivery if the active environment actually create
 
 Setup is complete when:
 
-- the workflow files are available in a writable workspace, or the exact read-only limitation is stated;
-- the selected workflow ref/revision is resolved as specifically as the environment permits;
-- the resolved revision is recorded when possible;
-- `AGENTS.md` is loaded as the authoritative literary/state instruction;
-- the execution mode is selected from actual capabilities;
-- the source book is accessible or explicitly identified as the only missing input;
-- the target language is known or explicitly identified as the only missing semantic input;
-- the agent can state the next executable step without requiring the user to understand repository internals or orchestration.
+- one coherent workflow revision has been selected;
+- the files in `contract_read_order` come from that revision;
+- a writable `install_root` is selected without overwriting unrelated host files, or the exact read-only limitation is stated;
+- installation provenance is recorded as specifically as the environment permits;
+- execution mode is selected from actual capabilities;
+- the source book and target language are available or are the only explicitly identified missing required inputs;
+- the next executable step is known without requiring the user to understand repository internals.
