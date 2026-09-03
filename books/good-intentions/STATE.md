@@ -7,16 +7,16 @@ Workflow revision used for the current audit: `70afef29caf31f1fe58501ddd61a75f15
 ## Translation state
 
 - Book units in `progress.json`: 205.
-- Translation files physically persisted: `translated/001-...` through `translated/015-...`.
+- Translation files physically persisted: `translated/001-...` through `translated/016-...`.
 - A fresh full-quality audit was requested on 2026-09-03. See `REVIEW_AUDIT.md`.
-- Units 1–14 were freshly source-compared during the audit; all blocking fidelity defects found in that range were corrected and the literary outcome is PASS.
+- Units 1–16 have now been source-compared at literary-review level; all blocking fidelity defects found in that range were corrected and the current literary outcome is PASS.
 - Units 9–11 / Chapters 7–9 were freshly re-reviewed after restoration of their exact canonical extracted source artifacts. Relationship-intensity inflation and several local fidelity defects were corrected; historical PASS flags were not used as substitute evidence.
 - Unit 12 / Chapter 10 had already been corrected and source-rechecked during the audit and is accepted at literary-review level.
 - Unit 13 / Chapter 11 had an existing translation artifact while `progress.json` still said `extracted`; it was freshly compared to source and accepted without blocking corrections.
 - Unit 14 / Chapter 12 was newly translated in the continuation pass, independently re-reviewed against source, corrected for several overly free renderings, and accepted at literary-review level.
-- `progress.json` is reconciled through unit 14: units 1–14 are `reviewed`.
-- Unit 15 / Chapter 13 has now been newly translated and independently source-compared. Review corrections removed accidental over-intensification around `fucking in love`, clarified the `just a game` realization, and preserved the explicit contrast between earlier `fancy` and Harry's recognition that Draco is actually in love with him. Literary outcome: PASS.
-- Unit 15 is still `extracted` in `progress.json` pending the next mechanical state reconciliation; the translation artifact and this checkpoint are the durable evidence for the completed literary work.
+- Unit 15 / Chapter 13 was translated, independently source-compared, and corrected where `implications` had been rendered as literal consequences rather than the significance of what had happened. The deliberate contrast between earlier `fancy` and Harry's recognition that Draco is actually in love with him remains intact.
+- Unit 16 / Chapter 14 was translated and independently source-compared. The chapter preserves Harry's first explicit `I like Draco` realization without promoting it to love, while Draco's established `in love` remains explicit; Harry still frames the first kiss as possible experimentation, matching the source and end note.
+- `progress.json` is reconciled through unit 16: units 1–16 are `reviewed`; unit 17 / Chapter 15 is the first non-reviewed unit.
 - The complete canonical extracted corpus remains present: 205/205 Markdown source units in reading order.
 - The restored corpus aggregate manifest SHA-256 is `e74948d3f6e458a2de7b2a86f55588f2e733890ab354d788c3d1ed6b7a223393`, matching the canonical recovery checkpoint derived from the verified original source.
 - Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`. The style guide explicitly preserves the semantic intensity ladder between `interested / like / fancy / crush / fall for / love`.
@@ -54,10 +54,12 @@ Fresh source review of Chapters 7–9 removed recurring semantic inflation such 
 
 Fresh review of Chapter 12 corrected several first-draft freedoms, including `withdrawn`, repeated `want him / want me` phrasing, and Draco's final boundary that he will not offer himself merely as a way for Harry to get off.
 
-Fresh review of Chapter 13 preserved the deliberate escalation from `fancy` to explicit `in love`: profanity around `fucking in love` is not treated as an additional emotional-intensity tier.
+Fresh review of Chapter 13 preserved the deliberate escalation from `fancy` to explicit `in love` and corrected the opening `implications` wording so the Russian describes the meaning/significance of the event rather than external consequences.
+
+Fresh review of Chapter 14 preserved the key asymmetry at the first kiss: Harry admits that Draco `нравится` ему and is still trying to understand his sexuality, while Draco is already explicitly `влюблён`.
 
 ## Resume point
 
-1. Reconcile unit 15 in `progress.json` from `extracted` to `reviewed` when performing the next mechanical state write; do not retranslate it.
-2. Continue sequential literary work from unit 16 / Chapter 14 (`extracted/016-chapter-14-chapter-14.md`).
+1. Treat units 1–16 as the accepted translated/audited range; `progress.json` matches that state.
+2. Continue sequential literary work from unit 17 / Chapter 15 (`extracted/017-chapter-15-chapter-15.md`).
 3. Keep the relationship-intensity ladder, consent/boundary cues, POV attribution, source emphasis, and explicit register as mandatory review checks.
