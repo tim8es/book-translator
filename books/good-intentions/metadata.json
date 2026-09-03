@@ -7,5 +7,10 @@
   "source_format": "epub",
   "source_file": "Good_Intentions.epub",
   "chapter_count": 205,
-  "imported_at": "2026-09-03T14:47:32+00:00"
+  "imported_at": "2026-09-03T14:47:32+00:00",
+  "workflow": {
+    "repository": "https://github.com/tim8es/book-translator",
+    "requested_ref": "refactor/role-routed-agent-contract",
+    "resolved_revision": "70afef29caf31f1fe58501ddd61a75f153366ae0"
+  }
 }
