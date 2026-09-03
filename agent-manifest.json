@@ -1,13 +1,20 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "book-translator",
   "repository": "https://github.com/tim8es/book-translator",
   "purpose": "Agent-native, resumable literary book translation with source-comparison review.",
+  "primary_clients": ["ChatGPT Web", "Codex"],
+  "agent_agnostic": true,
+  "skill_entrypoint": "SKILL.md",
   "entrypoint": "AGENTS.md",
   "setup_guide": "docs/AGENT_SETUP.md",
+  "orchestration_guide": "docs/ORCHESTRATION.md",
   "version_policy": {
     "default_ref": "main",
-    "rule": "Use the latest main when the user does not explicitly pin a tag, commit, or branch."
+    "rule": "Use the latest main when the user does not explicitly pin a tag, commit, or branch; resolve that ref once at setup and keep the resolved revision stable for the active book run.",
+    "record_resolved_revision": true,
+    "resolved_revision_file": ".book-translator-install.json",
+    "silent_mid_run_upgrade": false
   },
   "required_user_inputs": [
     "source_book",
@@ -28,9 +35,20 @@
   "bootstrap": {
     "preferred_method": "git_clone",
     "clone_url": "https://github.com/tim8es/book-translator.git",
-    "post_clone_entrypoint": "AGENTS.md",
+    "post_clone_entrypoint": "SKILL.md",
     "mandatory_external_dependencies": [],
     "optional_runtime": "Python 3 standard library"
+  },
+  "execution": {
+    "preferred_mode": "isolated_workers",
+    "fallback_mode": "single_agent_bounded_context",
+    "chapter_policy": "sequential",
+    "fresh_translator_per_chapter": true,
+    "fresh_reviewer_per_chapter": true,
+    "reviewer_independent_from_translator": true,
+    "global_state_writer": "orchestrator",
+    "parallel_chapter_translation_by_default": false,
+    "worker_context_policy": "bounded"
   },
   "source_formats": {
     "automatic_helper": ["epub", "html", "xhtml", "markdown", "txt"],
@@ -45,11 +63,13 @@
     "resume_from_repository_state": true,
     "do_not_require_chat_history": true,
     "do_not_copy_canonical_book_contents": true,
-    "do_not_claim_unavailable_capabilities": true
+    "do_not_claim_unavailable_capabilities": true,
+    "do_not_require_user_to_manage_orchestration": true
   },
   "capability_fallbacks": {
-    "filesystem_and_git": "Clone latest main and work locally/in the user's repository.",
-    "repository_api_without_shell": "Read canonical instructions and create/update equivalent workspace files through the available repository API.",
+    "filesystem_and_git": "Clone the resolved repository revision and work locally/in the user's repository.",
+    "repository_api_without_shell": "Read the canonical files through the available repository API, preserve the resolved revision, and create/update equivalent workflow files in the writable target workspace.",
+    "isolated_workers_unavailable": "Execute Translator and Reviewer as separate bounded-context roles in one agent session while preserving independent review and orchestrator-owned state transitions.",
     "read_only": "Read the instructions, state exactly what cannot be performed, and give the minimum manual step needed. Do not claim setup or file writes occurred."
   }
 }
