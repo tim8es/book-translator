@@ -28,6 +28,8 @@ If you provide only the repository URL first, the agent should inspect [`agent-m
 
 You do **not** need to explain the repository structure, request subagents manually, copy prompts, install an LLM SDK, create a database, or configure an API key for the default agent-driven workflow.
 
+> Experimental branch note: when testing a non-`main` version, give the agent the branch URL or explicitly pin that branch. A bare repository URL intentionally resolves the default/latest `main` contract.
+
 ## Clients and compatibility
 
 ### ChatGPT Web
