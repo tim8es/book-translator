@@ -7,5 +7,10 @@
   "source_format": "unknown",
   "source_file": "",
   "chapter_count": 0,
-  "imported_at": null
+  "imported_at": null,
+  "workflow": {
+    "repository": "https://github.com/tim8es/book-translator",
+    "requested_ref": null,
+    "resolved_revision": null
+  }
 }
