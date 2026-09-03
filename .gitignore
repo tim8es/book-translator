@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test/tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary/editor files
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment files
+.env
+.env.*
+!.env.example

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "name": "book-translator",
+  "repository": "https://github.com/tim8es/book-translator",
+  "purpose": "Agent-native, resumable literary book translation with source-comparison review.",
+  "entrypoint": "AGENTS.md",
+  "setup_guide": "docs/AGENT_SETUP.md",
+  "version_policy": {
+    "default_ref": "main",
+    "rule": "Use the latest main when the user does not explicitly pin a tag, commit, or branch."
+  },
+  "required_user_inputs": [
+    "source_book",
+    "target_language"
+  ],
+  "optional_user_inputs": [
+    "source_language",
+    "title",
+    "author",
+    "output_format"
+  ],
+  "defaults": {
+    "output_format": "markdown",
+    "book_root": "books",
+    "progress_file": "progress.json",
+    "translation_rules": "AGENTS.md"
+  },
+  "bootstrap": {
+    "preferred_method": "git_clone",
+    "clone_url": "https://github.com/tim8es/book-translator.git",
+    "post_clone_entrypoint": "AGENTS.md",
+    "mandatory_external_dependencies": [],
+    "optional_runtime": "Python 3 standard library"
+  },
+  "source_formats": {
+    "automatic_helper": ["epub", "html", "xhtml", "markdown", "txt"],
+    "agent_dependent": ["docx", "pdf"]
+  },
+  "chapter_states": ["pending", "extracted", "translated", "reviewed"],
+  "completion_requirement": "Every intended chapter is reviewed under AGENTS.md and repository state validates.",
+  "agent_behavior": {
+    "ask_only_for_missing_required_inputs": true,
+    "automate_safe_defaults": true,
+    "preserve_source_immutable": true,
+    "resume_from_repository_state": true,
+    "do_not_require_chat_history": true,
+    "do_not_copy_canonical_book_contents": true,
+    "do_not_claim_unavailable_capabilities": true
+  },
+  "capability_fallbacks": {
+    "filesystem_and_git": "Clone latest main and work locally/in the user's repository.",
+    "repository_api_without_shell": "Read canonical instructions and create/update equivalent workspace files through the available repository API.",
+    "read_only": "Read the instructions, state exactly what cannot be performed, and give the minimum manual step needed. Do not claim setup or file writes occurred."
+  }
+}
