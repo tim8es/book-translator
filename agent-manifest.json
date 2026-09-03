@@ -5,6 +5,13 @@
   "purpose": "Agent-native, resumable literary book translation with source-comparison review.",
   "primary_clients": ["ChatGPT Web", "Codex"],
   "agent_agnostic": true,
+  "contract_read_order": [
+    "agent-manifest.json",
+    "SKILL.md",
+    "AGENTS.md",
+    "docs/AGENT_SETUP.md",
+    "docs/ORCHESTRATION.md"
+  ],
   "skill_entrypoint": "SKILL.md",
   "entrypoint": "AGENTS.md",
   "setup_guide": "docs/AGENT_SETUP.md",
@@ -14,6 +21,7 @@
     "rule": "Use the latest main when the user does not explicitly pin a tag, commit, or branch; resolve that ref once at setup and keep the resolved revision stable for the active book run.",
     "record_resolved_revision": true,
     "resolved_revision_file": ".book-translator-install.json",
+    "per_book_provenance": "metadata.json.workflow",
     "silent_mid_run_upgrade": false
   },
   "required_user_inputs": [
@@ -37,7 +45,10 @@
     "clone_url": "https://github.com/tim8es/book-translator.git",
     "post_clone_entrypoint": "SKILL.md",
     "mandatory_external_dependencies": [],
-    "optional_runtime": "Python 3 standard library"
+    "optional_runtime": "Python 3 standard library",
+    "canonical_install_root": ".",
+    "collision_install_root": ".book-translator",
+    "collision_rule": "Never overwrite a pre-existing unrelated file. If a runtime-path collision exists in a host repository, install the entire runtime set under .book-translator instead of mixing canonical and host files."
   },
   "execution": {
     "preferred_mode": "isolated_workers",
@@ -64,11 +75,12 @@
     "do_not_require_chat_history": true,
     "do_not_copy_canonical_book_contents": true,
     "do_not_claim_unavailable_capabilities": true,
-    "do_not_require_user_to_manage_orchestration": true
+    "do_not_require_user_to_manage_orchestration": true,
+    "do_not_overwrite_unrelated_host_files": true
   },
   "capability_fallbacks": {
-    "filesystem_and_git": "Clone the resolved repository revision and work locally/in the user's repository.",
-    "repository_api_without_shell": "Read the canonical files through the available repository API, preserve the resolved revision, and create/update equivalent workflow files in the writable target workspace.",
+    "filesystem_and_git": "Clone the requested repository ref, resolve it to a concrete revision, check out that resolved revision, and work from that stable revision.",
+    "repository_api_without_shell": "Read the canonical files from the resolved revision through the available repository API and create/update equivalent workflow files in the writable target workspace without overwriting unrelated host files.",
     "isolated_workers_unavailable": "Execute Translator and Reviewer as separate bounded-context roles in one agent session while preserving independent review and orchestrator-owned state transitions.",
     "read_only": "Read the instructions, state exactly what cannot be performed, and give the minimum manual step needed. Do not claim setup or file writes occurred."
   }
