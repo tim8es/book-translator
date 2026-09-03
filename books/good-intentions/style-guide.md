@@ -56,6 +56,7 @@
 - Slurs or crude self-descriptions are not to be sanitized; preserve their derogatory force when character/context requires it.
 - Do not explain canon references or sexual terminology that the source leaves unexplained.
 - Keep explicit emphasis around individual words/phrases where it changes rhythm or meaning.
+- Preserve the relationship-intensity ladder instead of collapsing it: `be interested`, `like`, `fancy`, `crush`, `fall for`, and `love` are not automatically interchangeable. In particular, do not promote `interested / like / fancy / crush` to Russian `любить / влюблён` unless the source or immediate context actually carries that stronger meaning. Prefer context-appropriate forms such as `нравиться`, `интересоваться`, `запасть`, `сохнуть`, `испытывать влечение/симпатию`. Harry's gradual realization of Draco's feelings and of his own attraction must not be accelerated by stronger Russian wording.
 
 ## Ambiguities to preserve
 
@@ -66,4 +67,4 @@
 ## Review notes
 
 - Extraction was re-run from EPUB spine with inline emphasis and scene separators preserved because the baseline helper drops `<em>` formatting.
-- During review, pay special attention to italic boundaries, POV switches after `---`, profanity intensity, speaker attribution, and explicit-scene anatomy/actions.
+- During review, pay special attention to italic boundaries, POV switches after `---`, profanity intensity, speaker attribution, explicit-scene anatomy/actions, and upgrades/downgrades in relationship-intensity terms (`interested / like / fancy / crush / love`).
