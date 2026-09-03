@@ -594,7 +594,15 @@ def build_command(args: argparse.Namespace) -> int:
         if not translation.is_file() or not translation.read_text(encoding="utf-8").strip():
             incomplete.append(chapter["number"])
             continue
-        parts.append(translation.read_text(encoding="utf-8").rstrip())
+        text = translation.read_text(encoding="utf-8").rstrip()
+        text = re.sub(
+            r"\A(#{1,6})\s+(?:Chapter|Глава)\s+\d+(?:\.\d+)?\s*:\s+([^\n]+)",
+            r"\1 \2",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        parts.append(text)
 
     if incomplete:
         requirement = "translated/reviewed" if args.allow_unreviewed else "reviewed"
