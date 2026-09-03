@@ -1,0 +1,101 @@
+name: Restore Good Intentions state
+
+on:
+  push:
+    branches:
+      - work/good-intentions-ru-20260903
+    paths:
+      - .github/workflows/restore-good-intentions-state.yml
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out translation branch
+        uses: actions/checkout@v4
+        with:
+          ref: work/good-intentions-ru-20260903
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install extractor dependencies
+        run: python -m pip install beautifulsoup4 lxml
+
+      - name: Download exact source EPUB
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p books/good-intentions/source
+          EXPECTED=d8cae0a0dc208fd48740a59baaae960076ea4990b11d2135eb029540695f2837
+          URLS=(
+            "https://archiveofourown.org/downloads/43271334/Good%20Intentions.epub"
+            "https://archiveofourown.org/downloads/43271334/Good_Intentions.epub"
+          )
+          ok=0
+          for url in "${URLS[@]}"; do
+            if curl -L --fail --retry 3 -A "Mozilla/5.0" "$url" -o /tmp/Good_Intentions.epub; then
+              got="$(sha256sum /tmp/Good_Intentions.epub | awk '{print $1}')"
+              if [ "$got" = "$EXPECTED" ]; then
+                ok=1
+                break
+              fi
+              echo "Hash mismatch from $url: $got"
+            fi
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Could not retrieve the exact source EPUB" >&2
+            exit 1
+          fi
+          cp /tmp/Good_Intentions.epub books/good-intentions/source/Good_Intentions.epub
+
+      - name: Rebuild exact extracted state
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf books/good-intentions/extracted
+          mkdir -p books/good-intentions/extracted
+          python scripts/restore_good_intentions_state.py
+          cat .sync/good-intentions/patch.part-* | base64 -d | gzip -d > /tmp/extract.patch
+          (cd books/good-intentions/extracted && patch -p1 < /tmp/extract.patch)
+
+      - name: Verify source and extracted hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum books/good-intentions/source/Good_Intentions.epub | awk '{print $1}')" = "d8cae0a0dc208fd48740a59baaae960076ea4990b11d2135eb029540695f2837"
+          test "$(find books/good-intentions/extracted -maxdepth 1 -type f -name '*.md' | wc -l)" -eq 205
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root = Path('books/good-intentions/extracted')
+          h = hashlib.sha256()
+          for p in sorted(root.glob('*.md')):
+              digest = hashlib.sha256(p.read_bytes()).hexdigest()
+              h.update(f'{digest}  {p.name}\n'.encode())
+          got = h.hexdigest()
+          expected = 'e74948d3f6e458a2de7b2a86f55588f2e733890ab354d788c3d1ed6b7a223393'
+          print('extracted manifest hash:', got)
+          if got != expected:
+              raise SystemExit(f'extracted hash mismatch: {got}')
+          PY
+
+      - name: Validate repository state
+        run: python scripts/book.py validate good-intentions
+
+      - name: Commit materialized state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f books/good-intentions/source/Good_Intentions.epub books/good-intentions/extracted
+          git rm -r .sync/good-intentions scripts/restore_good_intentions_state.py .github/workflows/restore-good-intentions-state.yml
+          git commit -m "translate: materialize Good Intentions source state"
+          git push origin HEAD:work/good-intentions-ru-20260903
