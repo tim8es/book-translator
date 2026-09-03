@@ -6,15 +6,20 @@ Workflow revision used for the current audit: `70afef29caf31f1fe58501ddd61a75f15
 
 ## Translation state
 
-- Book units in `progress.json`: 205
+- Book units in `progress.json`: 205.
 - Translation files persisted: `translated/001-...` through `translated/012-...`.
 - A fresh full-quality audit was requested on 2026-09-03. See `REVIEW_AUDIT.md`.
-- Units 1–8 and unit 12 were freshly compared with their exact extracted source artifacts. Fidelity corrections were applied where required; unit 5 / Chapter 3 required no blocking semantic correction.
-- Units 9–11 / Chapters 7–9 **cannot currently receive a fresh reviewer PASS** because their declared extracted source files are absent from this branch.
-- `progress.json` still contains historical `reviewed` values for units 9–11. Those values must not be treated as fresh reproducible review evidence until the exact source is restored and those chapters are re-compared.
-- Unit 12 / Chapter 10 has been corrected and re-checked against its source at literary-review level, but it remains `translated` in `progress.json`; durable state promotion should wait until repository structural/source availability is reconciled.
+- Units 1–8 and unit 12 were freshly compared with source artifacts during that audit; fidelity corrections were applied where required.
+- Units 9–11 / Chapters 7–9 were initially blocked because their extracted source artifacts were absent from the branch.
+- On 2026-09-03 the exact original `Good_Intentions.epub` was supplied again. Its size and SHA-256 matched the recorded source identity exactly.
+- The missing source artifacts were regenerated from that verified EPUB with the repository's deterministic extraction logic and restored to:
+  - `extracted/009-chapter-7-chapter-7.md`
+  - `extracted/010-chapter-8-chapter-8.md`
+  - `extracted/011-chapter-9-chapter-9.md`
+- Those three units are now source-reviewable again. Their historical `reviewed` flags must still not substitute for the requested fresh audit; re-compare them before treating the current audit as complete.
+- Unit 12 / Chapter 10 has already been corrected and re-checked at literary-review level, but remains `translated` in `progress.json` pending state reconciliation.
 - Next untranslated source unit after the current translated range is unit 13 / Chapter 11.
-- Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`. The style guide now explicitly preserves the semantic intensity ladder between `interested / like / fancy / crush / fall for / love`.
+- Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`. The style guide explicitly preserves the semantic intensity ladder between `interested / like / fancy / crush / fall for / love`.
 
 ## Source identity
 
@@ -24,7 +29,7 @@ Original user-supplied EPUB:
 - size: 1,211,070 bytes
 - SHA-256: `d8cae0a0dc208fd48740a59baaae960076ea4990b11d2135eb029540695f2837`
 
-The source EPUB binary is intentionally not substituted with a later AO3-generated archive: a later download was observed with a different SHA-256. The translation checkpoint therefore records the exact source identity instead of silently replacing it.
+The EPUB supplied again on 2026-09-03 matched both the recorded size and SHA-256 exactly. It was used only to restore required source artifacts; the binary EPUB itself is not published into the repository.
 
 ## Exact extracted-state recovery
 
@@ -33,7 +38,7 @@ The source EPUB binary is intentionally not substituted with a later AO3-generat
 - `scripts/restore_good_intentions_state.py` — deterministic EPUB-to-Markdown extractor preserving source emphasis/structure used by this translation;
 - `.sync/good-intentions/patch.part-*` — compact correction patch for the extractor output.
 
-Recovery after placing the exact source EPUB at `books/good-intentions/source/Good_Intentions.epub`:
+Full recovery after placing the exact source EPUB at `books/good-intentions/source/Good_Intentions.epub`:
 
 ```bash
 python -m pip install beautifulsoup4 lxml
@@ -45,16 +50,13 @@ cat .sync/good-intentions/patch.part-* | base64 -d | gzip -d > /tmp/good-intenti
 python scripts/book.py validate good-intentions
 ```
 
-Expected extracted corpus:
+Expected full extracted corpus:
 
 - files: 205 Markdown files
 - aggregate manifest SHA-256: `e74948d3f6e458a2de7b2a86f55588f2e733890ab354d788c3d1ed6b7a223393`
 
-The aggregate hash is computed by sorting `extracted/*.md`, hashing each file with SHA-256, formatting each as `<sha256>  <filename>\n`, concatenating those records, and SHA-256 hashing the result.
-
 ## Resume point
 
-1. Restore the exact EPUB matching the recorded SHA-256 and reconstruct the full extracted corpus.
-2. Freshly compare units 9–11 / Chapters 7–9 against their restored source artifacts, paying special attention to relationship-intensity inflation (`like/fancy/crush` versus `влюблён/любить`).
-3. Reconcile `progress.json` only after source availability and structural validation are restored; do not trust historical reviewed flags for units 9–11 as evidence of the current audit.
-4. After the audited translated range is structurally consistent, continue with unit 13 / Chapter 11.
+1. Freshly compare restored units 9–11 / Chapters 7–9 against their source artifacts, with special attention to relationship-intensity inflation (`like/fancy/crush` versus `влюблён/любить`).
+2. Reconcile `progress.json` only after the fresh review is complete; historical reviewed flags for units 9–11 are not evidence for the current audit.
+3. Once the audited translated range is consistent, continue with unit 13 / Chapter 11.
