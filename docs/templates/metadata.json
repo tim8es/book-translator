@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "title": "Book title",
+  "author": null,
+  "source_language": "unknown",
+  "target_language": "ru",
+  "source_format": "epub",
+  "source_file": "book.epub",
+  "chapter_count": 0,
+  "imported_at": "2026-09-03T00:00:00+00:00"
+}
