@@ -3,9 +3,9 @@
   "title": "Book title",
   "author": null,
   "source_language": "unknown",
-  "target_language": "ru",
-  "source_format": "epub",
-  "source_file": "book.epub",
+  "target_language": null,
+  "source_format": "unknown",
+  "source_file": "",
   "chapter_count": 0,
-  "imported_at": "2026-09-03T00:00:00+00:00"
+  "imported_at": null
 }
