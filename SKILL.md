@@ -1,6 +1,6 @@
 ---
 name: book-translator
-description: Translate and review full books with durable repository state, literary fidelity checks, resumable progress, and capability-aware orchestration. Designed primarily for ChatGPT Web and Codex, while remaining agent-agnostic for other capable AI agents.
+description: Translate and review full books with durable repository state, literary fidelity checks, resumable progress, and role-routed agent context. Designed primarily for ChatGPT Web and Codex while remaining agent-agnostic.
 ---
 
 # Book Translator
@@ -9,7 +9,7 @@ Use this skill when the user wants to translate, review, resume, or assemble a f
 
 Canonical repository: `https://github.com/tim8es/book-translator`
 
-This skill is a thin discovery/bootstrap layer. The repository remains the source of truth; do not maintain a second divergent copy of the implementation here.
+This file is a thin discovery/bootstrap entrypoint. It does not define literary, setup, orchestration, review, or state-transition rules; those live in the repository contracts selected through `agent-manifest.json`.
 
 ## Compatibility
 
@@ -18,13 +18,11 @@ Primary documented clients:
 - ChatGPT Web;
 - Codex.
 
-The workflow is agent-agnostic. Other capable AI agents may use it when they can read repository instructions and access the source book. Filesystem, Git, shell, repository API, file-writing, or isolated-worker capabilities increase automation but are not required to understand the workflow.
-
-Never promise a capability the active environment does not have.
+The workflow is agent-agnostic. Other capable AI agents may use it when they can read the repository contract and access the source book. Never claim a filesystem, Git, shell, repository, worker, file-writing, or artifact capability that the active environment does not actually provide.
 
 ## One-link interface
 
-The normal user-facing invocation stays intentionally small:
+The normal user-facing invocation is intentionally small:
 
 1. repository URL;
 2. source book;
@@ -36,90 +34,23 @@ Example:
 Use https://github.com/tim8es/book-translator to translate this book into Russian.
 ```
 
-Do not require the user to describe the orchestration, repository layout, chapter state machine, worker roles, Python helper, glossary, style guide, or review protocol.
+Before asking the user for anything, inspect the available conversation context, attachments, workspace, and source metadata. Ask only when a manifest-required semantic input is genuinely missing or ambiguity would risk operating on the wrong source or deliverable.
 
-If the source book or target language is genuinely missing, ask only for the missing required input after inspecting available conversation context, attachments, and workspace state.
+## Bootstrap
 
-## Bootstrap contract
+1. Preserve an explicitly pinned branch, tag, or commit; otherwise use the manifest default ref.
+2. Resolve that ref once to a concrete revision when the environment permits it.
+3. Read `agent-manifest.json` from that selected ref/revision.
+4. Select the `context_profiles` entry matching the current role.
+5. Load only the contract files named by that profile, all from the same workflow revision.
+6. Do not carry setup or orchestration contracts into `translator` or `reviewer` context unless the agent is explicitly transitioning roles.
 
-1. Read `agent-manifest.json`.
-2. Resolve the requested ref, or latest `main` when no ref is pinned.
-3. Resolve that ref to a concrete revision when the environment permits it.
-4. Record the resolved revision according to the manifest in a writable project.
-5. Read `AGENTS.md` and treat it as authoritative.
-6. Read `docs/AGENT_SETUP.md` only for environment/bootstrap details.
-7. Read `docs/ORCHESTRATION.md` before starting or resuming chapter work.
-8. Initialize or resume the book workspace.
-9. Execute until the requested scope is reviewed and validated.
+For a new or not-yet-installed workspace, begin with the `bootstrap` profile. After setup, transition to `orchestrator`. When a role is already explicit, select the matching profile directly.
 
-Do not silently switch workflow revision during an active book run. A later upgrade is a separate explicit state transition.
+Do not silently switch workflow revision during an active book run. A workflow upgrade is a separate explicit transition governed by the appropriate repository contract.
 
-## Execution mode
+## Repository authority
 
-Prefer `isolated_workers` when the environment can start independent worker sessions or subagents.
+`agent-manifest.json` is the routing entrypoint. The files referenced by the selected `context_profiles` entry are authoritative for that role.
 
-For each chapter, the orchestrator should use:
-
-1. a fresh Translator worker;
-2. a separate fresh Reviewer worker;
-3. orchestrator validation and global-state commit;
-4. then the next chapter.
-
-Use `single_agent_bounded_context` when isolated workers are unavailable. Preserve the same role boundaries and reload only the bounded inputs required for each stage rather than carrying the whole book conversation forward.
-
-Do not parallelize chapter translation by default. Literary continuity is more important than throughput. Advance sequentially after the previous chapter's review and global-state decisions are committed.
-
-## State ownership
-
-The orchestrator owns global mutable state.
-
-Workers may propose glossary/style decisions, warnings, and corrections, but must not independently race to update shared state such as `progress.json`, `glossary.md`, or `style-guide.md`.
-
-The orchestrator applies accepted changes after review.
-
-## Worker context
-
-Give a worker only the context required for its job:
-
-- authoritative repository rules;
-- book metadata;
-- current glossary and style guide;
-- current chapter source;
-- for Reviewer: the current translation;
-- bounded prior context required for continuity;
-- exact task and expected output.
-
-Do not load all previous chapter text merely because it exists.
-
-When a chapter directly continues the same scene and the previous chapter is necessary to understand it, include the necessary previous context. Otherwise prefer a small ending/context excerpt plus canonical glossary/style decisions.
-
-## Translator worker
-
-The Translator worker produces a complete chapter draft under the literary-fidelity rules in `AGENTS.md`.
-
-It does not mark the chapter `reviewed` and does not approve its own work.
-
-## Reviewer worker
-
-The Reviewer worker is independent of the Translator worker when isolated sessions are available.
-
-It receives the source and translation and checks for omissions, additions, semantic drift, lost ambiguity, incorrect speakers, tone changes, terminology drift, formatting loss, and other failures defined by `AGENTS.md`.
-
-Do not provide hidden reasoning from the Translator worker to the Reviewer. Review the artifact, not the Translator's justification.
-
-## Fallback behavior
-
-If the environment cannot create isolated workers:
-
-- execute Translator and Reviewer as separate bounded-context roles;
-- reload the required source/state for review;
-- do not treat the translation pass itself as review;
-- keep the orchestrator/state-management rules intact.
-
-If the environment is read-only, explain the exact unavailable operation and the smallest manual step needed. Do not claim that files, workers, commands, or artifacts were created when they were not.
-
-## Completion
-
-A chapter is complete only when its translation exists, the separate source-comparison review has occurred, accepted corrections are applied, and the orchestrator has persisted the resulting state.
-
-A book is complete only under the completion rules in `AGENTS.md`.
+Do not reconstruct missing rules from README text, chat history, an older revision, or another role's contract when the selected revision is available.

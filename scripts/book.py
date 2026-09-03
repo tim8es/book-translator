@@ -24,6 +24,7 @@ from xml.etree import ElementTree as ET
 
 SCHEMA_VERSION = 1
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
+CANONICAL_REPOSITORY = "https://github.com/tim8es/book-translator"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -349,6 +350,31 @@ def create_support_files(book_dir: Path) -> None:
     (book_dir / "style-guide.md").write_text(template_text("style-guide.md", style_fallback), encoding="utf-8")
 
 
+def workflow_provenance() -> dict[str, str | None]:
+    provenance = {
+        "repository": CANONICAL_REPOSITORY,
+        "requested_ref": None,
+        "resolved_revision": None,
+    }
+    install_path = repo_root() / ".book-translator-install.json"
+    if not install_path.is_file():
+        return provenance
+
+    try:
+        install = json.loads(install_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise BookError(f"Invalid .book-translator-install.json: {exc}") from exc
+
+    repository = install.get("canonical_repository")
+    if repository:
+        provenance["repository"] = str(repository)
+    requested_ref = install.get("requested_ref")
+    resolved_revision = install.get("resolved_revision")
+    provenance["requested_ref"] = str(requested_ref) if requested_ref is not None else None
+    provenance["resolved_revision"] = str(resolved_revision) if resolved_revision is not None else None
+    return provenance
+
+
 def extract_command(args: argparse.Namespace) -> int:
     source = Path(args.source).expanduser().resolve()
     if not source.is_file():
@@ -407,6 +433,7 @@ def extract_command(args: argparse.Namespace) -> int:
         "source_file": source.name,
         "chapter_count": len(chapter_records),
         "imported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "workflow": workflow_provenance(),
     }
     progress = {
         "schema_version": SCHEMA_VERSION,
@@ -459,6 +486,17 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
     source_file = metadata.get("source_file")
     if not source_file or not (book_dir / "source" / str(source_file)).is_file():
         errors.append(f"Source file declared in metadata.json does not exist: source/{source_file}")
+
+    workflow = metadata.get("workflow")
+    if workflow is None:
+        warnings.append("metadata.json has no workflow provenance; this may be a legacy book workspace")
+    elif not isinstance(workflow, dict):
+        errors.append("metadata.json workflow must be an object")
+    else:
+        if workflow.get("repository") != CANONICAL_REPOSITORY:
+            warnings.append(f"metadata workflow repository is {workflow.get('repository')!r}, expected {CANONICAL_REPOSITORY!r}")
+        if not workflow.get("resolved_revision"):
+            warnings.append("metadata workflow resolved_revision is unavailable; exact workflow reproducibility is not guaranteed")
 
     chapters = progress.get("chapters")
     if not isinstance(chapters, list):
