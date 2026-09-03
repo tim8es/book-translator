@@ -1,0 +1,28 @@
+name: Capture current AO3 EPUB
+
+on:
+  push:
+    branches:
+      - work/good-intentions-ru-20260903
+    paths:
+      - .github/workflows/capture-current-ao3.yml
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download current AO3 EPUB
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --connect-timeout 20 --max-time 180 -A "Mozilla/5.0" \
+            "https://archiveofourown.org/downloads/43271334/Good_Intentions.epub" \
+            -o Good_Intentions.current.epub
+          sha256sum Good_Intentions.current.epub
+          wc -c Good_Intentions.current.epub
+      - name: Upload current EPUB
+        uses: actions/upload-artifact@v4
+        with:
+          name: good-intentions-current-epub
+          path: Good_Intentions.current.epub
+          retention-days: 1
