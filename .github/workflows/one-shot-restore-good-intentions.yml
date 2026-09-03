@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   restore:
@@ -22,14 +23,20 @@ jobs:
       - name: Install extraction dependencies
         run: python -m pip install --disable-pip-version-check beautifulsoup4 lxml
 
-      - name: Fetch transport EPUB
+      - name: Download captured transport EPUB
+        uses: actions/download-artifact@v4
+        with:
+          name: good-intentions-current-epub
+          path: /tmp/good-intentions-current
+          github-token: ${{ github.token }}
+          run-id: 33776799289
+
+      - name: Verify transport EPUB
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p books/good-intentions/source
-          curl -L --fail --retry 3 --connect-timeout 20 --max-time 180 -A "Mozilla/5.0" \
-            "https://archiveofourown.org/downloads/43271334/Good_Intentions.epub" \
-            -o books/good-intentions/source/Good_Intentions.epub
+          cp /tmp/good-intentions-current/Good_Intentions.current.epub books/good-intentions/source/Good_Intentions.epub
           test "$(sha256sum books/good-intentions/source/Good_Intentions.epub | awk '{print $1}')" = \
             "29f7a0e45d519072e4ab29fde061d37d553fa3a15916a5914c3a0abc5d4fe1c1"
 
