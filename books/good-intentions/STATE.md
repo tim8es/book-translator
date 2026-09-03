@@ -7,16 +7,15 @@ Workflow revision used for the current audit: `70afef29caf31f1fe58501ddd61a75f15
 ## Translation state
 
 - Book units in `progress.json`: 205.
-- Translation files physically persisted: `translated/001-...` through `translated/013-...`.
-- `progress.json` still records unit 12 / Chapter 10 as `translated` and unit 13 / Chapter 11 as `extracted`; the existing unit-13 translation artifact therefore requires state/review reconciliation before it can be accepted as canonical reviewed work.
+- Translation files physically persisted: `translated/001-...` through `translated/014-...`.
 - A fresh full-quality audit was requested on 2026-09-03. See `REVIEW_AUDIT.md`.
-- Units 1–8 and unit 12 were freshly compared with source artifacts during that audit; fidelity corrections were applied where required.
-- Units 9–11 / Chapters 7–9 were initially blocked because their extracted source artifacts were absent from the branch.
-- On 2026-09-03 the exact original `Good_Intentions.epub` was supplied again. Its size and SHA-256 matched the recorded source identity exactly.
-- The complete canonical extracted corpus has now been restored: 205/205 Markdown source units are present in reading order.
+- Units 1–14 have now been freshly source-compared at literary-review level; all blocking fidelity defects found in that range were corrected and the current literary outcome is PASS.
+- Units 9–11 / Chapters 7–9 were freshly re-reviewed after restoration of their exact canonical extracted source artifacts. Relationship-intensity inflation and several local fidelity defects were corrected; the historical PASS flags are no longer being relied on as evidence.
+- Unit 12 / Chapter 10 had already been corrected and source-rechecked during the audit and is accepted at literary-review level.
+- Unit 13 / Chapter 11 had an existing translation artifact while `progress.json` still said `extracted`; it has now been freshly compared to source and accepted without blocking corrections.
+- Unit 14 / Chapter 12 was newly translated in the current continuation pass, independently re-reviewed against source, corrected for several overly free renderings, and accepted at literary-review level.
+- The complete canonical extracted corpus remains present: 205/205 Markdown source units in reading order.
 - The restored corpus aggregate manifest SHA-256 is `e74948d3f6e458a2de7b2a86f55588f2e733890ab354d788c3d1ed6b7a223393`, matching the canonical recovery checkpoint derived from the verified original source.
-- Units 9–11 are source-reviewable again. Their historical `reviewed` flags must still not substitute for the requested fresh audit; re-compare them before treating the current audit as complete.
-- Unit 12 / Chapter 10 has already been corrected and re-checked at literary-review level, but remains `translated` in `progress.json` pending state reconciliation.
 - Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`. The style guide explicitly preserves the semantic intensity ladder between `interested / like / fancy / crush / fall for / love`.
 
 ## Source identity
@@ -31,7 +30,7 @@ The EPUB supplied again on 2026-09-03 matched both the recorded size and SHA-256
 
 ## Extracted source corpus
 
-`progress.json` contains the canonical filenames/order for all 205 units. The working branch now contains all 205 corresponding files under `books/good-intentions/extracted/`.
+`progress.json` contains the canonical filenames/order for all 205 units. The working branch contains all 205 corresponding files under `books/good-intentions/extracted/`.
 
 Verified canonical corpus:
 
@@ -44,11 +43,16 @@ The repository also retains:
 - `scripts/restore_good_intentions_state.py` — deterministic EPUB-to-Markdown extractor preserving source emphasis/structure used by this translation;
 - `.sync/good-intentions/patch.part-*` — compact correction patch for the extractor output.
 
-The book remains pinned to workflow revision `70afef29caf31f1fe58501ddd61a75f153366ae0`. The newer source-corpus preflight contract was used to diagnose and verify this repair, but book workflow provenance has not been silently upgraded.
+The book remains pinned to workflow revision `70afef29caf31f1fe58501ddd61a75f153366ae0`. The newer source-corpus preflight contract was used to diagnose and verify the repair, but book workflow provenance has not been silently upgraded.
+
+## Current audit corrections
+
+Fresh source review of Chapters 7–9 removed recurring semantic inflation such as `like/fancy` being translated as settled `любить/влюблён`, restored a lost emphasis boundary, and corrected local meaning defects such as `Voldemort’s possession` and tentative `mates` wording.
+
+Fresh review of Chapter 12 corrected several first-draft freedoms, including `withdrawn`, repeated `want him / want me` phrasing, and Draco's final boundary that he will not offer himself merely as a way for Harry to get off.
 
 ## Resume point
 
-1. Freshly compare units 9–11 / Chapters 7–9 against their restored source artifacts, with special attention to relationship-intensity inflation (`like/fancy/crush` versus `влюблён/любить`).
-2. Reconcile `progress.json` only after the fresh review is complete; historical reviewed flags for units 9–11 are not evidence for the current audit.
-3. Reconcile the existing unit-13 / Chapter-11 translation artifact with its current `extracted` state before accepting or continuing it.
-4. Once the audited translated range is consistent, continue sequential literary work from the first genuinely non-reviewed unit.
+1. Treat units 1–14 as the accepted translated/audited range once the mechanical `progress.json` reconciliation is committed.
+2. Continue sequential literary work from unit 15 / Chapter 13 (`extracted/015-chapter-13-chapter-13.md`).
+3. Keep the relationship-intensity ladder, consent/boundary cues, POV attribution, source emphasis, and explicit register as mandatory review checks.
