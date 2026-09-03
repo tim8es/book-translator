@@ -159,11 +159,9 @@ class AgentContractTests(unittest.TestCase):
             "permanent branch per book",
             "optional",
             "do not claim",
+            "do not use a fixed chapter-count threshold",
         ):
             self.assertIn(phrase, setup)
-
-        self.assertNotIn("10 chapters", setup)
-        self.assertNotIn("ten chapters", setup)
 
     def test_orchestration_contract_preserves_execution_guarantees(self):
         text = (PROJECT_ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
