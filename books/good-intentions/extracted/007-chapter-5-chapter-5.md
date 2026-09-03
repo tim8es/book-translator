@@ -160,6 +160,6 @@ My mouth popped open. “I-I…! That wasn’t-"
 
 He snorted, and I silently*begged* him to step back so I could breathe properly.
 
-“You’re the one who called me *cute.*” My teeth snapped shut as I watched a grimace contort his features. “*Cute?*”
+“You’re the one who called me *cute.*” My teeth snapped shut as I watched a grimace contort his features. “*Cute?”*
 
 He seemed so unsettled by the word that what was likely a hysterical giggle burst from my lips.
