@@ -2,15 +2,19 @@
 
 Branch: `work/good-intentions-ru-20260903`
 Base revision: `e55921b4f475f7743eb9dccdd610a29795143890` (`agent-compatibility-and-skill`)
+Workflow revision used for the current audit: `70afef29caf31f1fe58501ddd61a75f153366ae0`
 
 ## Translation state
 
 - Book units in `progress.json`: 205
-- Reviewed units: 1–11 (Preface, front matter, Chapters 1–9)
-- Translated but not yet reviewed: unit 12 (Chapter 10)
-- Next source unit already persisted: unit 13 (Chapter 11)
-- Translation files persisted: `translated/001-...` through `translated/012-...`
-- Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`.
+- Translation files persisted: `translated/001-...` through `translated/012-...`.
+- A fresh full-quality audit was requested on 2026-09-03. See `REVIEW_AUDIT.md`.
+- Units 1–8 and unit 12 were freshly compared with their exact extracted source artifacts. Fidelity corrections were applied where required; unit 5 / Chapter 3 required no blocking semantic correction.
+- Units 9–11 / Chapters 7–9 **cannot currently receive a fresh reviewer PASS** because their declared extracted source files are absent from this branch.
+- `progress.json` still contains historical `reviewed` values for units 9–11. Those values must not be treated as fresh reproducible review evidence until the exact source is restored and those chapters are re-compared.
+- Unit 12 / Chapter 10 has been corrected and re-checked against its source at literary-review level, but it remains `translated` in `progress.json`; durable state promotion should wait until repository structural/source availability is reconciled.
+- Next untranslated source unit after the current translated range is unit 13 / Chapter 11.
+- Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`. The style guide now explicitly preserves the semantic intensity ladder between `interested / like / fancy / crush / fall for / love`.
 
 ## Source identity
 
@@ -50,4 +54,7 @@ The aggregate hash is computed by sorting `extracted/*.md`, hashing each file wi
 
 ## Resume point
 
-Review `translated/012-chapter-10-chapter-10.md` against `extracted/012-chapter-10-chapter-10.md`. Only after source-to-translation review should unit 12 be promoted from `translated` to `reviewed`. Then continue sequentially with unit 13 / Chapter 11.
+1. Restore the exact EPUB matching the recorded SHA-256 and reconstruct the full extracted corpus.
+2. Freshly compare units 9–11 / Chapters 7–9 against their restored source artifacts, paying special attention to relationship-intensity inflation (`like/fancy/crush` versus `влюблён/любить`).
+3. Reconcile `progress.json` only after source availability and structural validation are restored; do not trust historical reviewed flags for units 9–11 as evidence of the current audit.
+4. After the audited translated range is structurally consistent, continue with unit 13 / Chapter 11.
