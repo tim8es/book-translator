@@ -4,94 +4,69 @@
 
 This repository is the durable source of truth for literary book translation performed by an AI agent.
 
-This file is the authoritative instruction for:
+Authority is deliberately split so documents do not compete:
 
-- bootstrap behavior;
-- repository workflow;
-- translation quality;
-- review standards;
-- state management;
-- resume behavior;
-- output and completion rules.
+- `agent-manifest.json` defines the machine-readable contract, default ref, and `contract_read_order`;
+- `SKILL.md` is a portable discovery/bootstrap entrypoint;
+- this `AGENTS.md` is authoritative for literary quality, book state meanings, review standards, resume semantics, and completion;
+- `docs/AGENT_SETUP.md` is authoritative for version resolution, installation layout, capability handling, and collision policy;
+- `docs/ORCHESTRATION.md` is authoritative for worker topology, bounded context, and the single-writer execution model.
 
-When repository state is available, do not depend on chat history.
+If this file is loaded directly, do not invent a separate bootstrap sequence. Locate `agent-manifest.json` for the selected workflow ref/revision and follow its `contract_read_order`.
+
+When durable repository state is available, do not depend on chat history.
 
 Treat every source book as an authored literary work, not as raw text to rewrite. The goal is to carry the author's meaning, voice, rhythm, emotional temperature, ambiguity, and stylistic choices into the target language with care, restraint, and precision.
 
 ---
 
-## Zero-prompt bootstrap protocol
+## Zero-prompt bootstrap invariants
 
-When a user gives you this repository URL or asks you to use Book Translator, do the following without requiring the user to understand the repository.
+When a user gives the Book Translator repository URL or asks you to use Book Translator:
 
-### 1. Read the contract
+1. preserve an explicitly pinned branch/tag/commit; otherwise use the manifest default ref, currently `main`;
+2. resolve the requested ref once to a concrete revision when the environment permits it;
+3. load all contract files from that same revision according to `agent-manifest.json.contract_read_order`;
+4. follow `docs/AGENT_SETUP.md` for writable installation and collision handling;
+5. follow `docs/ORCHESTRATION.md` before starting or resuming chapter work;
+6. ask only for required semantic inputs that remain genuinely missing.
 
-Read:
+Do not silently change workflow revision during an active book run.
 
-1. `agent-manifest.json`;
-2. this `AGENTS.md`;
-3. `docs/AGENT_SETUP.md` only when bootstrap details are needed.
+### Filesystem and Git
 
-If the user did not specify a version, use the latest `main`.
-
-If the user explicitly pins a branch, tag, or commit, preserve it.
-
-### 2. Obtain a writable workspace
-
-Prefer the strongest capability available.
-
-#### Filesystem and Git available
-
-Clone the repository if it is not already available:
+When a standalone clone is appropriate, check out the resolved revision explicitly:
 
 ```bash
-git clone --depth 1 https://github.com/tim8es/book-translator.git
+git clone https://github.com/tim8es/book-translator.git
 cd book-translator
+git checkout --detach <resolved-revision>
 ```
 
-If the user explicitly wants the workflow integrated into an existing repository, copy the canonical workflow files deliberately instead of nesting an unrelated Git repository.
+Do not use a default-branch-only clone strategy that prevents an explicitly requested branch, tag, or commit from being resolved and checked out.
 
-Never copy real book contents from the canonical template.
+When integrating into an existing repository, do not overwrite or auto-merge unrelated host files. Follow the deterministic collision policy in `docs/AGENT_SETUP.md`, including the `.book-translator/` namespaced fallback.
 
-#### Repository API available but shell unavailable
+### Required inputs
 
-Read the canonical repository files through the available API and create/update the equivalent workflow files in the writable target repository.
-
-#### Read-only environment
-
-Read the instructions, identify the exact unavailable capability, and tell the user the smallest manual step needed. Do not claim setup, file writes, command execution, or artifact creation occurred when they did not.
-
-### 3. Determine required inputs
-
-A real translation needs only:
+A real translation fundamentally needs only:
 
 1. a source book the agent can access;
 2. a target language.
 
 Before asking the user, inspect the conversation, attachments, workspace, filename, and source metadata.
 
-Do not ask for technical settings that can be derived safely, including:
+Do not ask for technical settings that can be derived safely, including book slug, directory names, source format, title/author when available, source language when reliably detectable, chapter filenames, glossary/style-guide creation, validation, execution mode, or worker topology.
 
-- book slug;
-- directory names;
-- source format;
-- title or author when present in metadata;
-- source language when reliably detectable;
-- chapter filenames;
-- whether to create a glossary;
-- whether to create a style guide;
-- whether to validate repository state;
-- which chapter to resume.
+Ask only when a required semantic input is missing or proceeding would risk working on the wrong source, overwriting existing work, or producing a materially different deliverable.
 
-Ask only when a required semantic input is genuinely missing or when proceeding would risk working on the wrong source, overwriting existing work, or producing a materially different requested deliverable.
-
-### 4. Prefer automation, preserve fallbacks
+### Capability fallbacks
 
 If Python 3 is available and the source format is supported by `scripts/book.py`, use it for extraction and structural validation.
 
-If Python is unavailable, perform the same file-based workflow directly. Python is optional; the translation workflow must not depend on it.
+If Python is unavailable, perform the same durable file-based workflow directly. Python is optional; the literary workflow must not depend on it.
 
-The default workflow requires no database, LLM SDK, API key, backend, queue, or external orchestration layer.
+The default workflow requires no database, LLM SDK, API key, backend, queue, or external orchestration service.
 
 ---
 
@@ -99,7 +74,7 @@ The default workflow requires no database, LLM SDK, API key, backend, queue, or 
 
 The canonical repository contains no bundled real books.
 
-Each real book uses:
+Each real book uses, relative to the selected Book Translator installation root:
 
 ```text
 books/<book-slug>/
@@ -107,15 +82,37 @@ books/<book-slug>/
 ├─ extracted/      # extracted original chapters/sections
 ├─ translated/     # translated chapters
 ├─ output/         # built deliverables
-├─ metadata.json
+├─ metadata.json   # includes workflow provenance
 ├─ progress.json
 ├─ glossary.md
 └─ style-guide.md
 ```
 
-Templates are in `docs/templates/`.
+For a namespaced host-repository installation, the installation root is `.book-translator/`, so the book workspace lives under `.book-translator/books/<book-slug>/`.
 
-Optional local helpers are in `scripts/`; they are not required for normal agent work.
+Templates are in `docs/templates/` relative to the same installation root.
+
+---
+
+## Workflow provenance
+
+The installation-level file `.book-translator-install.json` describes the currently installed Book Translator workflow.
+
+Every newly initialized book must also record its own workflow provenance in `metadata.json.workflow`:
+
+```json
+{
+  "repository": "https://github.com/tim8es/book-translator",
+  "requested_ref": "main",
+  "resolved_revision": "<commit-sha>"
+}
+```
+
+Book-level provenance is authoritative for resuming that book. A workspace may contain books initialized under different workflow revisions.
+
+Do not silently rewrite `metadata.json.workflow.resolved_revision` because the installed workflow later changes. Upgrading a book to another workflow revision is an explicit state transition followed by compatibility and validation checks.
+
+If `resolved_revision` could not be determined, use `null`; never invent a SHA. Exact workflow reproducibility is then unavailable and must not be claimed.
 
 ---
 
@@ -125,14 +122,11 @@ The translation is not an adaptation, summary, rewrite, localization, or attempt
 
 Preserve, as closely as the target language allows:
 
-- meaning;
-- factual content;
-- authorial voice;
-- prose style;
+- meaning and factual content;
+- authorial voice and prose style;
 - rhythm and sentence movement;
 - tone and emotional intensity;
-- narrative distance;
-- atmosphere;
+- narrative distance and atmosphere;
 - subtext;
 - ambiguity and uncertainty;
 - humor, irony, sarcasm, awkwardness, restraint, and roughness where present;
@@ -164,10 +158,8 @@ Do not silently:
 - explain what the author leaves implicit;
 - repair intentional awkwardness;
 - simplify difficult writing merely because it is difficult;
-- intensify weak emotion;
-- soften strong emotion;
-- beautify plain language;
-- flatten ornate language;
+- intensify weak emotion or soften strong emotion;
+- beautify plain language or flatten ornate language;
 - modernize or sanitize register without textual justification;
 - make every character sound equally polished;
 - censor unpleasant, sexual, violent, offensive, or crude language merely to make it more comfortable;
@@ -200,20 +192,16 @@ Preserve every meaningful element of the source.
 
 Pay special attention to:
 
-- who performs an action;
-- who or what receives the action;
+- who performs and receives an action;
 - chronology;
 - tense and aspect where meaningful;
-- negation;
-- conditions;
+- negation and conditions;
 - degree of certainty;
 - possibility versus fact;
 - intention versus action;
 - perception versus knowledge;
 - comparison;
-- spatial relations;
-- temporal relations;
-- causal relations;
+- spatial, temporal, and causal relations;
 - pronoun reference;
 - emotional force;
 - whether a statement belongs to the narrator, a character, or free indirect discourse.
@@ -230,11 +218,9 @@ Preserve uncertainty when the source is uncertain.
 
 If the original deliberately permits multiple readings, preserve that openness whenever reasonably possible. Do not force one interpretation merely because it seems likely.
 
-Do not turn subtext into explanation. Do not tell the reader what a character feels, intends, realizes, or symbolizes unless the source itself states it.
+Do not turn subtext into explanation. If the author makes the reader infer something, the translation should normally require the same inference.
 
-If the author makes the reader infer something, the translation should normally require the same inference.
-
-When a serious ambiguity cannot be preserved directly, choose the least interpretive rendering that fits the scene and record the decision in `glossary.md` or `style-guide.md` when it is likely to recur or affect later passages.
+When serious ambiguity cannot be preserved directly, choose the least interpretive rendering that fits the scene and record the decision in `glossary.md` or `style-guide.md` when it is likely to recur or affect later passages.
 
 ---
 
@@ -244,13 +230,7 @@ Fidelity does not mean word-for-word literalism.
 
 A literal rendering is wrong when it preserves words but loses meaning, tone, rhythm, idiom, or literary function.
 
-You may:
-
-- restructure syntax;
-- change word order;
-- use a functional equivalent for an idiom;
-- change grammatical construction where the languages require it;
-- split or combine clauses when necessary for faithful target-language syntax.
+You may restructure syntax, change word order, use functional equivalents for idioms, change grammatical construction where required, and split/combine clauses when necessary for faithful target-language syntax.
 
 Such changes are acceptable only when the result preserves the source's meaning, force, register, implication, and rhythm as closely as possible.
 
@@ -262,7 +242,7 @@ Every active book must have `style-guide.md`.
 
 Before sustained translation begins, inspect enough of the source to record evidence-based stylistic properties. Update the guide as the book develops.
 
-At minimum, consider:
+At minimum consider:
 
 ### Narration
 
@@ -279,33 +259,13 @@ At minimum, consider:
 
 ### Prose tendencies
 
-Record only source-supported tendencies, such as:
-
-- terse or expansive;
-- plain or lexically rich;
-- fast or meditative;
-- restrained or expressive;
-- conversational or formal;
-- repetition-heavy or synonym-rich;
-- fragmentary or flowing;
-- concrete or abstract;
-- understated or emphatic.
+Record only source-supported tendencies such as terse/expansive, plain/lexically rich, fast/meditative, restrained/expressive, conversational/formal, repetition-heavy/synonym-rich, fragmentary/flowing, concrete/abstract, understated/emphatic.
 
 ### Character voices
 
-For recurring characters, record relevant features such as:
+For recurring characters, record supported differences in formality, vocabulary, education markers, age-coded register, slang/profanity, verbal habits, humor, sentence length, hesitation/confidence, and forms of address.
 
-- formality;
-- vocabulary and education markers;
-- age-coded speech when textually supported;
-- slang or profanity;
-- verbal habits;
-- humor;
-- sentence length;
-- hesitation or confidence;
-- recurring forms of address.
-
-The style guide is descriptive, not invented. Never assign a speech trait unsupported by the source.
+The style guide is descriptive, not invented.
 
 ---
 
@@ -315,8 +275,7 @@ Use `glossary.md` for recurring lexical and continuity decisions that must remai
 
 - names and surnames;
 - nicknames;
-- places;
-- organizations;
+- places and organizations;
 - titles and forms of address;
 - fictional concepts;
 - technical/domain terms;
@@ -324,9 +283,7 @@ Use `glossary.md` for recurring lexical and continuity decisions that must remai
 - important ambiguous terms;
 - decisions that could otherwise drift between chapters.
 
-Read the glossary before translating a new chapter.
-
-Do not change an established rendering casually. If a better decision is required, update it consistently and record the reason when useful.
+Read the glossary before translating a new chapter. Do not change an established rendering casually. If a better decision is required, update it consistently and record the reason when useful.
 
 ---
 
@@ -335,11 +292,12 @@ Do not change an established rendering casually. If a better decision is require
 For a real source book:
 
 1. preserve the untouched source under `source/`;
-2. determine the source format from the file and its internal structure;
+2. determine the source format from the file and internal structure;
 3. extract the real reading order into separate files under `extracted/`;
 4. create `metadata.json`, `progress.json`, `glossary.md`, and `style-guide.md`;
-5. inspect enough of the original to establish an initial evidence-based style guide before sustained translation;
-6. verify chapter order, count, unique slugs, and referenced paths before translating.
+5. record workflow provenance in `metadata.json.workflow`;
+6. inspect enough of the original to establish an initial evidence-based style guide;
+7. verify chapter order, count, unique slugs, and referenced paths before translating.
 
 Prefer EPUB and structured text formats because their reading order is usually explicit.
 
@@ -370,7 +328,7 @@ If a chapter is too large for one working context, it may be processed in techni
 
 ## Chapter workflow
 
-Every chapter must pass through separate translation and review stages.
+Every chapter must pass through separate translation and review stages. `docs/ORCHESTRATION.md` defines how those roles are isolated or bounded in the active environment.
 
 ### Stage 1 — translation draft
 
@@ -386,9 +344,7 @@ During this pass:
 - follow the glossary and style guide;
 - preserve character distinctions and authorial rhythm.
 
-After the complete translation file exists, the chapter may be marked `translated`.
-
-It must not yet be marked `reviewed`.
+After the complete translation file exists, the chapter may be marked `translated`. It must not yet be marked `reviewed`.
 
 ### Stage 2 — fidelity review against the original
 
@@ -404,52 +360,36 @@ For every section, check:
 
 1. Is every source sentence and meaningful fragment represented?
 2. Has anything been added that the source does not contain?
-3. Are subject and object correct?
-4. Are facts correct?
-5. Is chronology preserved?
-6. Are causal relations preserved rather than invented?
-7. Are negations preserved?
-8. Is modality preserved?
-9. Is certainty or uncertainty preserved?
-10. Is emotional intensity equivalent?
-11. Has neutral language become more dramatic or sentimental?
-12. Has strong language been softened?
-13. Is subtext still subtext?
-14. Is ambiguity still ambiguous where possible?
-15. Are speakers correctly identified?
-16. Has a character's motivation been changed or over-explained?
-17. Has the narrator's attitude been changed?
-18. Are significant repetitions preserved?
-19. Is meaningful rhythm or fragmentation preserved?
-20. Are there misleading literal calques?
-21. Does the passage follow established glossary decisions?
-22. Does it match documented style and character voices?
-23. Is meaningful formatting preserved?
+3. Are subject/object and facts correct?
+4. Is chronology preserved?
+5. Are causal relations preserved rather than invented?
+6. Are negation and modality preserved?
+7. Is certainty or uncertainty preserved?
+8. Is emotional intensity equivalent?
+9. Has neutral language become more dramatic or sentimental?
+10. Has strong language been softened?
+11. Is subtext still subtext?
+12. Is ambiguity still ambiguous where possible?
+13. Are speakers and viewpoint correctly identified?
+14. Has motivation been changed or over-explained?
+15. Has the narrator's attitude changed?
+16. Are significant repetitions preserved?
+17. Is meaningful rhythm or fragmentation preserved?
+18. Are there misleading literal calques?
+19. Does the passage follow glossary and style decisions?
+20. Is meaningful formatting preserved?
 
-When a mismatch is found:
-
-1. correct the translation;
-2. compare the corrected passage with the source again;
-3. continue only after the mismatch is resolved.
+When a mismatch is found, correct it, compare the corrected passage with the source again, and continue only after the mismatch is resolved.
 
 ### Stage 3 — target-language literary polish
 
 After semantic review, read the chapter as target-language literature.
 
-Correct:
-
-- accidental calques;
-- unnatural word order;
-- grammar errors;
-- unintended bureaucratic or technical diction;
-- register mistakes;
-- accidental anachronistic wording;
-- inconsistent character speech;
-- awkwardness introduced by the translator rather than present in the author.
+Correct accidental calques, unnatural word order, grammar errors, unintended bureaucratic/technical diction, register mistakes, accidental anachronisms, inconsistent character speech, and translator-created awkwardness.
 
 Do not polish away deliberate awkwardness, repetition, restraint, fragmentation, or other source features.
 
-Any substantial wording change made during polish must be checked again against the corresponding original passage.
+Any substantial wording change during polish must be checked again against the corresponding original passage.
 
 ---
 
@@ -463,18 +403,7 @@ It means:
 
 Do not mark a chapter `reviewed` unless this comparison actually occurred.
 
-Before marking `reviewed`, also check for:
-
-- missing paragraphs;
-- missing dialogue lines;
-- missing internal monologue;
-- dropped or merged scene breaks;
-- letters, messages, quotations, inscriptions, or embedded documents;
-- meaningful italics or emphasis;
-- headings and subheadings;
-- significant footnotes;
-- section separators;
-- meaningful blank-space transitions.
+Before marking `reviewed`, also check for missing paragraphs, dialogue, internal monologue, scene breaks, embedded letters/messages/quotations, meaningful emphasis, headings/subheadings, significant footnotes, section separators, and meaningful blank-space transitions.
 
 Do not use paragraph counts as the sole proof of completeness. Use the source sequence as the primary check.
 
@@ -484,19 +413,7 @@ Do not use paragraph counts as the sole proof of completeness. Use the source se
 
 Dialogue should be natural in the target language while remaining specific to the speaker.
 
-Preserve meaningful differences in:
-
-- vocabulary;
-- formality;
-- education;
-- age-coded register where supported;
-- slang;
-- profanity;
-- verbal confidence;
-- humor;
-- verbosity;
-- sentence fragments;
-- recurring speech habits.
+Preserve meaningful differences in vocabulary, formality, education, age-coded register where supported, slang, profanity, verbal confidence, humor, verbosity, fragments, and recurring speech habits.
 
 Do not make every speaker equally articulate or stylistically neutral.
 
@@ -504,20 +421,20 @@ Do not make every speaker equally articulate or stylistically neutral.
 
 ## Source and chapter rules
 
-- Never modify files in `books/<book-slug>/source/`.
+- Never modify files in `books/<book-slug>/source/` relative to the installation root.
 - Extracted originals live only in `extracted/`.
 - Translations live only in `translated/`.
 - Keep source and translated filenames aligned through `progress.json` paths.
 - Do not invent missing chapters.
-- If extraction looks wrong, correct extraction and repository state before translating.
+- If extraction looks wrong, correct extraction and state before translating.
 - Preserve the real reading order from the source format.
-- Do not copy real book content from the canonical public template into a user's workspace.
+- Do not copy real book content from the canonical workflow repository into another workspace.
 
 ---
 
 ## `progress.json`
 
-`progress.json` is the authoritative resumable work queue.
+`progress.json` is the authoritative resumable chapter work queue.
 
 Top-level fields:
 
@@ -538,7 +455,7 @@ State meanings:
 
 - `pending`: chapter is known but not ready for translation;
 - `extracted`: original chapter exists in `extracted/`;
-- `translated`: translation file exists but source-comparison review is not complete;
+- `translated`: translation file exists but source-comparison review is incomplete;
 - `reviewed`: translation completed the full review defined here.
 
 Rules:
@@ -553,11 +470,13 @@ Rules:
 
 ## `metadata.json`
 
-Keep metadata deliberately small.
-
 `source_file` is the filename inside the book's `source/` directory, not a repository-absolute path.
 
 Keep `chapter_count` synchronized with `progress.json.chapters`.
+
+`workflow` records the repository, requested ref, and `resolved_revision` associated with this book. Preserve it across sessions and compare it with the currently installed workflow before resuming.
+
+Legacy metadata without `workflow` may be readable, but exact workflow reproducibility must not be claimed until provenance is established.
 
 ---
 
@@ -565,14 +484,18 @@ Keep `chapter_count` synchronized with `progress.json.chapters`.
 
 For an existing book:
 
-1. read this `AGENTS.md` first;
-2. read the book's `metadata.json`;
-3. read `progress.json`;
-4. read `glossary.md`;
-5. read `style-guide.md`;
-6. inspect existing translations when needed for continuity;
+1. identify the Book Translator installation root and target book;
+2. read `metadata.json.workflow` to determine the book's workflow provenance;
+3. load the Book Translator contract for that recorded revision using `agent-manifest.json.contract_read_order`;
+4. load `docs/ORCHESTRATION.md` from the same workflow revision;
+5. read `progress.json`, `glossary.md`, and `style-guide.md`;
+6. inspect only bounded existing source/translation context needed for continuity;
 7. verify paths referenced by the next chapter;
-8. continue with the first chapter whose status is not `reviewed`, unless the user explicitly requests a different chapter or a quality re-review.
+8. continue with the first chapter whose status is not `reviewed`, unless the user explicitly requests another scope.
+
+If the installed workflow revision differs from the book's `metadata.json.workflow.resolved_revision`, do not silently upgrade the book. Load the book's recorded contract revision or perform an explicit workflow upgrade first.
+
+If exactly one incomplete book exists and user intent does not identify another, select it automatically. If multiple incomplete books exist and user intent does not identify one, ask only which book to resume.
 
 Repository state is more authoritative than previous chat history.
 
@@ -584,16 +507,16 @@ Do not retranslate a reviewed chapter without a concrete reason. If a reviewed c
 
 Before declaring a book structurally consistent, verify:
 
-- `books/<book-slug>/source/<metadata.source_file>` exists;
+- `source/<metadata.source_file>` exists;
 - source files remain unchanged;
-- chapter numbers are unique;
-- chapter slugs are unique;
+- chapter numbers and slugs are unique;
 - numbering has no unexplained gaps;
 - each chapter at `extracted` or later has an existing `source_path`;
 - each chapter at `translated` or `reviewed` has an existing `translation_path`;
 - `metadata.json.chapter_count` equals the number of chapter records;
 - active books have `glossary.md` and `style-guide.md`;
 - no translation overwrote an original;
+- new books record workflow provenance;
 - `reviewed` status is supported by an actual source-comparison review.
 
 If Python is available, use:
@@ -602,7 +525,9 @@ If Python is available, use:
 python scripts/book.py validate <book-slug>
 ```
 
-This is an additional structural check. It is not a substitute for literary review.
+Use the equivalent helper path for a namespaced installation.
+
+Structural validation is not a substitute for literary review.
 
 ---
 
@@ -610,19 +535,7 @@ This is an additional structural check. It is not a substitute for literary revi
 
 When the user questions an existing translation, do not assume `reviewed` means correct.
 
-Perform a fresh source-to-translation comparison.
-
-Pay particular attention to:
-
-- semantic drift;
-- invented explanation;
-- lost ambiguity;
-- changed emotional intensity;
-- homogenized dialogue;
-- polished-away authorial roughness;
-- incorrect pronoun or speaker interpretation;
-- omissions;
-- wording that is elegant in isolation but unlike the source.
+Perform a fresh source-to-translation comparison. Pay particular attention to semantic drift, invented explanation, lost ambiguity, changed emotional intensity, homogenized dialogue, polished-away roughness, incorrect pronoun/speaker interpretation, omissions, and elegant wording that no longer matches the source.
 
 If meaningful problems are found, move affected chapters out of `reviewed`, correct them, and run the complete review again before restoring `reviewed`.
 
@@ -636,9 +549,7 @@ Markdown is the default transparent format.
 
 Only produce or claim EPUB/DOCX/PDF when the active environment has suitable tooling and the resulting artifact was actually created and checked.
 
-A built artifact does not prove translation quality.
-
-Do not declare a book complete merely because an output file exists.
+A built artifact does not prove translation quality. Do not declare a book complete merely because an output file exists.
 
 ---
 
@@ -653,7 +564,8 @@ Before declaring a book complete:
 5. verify style-guide consistency and update it with stable late discoveries;
 6. re-check selected difficult, emotionally important, ambiguous, and plot-critical passages against the original;
 7. verify output ordering and formatting if deliverables were built;
-8. confirm the original source remains unchanged.
+8. confirm the original source remains unchanged;
+9. confirm workflow provenance is preserved.
 
 Do not claim completion while any chapter is unreviewed, missing, or known to contain unresolved fidelity problems.
 
@@ -661,12 +573,12 @@ Do not claim completion while any chapter is unreviewed, missing, or known to co
 
 ## Privacy, copyright, and repository hygiene
 
-- The canonical public repository is a workflow template, not a book distribution repository.
+- The canonical repository is a workflow template, not a book distribution repository.
 - Do not publish copyrighted source books unless the user has the right to do so.
-- Prefer a private working repository when source or translations should remain private.
+- Prefer a private working repository/workspace when source or translations should remain private.
 - Never commit API keys, credentials, tokens, or unrelated secrets.
 - The default workflow does not require an LLM API key.
-- Never copy private/example books from another repository into the canonical public template.
+- Never copy private/example books from another workspace into the canonical template.
 
 ---
 
@@ -674,6 +586,6 @@ Do not claim completion while any chapter is unreviewed, missing, or known to co
 
 Keep the workflow file-based and inspectable.
 
-Do not add a database, web UI, backend, queue, mandatory LLM API integration, or agent orchestration layer unless a later task explicitly requires it.
+Do not add a database, web UI, backend, queue, mandatory LLM API integration, or external orchestration layer unless a later task explicitly requires it.
 
 Prefer simple, reproducible repository state over hidden process.
