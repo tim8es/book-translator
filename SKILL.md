@@ -42,15 +42,19 @@ If the source book or target language is genuinely missing, ask only for the mis
 
 ## Bootstrap contract
 
-1. Read `agent-manifest.json`.
-2. Resolve the requested ref, or latest `main` when no ref is pinned.
-3. Resolve that ref to a concrete revision when the environment permits it.
-4. Record the resolved revision according to the manifest in a writable project.
-5. Read `AGENTS.md` and treat it as authoritative.
-6. Read `docs/AGENT_SETUP.md` only for environment/bootstrap details.
-7. Read `docs/ORCHESTRATION.md` before starting or resuming chapter work.
-8. Initialize or resume the book workspace.
-9. Execute until the requested scope is reviewed and validated.
+If the client loads this skill before repository access, use it only to discover and enter the canonical repository contract.
+
+Once the repository is accessible:
+
+1. preserve an explicitly pinned branch/tag/commit, otherwise use the manifest default ref;
+2. resolve that ref once to a concrete revision when possible;
+3. read `agent-manifest.json` from that selected ref/revision;
+4. follow `agent-manifest.json.contract_read_order` from that same revision;
+5. record installation provenance according to `docs/AGENT_SETUP.md`;
+6. initialize or resume the book workspace;
+7. execute until the requested scope is reviewed and validated.
+
+Do not maintain a second read-order list here. `contract_read_order` is the canonical instruction-loading order.
 
 Do not silently switch workflow revision during an active book run. A later upgrade is a separate explicit state transition.
 
@@ -82,7 +86,7 @@ The orchestrator applies accepted changes after review.
 Give a worker only the context required for its job:
 
 - authoritative repository rules;
-- book metadata;
+- book metadata, including `metadata.json.workflow` provenance;
 - current glossary and style guide;
 - current chapter source;
 - for Reviewer: the current translation;
