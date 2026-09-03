@@ -14,6 +14,7 @@ Workflow revision used for the current audit: `70afef29caf31f1fe58501ddd61a75f15
 - Unit 12 / Chapter 10 had already been corrected and source-rechecked during the audit and is accepted at literary-review level.
 - Unit 13 / Chapter 11 had an existing translation artifact while `progress.json` still said `extracted`; it has now been freshly compared to source and accepted without blocking corrections.
 - Unit 14 / Chapter 12 was newly translated in the current continuation pass, independently re-reviewed against source, corrected for several overly free renderings, and accepted at literary-review level.
+- `progress.json` is reconciled through unit 14; units 1–14 are `reviewed`, and unit 15 / Chapter 13 is the first non-reviewed unit.
 - The complete canonical extracted corpus remains present: 205/205 Markdown source units in reading order.
 - The restored corpus aggregate manifest SHA-256 is `e74948d3f6e458a2de7b2a86f55588f2e733890ab354d788c3d1ed6b7a223393`, matching the canonical recovery checkpoint derived from the verified original source.
 - Glossary and style decisions are persisted in `glossary.md` and `style-guide.md`. The style guide explicitly preserves the semantic intensity ladder between `interested / like / fancy / crush / fall for / love`.
@@ -53,6 +54,6 @@ Fresh review of Chapter 12 corrected several first-draft freedoms, including `wi
 
 ## Resume point
 
-1. Treat units 1–14 as the accepted translated/audited range once the mechanical `progress.json` reconciliation is committed.
+1. Treat units 1–14 as the accepted translated/audited range; `progress.json` has been mechanically reconciled to match that state.
 2. Continue sequential literary work from unit 15 / Chapter 13 (`extracted/015-chapter-13-chapter-13.md`).
 3. Keep the relationship-intensity ladder, consent/boundary cues, POV attribution, source emphasis, and explicit register as mandatory review checks.
