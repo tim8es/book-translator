@@ -29,6 +29,7 @@
 | Death Eater | Пожиратель смерти | term | |
 | Chosen One | Избранный | title | Capitalize when used as title/label |
 | Expelliarmus | Экспеллиармус | spell | Incantation |
+| Aguamenti | Агуаменти | spell | Canon transliteration; keep incantation italicized when source emphasizes it |
 | Quidditch | квиддич | term | |
 | Hogwarts Express | Хогвартс-экспресс | term | Train |
 | Platform 9¾ | платформа 9¾ | place | |
