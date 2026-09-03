@@ -1,8 +1,8 @@
 # Book Translator
 
-**Translate full books with an AI agent while keeping progress, terminology, style, review state, and source integrity between sessions.**
+**Give an AI agent a book. Get a reviewed translation you can stop and resume at any time.**
 
-Book Translator is designed primarily for **ChatGPT Web** and **Codex**, while remaining **agent-agnostic** so other capable AI agents can use the same workflow.
+Book Translator translates full books while keeping progress, terminology, style, review state, and source integrity between sessions. It is designed primarily for **ChatGPT Web** and **Codex**, while remaining **agent-agnostic** so other capable AI agents can use the same workflow.
 
 **No programming knowledge required. No API key required.** You can start by giving an AI agent a repository link, a book, and the language you want.
 
