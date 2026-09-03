@@ -1,8 +1,13 @@
 # Orchestration protocol
 
-This document defines how Book Translator should execute chapter work when an AI environment supports isolated workers/subagents, and how to preserve the same role boundaries when it does not.
+This document defines how Book Translator executes chapter work when an AI environment supports isolated workers/subagents, and how to preserve the same role boundaries when it does not.
 
-`AGENTS.md` remains authoritative for literary quality, state meanings, and completion. This document controls execution topology and context boundaries.
+Authority is split intentionally:
+
+- `agent-manifest.json.contract_read_order` controls instruction-loading order;
+- `AGENTS.md` controls literary quality, state meanings, review standards, and completion;
+- `docs/AGENT_SETUP.md` controls version resolution, installation, and collision handling;
+- this file controls execution topology, worker context boundaries, and single-writer state transitions.
 
 ## Goals
 
@@ -15,7 +20,8 @@ It should:
 - keep book-wide decisions in durable repository state rather than long chat history;
 - prevent multiple workers from racing to mutate shared state;
 - remain usable in ChatGPT Web, Codex, and other capable AI agents;
-- degrade cleanly when isolated workers are unavailable.
+- degrade cleanly when isolated workers are unavailable;
+- execute each book under the workflow revision recorded for that book.
 
 ## Execution modes
 
@@ -34,13 +40,13 @@ Orchestrator
   -> Next chapter
 ```
 
-The Reviewer worker must not inherit hidden reasoning from the Translator worker. It reviews the source and artifact independently.
+The Reviewer worker must not inherit hidden reasoning from the Translator worker. It reviews the source and translation artifact independently.
 
 ### Fallback: `single_agent_bounded_context`
 
 Use when isolated workers are unavailable.
 
-The same agent performs the roles sequentially, but treats each role as a separate bounded-context task:
+The same agent performs the roles sequentially as separate bounded-context tasks:
 
 1. load the Translator context pack and produce the draft;
 2. finish the translation role;
@@ -65,23 +71,24 @@ Capability detection and execution-mode selection are internal responsibilities 
 
 ## Orchestrator
 
-The orchestrator coordinates work. It should not carry an ever-growing copy of every translated chapter in its conversational context.
+The orchestrator coordinates work without carrying an ever-growing copy of every translated chapter in conversational context.
 
 Responsibilities:
 
-1. load the canonical workflow revision and book state;
-2. choose the active book unambiguously;
-3. select the first chapter not `reviewed`, unless the user explicitly selects another scope;
-4. build a bounded Translator context pack;
-5. start/execute the Translator worker;
-6. verify that a complete translation artifact exists;
-7. build a bounded Reviewer context pack from durable files;
-8. start/execute an independent Reviewer worker;
-9. apply accepted corrections;
-10. apply accepted proposed glossary/style decisions;
-11. persist `progress.json` only after the corresponding artifact/state is valid;
-12. validate state;
-13. continue sequentially.
+1. identify the installation root and active book unambiguously;
+2. determine the workflow revision for that book from `metadata.json.workflow` (or the active installation for a new book);
+3. load the canonical contract for that revision according to `agent-manifest.json.contract_read_order`;
+4. select the first chapter not `reviewed`, unless the user explicitly selects another scope;
+5. build a bounded Translator context pack;
+6. start/execute the Translator worker;
+7. verify that a complete translation artifact exists;
+8. build a bounded Reviewer context pack from durable files;
+9. start/execute an independent Reviewer worker;
+10. apply accepted corrections;
+11. apply accepted glossary/style proposals;
+12. persist `progress.json` only after the corresponding artifact/state is valid;
+13. validate state;
+14. continue sequentially.
 
 ## Single-writer rule
 
@@ -92,10 +99,10 @@ This is a strict **single writer** rule for:
 - `progress.json`;
 - `glossary.md`;
 - `style-guide.md`;
-- workflow/install provenance;
-- book-level metadata when a worker proposes a change.
+- book-level metadata when a worker proposes a change;
+- workflow provenance when an explicit workflow upgrade is performed.
 
-Translator and Reviewer workers may return proposed changes, but should not race to commit them independently.
+Translator and Reviewer workers may return proposed changes, but must not race to commit shared state independently.
 
 Translation artifacts may be written by a worker only when the active environment gives that worker an isolated/non-conflicting target. The orchestrator remains responsible for accepting the artifact into canonical state.
 
@@ -117,15 +124,14 @@ The Translator worker receives a fresh task for one chapter.
 
 Required context:
 
-- applicable rules from `AGENTS.md`;
-- `metadata.json`;
+- applicable rules from `AGENTS.md` loaded from the book's workflow revision;
+- `metadata.json`, including `workflow` provenance;
 - current `glossary.md`;
 - current `style-guide.md`;
-- the current chapter source;
+- current chapter source;
 - bounded prior context needed for continuity;
 - source and target language;
-- expected translation path;
-- current workflow revision when available.
+- expected translation path.
 
 The Translator worker should return:
 
@@ -142,15 +148,15 @@ The Reviewer worker should be fresh and independent when the environment support
 
 Required context:
 
-- applicable review rules from `AGENTS.md`;
-- the current chapter source;
-- the current translated chapter;
+- applicable review rules from `AGENTS.md` from the same book workflow revision;
+- current chapter source;
+- current translated chapter;
 - current `glossary.md`;
 - current `style-guide.md`;
 - bounded continuity context when required;
 - expected output/correction format.
 
-Do not pass the Translator worker's hidden reasoning or justification. The Reviewer should evaluate the artifact against the source.
+Do not pass the Translator worker's hidden reasoning or justification. The Reviewer evaluates the artifact against the source.
 
 The Reviewer checks at minimum:
 
@@ -177,12 +183,12 @@ Always include durable book-wide decisions:
 
 - glossary;
 - style guide;
-- metadata relevant to the task.
+- metadata relevant to the task, including workflow provenance.
 
 For narrative continuity:
 
-- if the chapter is a normal boundary, include only the smallest prior excerpt/context required to avoid obvious continuity loss;
-- if the chapter directly continues the same scene and meaning depends materially on the previous chapter, include the required previous chapter context;
+- at a normal chapter boundary, include only the smallest prior excerpt/context required to avoid obvious continuity loss;
+- if the chapter directly continues the same scene and meaning depends materially on the previous chapter, include the required previous context;
 - never include unrelated chapters merely because context capacity is available.
 
 The repository, not the orchestrator's chat memory, is the durable memory layer.
@@ -191,9 +197,9 @@ The repository, not the orchestrator's chat memory, is the durable memory layer.
 
 A worker result is valid only for the state it was given.
 
-When the environment can identify revisions/hashes, the orchestrator should associate the worker task with:
+When the environment can identify revisions/hashes, associate the worker task with:
 
-- resolved workflow revision;
+- the book's `metadata.json.workflow.resolved_revision`;
 - current book/progress state;
 - current glossary/style state.
 
@@ -203,26 +209,34 @@ If shared state changes materially before a worker result is accepted, rebuild o
 
 On a new session:
 
-1. read `.book-translator-install.json` when present;
-2. read `AGENTS.md` and this orchestration protocol;
-3. enumerate valid book workspaces under `books/`;
-4. if exactly one active/incomplete book exists, select it;
-5. if the user explicitly identified a book, select that one;
-6. if multiple incomplete books exist and user intent does not identify one, ask only which book to resume;
-7. load that book's metadata/progress/glossary/style guide;
-8. continue with the first chapter not `reviewed`.
+1. identify the installation root;
+2. enumerate valid book workspaces;
+3. if the user explicitly identifies a book, select it;
+4. otherwise, if exactly one incomplete book exists, select it;
+5. if multiple incomplete books exist and user intent does not identify one, ask only which book to resume;
+6. read that book's `metadata.json.workflow` before selecting the execution contract;
+7. load the recorded workflow revision according to its `agent-manifest.json.contract_read_order`;
+8. load `progress.json`, `glossary.md`, and `style-guide.md`;
+9. continue with the first chapter not `reviewed`.
 
 Do not choose arbitrarily between multiple incomplete books.
 
-## Revision pinning
+## Revision policy
 
-When the user does not pin a version, `latest main` is resolved once at setup.
+For a **new book**, use the currently selected/resolved workflow revision and persist it into `metadata.json.workflow` at initialization.
 
-In a writable workspace record the resolved canonical revision in `.book-translator-install.json` when the environment can resolve it.
+For an **existing book**, the book-level `metadata.json.workflow` is the provenance source for its execution contract.
 
-Do not silently update to a newer `main` halfway through a book. An upgrade should be explicit and followed by compatibility validation.
+`<install_root>/.book-translator-install.json` describes the currently installed workflow, but it does not override an existing book's recorded revision.
 
-If the environment cannot resolve a concrete revision, record the most specific source/ref information it can and state that exact reproducibility is unavailable in that environment.
+If the installed revision and book revision differ:
+
+- do not silently rewrite book provenance;
+- load the book's recorded workflow revision for the run when the environment permits it;
+- otherwise state the exact reproducibility limitation before making state-changing claims;
+- perform an upgrade only as an explicit transition followed by compatibility/validation checks.
+
+Different books in one workspace may legitimately retain different workflow revisions.
 
 ## Failure handling
 
@@ -232,10 +246,12 @@ If a Reviewer worker fails, keep the translation at `translated`; do not mark it
 
 If global-state validation fails, stop advancement, repair repository state, and re-run validation before starting the next chapter.
 
-If isolated workers are unavailable, switch to the documented fallback rather than asking the user to manage agents manually.
+If isolated workers are unavailable, switch to the documented bounded-context fallback rather than asking the user to manage agents manually.
+
+If the required workflow revision for an existing book cannot be loaded, do not silently substitute a different revision and claim exact reproducibility.
 
 ## Completion
 
 The orchestration layer does not change the definition of `reviewed` or book completion.
 
-It only ensures that translation, independent review, and global-state transitions remain separated and reproducible.
+It ensures that translation, independent review, state transitions, and workflow provenance remain separated and reproducible.
