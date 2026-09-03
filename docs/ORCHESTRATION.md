@@ -1,6 +1,6 @@
 # Orchestration protocol
 
-This file is authoritative for Book Translator execution topology, book initialization/resume, bounded role context, chapter-state transitions, single-writer persistence, failure handling, validation ordering, and output/completion sequencing.
+This file is authoritative for Book Translator execution topology, book initialization/resume, bounded role context, chapter-state transitions, single-writer persistence, failure handling, validation ordering, source-corpus integrity, and output/completion sequencing.
 
 It is loaded by the `orchestrator` context profile together with `AGENTS.md`.
 
@@ -62,6 +62,7 @@ This strict rule applies to:
 - `progress.json`;
 - `glossary.md`;
 - `style-guide.md`;
+- `source-manifest.json`;
 - book-level metadata;
 - workflow provenance;
 - other shared book-wide decisions.
@@ -96,6 +97,7 @@ books/<book-slug>/
 ├── output/
 ├── metadata.json
 ├── progress.json
+├── source-manifest.json
 ├── glossary.md
 └── style-guide.md
 ```
@@ -108,9 +110,59 @@ Initialization requirements:
 - create per-book metadata and progress state;
 - copy the selected workflow repository/requested ref/resolved revision into `metadata.json.workflow`;
 - initialize glossary and style-guide durable memory;
-- perform structural validation before sustained translation.
+- perform structural validation before sustained translation;
+- seal the verified source corpus after successful extraction.
+
+When Python is available, seal the initialized corpus once:
+
+```bash
+python scripts/corpus.py seal <book-slug>
+```
+
+`source-manifest.json` records the SHA-256 identity of the preserved source and every extracted source artifact. Treat it as integrity/provenance state, not literary state. It must not be regenerated from an unverified replacement source merely to make validation look clean.
 
 For EPUB manual extraction, use the package/spine reading order rather than treating every XHTML resource as a chapter. For other structured text sources, respect explicit document structure and preserve a larger unit when boundaries are ambiguous.
+
+## Source corpus preflight
+
+Before dispatching literary work for an existing book, perform a corpus preflight once per resumed run or whenever repository/source state may have changed.
+
+The preflight is book-wide, not chapter-by-chapter:
+
+1. read `metadata.json` and `progress.json`;
+2. compare `metadata.chapter_count` with the number of progress entries;
+3. verify that every `source_path` required by `progress.json` exists, not merely the next chapter;
+4. verify the preserved source declared by metadata is available when the active workspace is expected to be self-contained;
+5. when `source-manifest.json` exists, retain its source SHA-256 as the source identity for recovery;
+6. run structural validation before selecting the next literary task.
+
+When Python is available:
+
+```bash
+python scripts/book.py validate <book-slug>
+```
+
+A workspace with 205 progress entries and only 13 extracted artifacts is not a partially valid 13-chapter source corpus. It is an incomplete corpus and must be repaired before translation/review continues.
+
+If the original source is available but the extracted tree is incomplete, restore the complete source corpus in one batch. Do not repair missing extracted chapters one at a time.
+
+For a sealed workspace:
+
+```bash
+python scripts/corpus.py restore <book-slug> <source-file>
+```
+
+For a legacy workspace without `source-manifest.json`, recovery requires a trusted SHA-256 from durable provenance or the user:
+
+```bash
+python scripts/corpus.py restore <book-slug> <source-file> --expected-sha256 <sha256>
+```
+
+The restore operation must verify source identity and complete extraction before replacing canonical source artifacts. It must preserve `progress.json`, translation files, review states, glossary, and style guide. After recovery, run `python scripts/book.py validate <book-slug>` again before dispatching literary work.
+
+Do not substitute a later online edition, archive export, or same-named file when the recorded SHA-256 does not match. If no trusted source identity is available, report the source-reproducibility block instead of guessing.
+
+A checkpoint that intentionally omits a private/copyrighted source binary may still preserve translation work, but it is not self-contained for source-dependent review. Record that limitation explicitly. Once the exact private source is reattached, recover the whole corpus in one pass rather than repeatedly asking for individual chapters.
 
 ## Chapter states
 
@@ -145,10 +197,11 @@ Later chapters can depend on terminology, character voice, ambiguity, and contin
 
 Unless the user explicitly requests another scope:
 
-1. inspect `progress.json` in chapter order;
-2. choose the first chapter whose state is not `reviewed`;
-3. verify the source artifact referenced for that chapter exists;
-4. repair invalid extraction/state before dispatching literary work.
+1. complete the source corpus preflight for the active book;
+2. inspect `progress.json` in chapter order;
+3. choose the first chapter whose state is not `reviewed`;
+4. verify the source artifact referenced for that chapter exists;
+5. repair invalid extraction/state before dispatching literary work.
 
 Do not retranslate a reviewed chapter without a concrete reason. If a reviewed translation changes materially, move it back to the appropriate non-reviewed state until the changed artifact passes review again.
 
@@ -242,9 +295,12 @@ For an existing book:
 3. use its `resolved_revision` when available, otherwise the most specific recorded requested ref;
 4. read `agent-manifest.json` from that recorded workflow revision;
 5. load the `orchestrator` context profile from that same revision;
-6. read `progress.json`, `glossary.md`, and `style-guide.md`;
-7. inspect only the bounded source/translation context required for the next operation;
-8. continue from the first non-`reviewed` chapter unless the user explicitly requests another scope.
+6. read `progress.json`, `glossary.md`, `style-guide.md`, and `source-manifest.json` when present;
+7. run the source corpus preflight and repair the complete corpus if required;
+8. inspect only the bounded source/translation context required for the next operation;
+9. continue from the first non-`reviewed` chapter unless the user explicitly requests another scope.
+
+Do not use a successful lookup of the next chapter as a substitute for corpus preflight. A later missing source artifact is a repository-integrity defect even when the immediate chapter happens to exist.
 
 `<installation-root>/.book-translator-install.json` describes the workflow currently installed at that root, but it does not override an existing book's recorded workflow provenance.
 
@@ -281,13 +337,15 @@ Use the equivalent helper path for a namespaced installation.
 
 At minimum, validation must protect these invariants:
 
-- the preserved source declared by metadata exists;
+- the preserved source declared by metadata exists when the workspace is expected to be self-contained;
 - chapter numbers/slugs are unique and ordered;
 - chapter count matches progress entries;
-- extracted-or-later chapters have their source artifacts;
+- every extracted-or-later chapter has its source artifact;
+- the actual extracted corpus is complete relative to `progress.json`, not just complete through the next chapter;
 - translated-or-reviewed chapters have non-empty translation artifacts;
 - glossary and style guide exist for active books;
 - workflow provenance is present for new books;
+- source identity/integrity state is retained when `source-manifest.json` exists;
 - no translation artifact replaced the preserved source.
 
 Structural validation cannot substitute for a Reviewer `PASS` under `docs/TRANSLATION.md`.
@@ -296,7 +354,8 @@ Structural validation cannot substitute for a Reviewer `PASS` under `docs/TRANSL
 
 - If translation fails or is incomplete, do not advance the chapter to `translated`.
 - If review fails to run, errors, or returns `CORRECTIONS_REQUIRED`, keep the chapter `translated`.
-- If validation fails, stop state advancement, repair durable state, and validate again before starting the next chapter.
+- If corpus preflight or validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.
+- If the exact source is unavailable, do not silently use a same-title/same-name replacement.
 - If the required workflow revision cannot be loaded, do not silently substitute another revision and claim exact reproducibility.
 - If isolated workers are unavailable, use `single_agent_bounded_context` rather than asking the user to manually orchestrate roles.
 
@@ -325,6 +384,7 @@ Before declaring a book complete, the Orchestrator verifies that:
 5. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under `docs/TRANSLATION.md` when a book-level consistency check warrants it;
 6. requested output artifacts are ordered/checked if output was requested;
 7. the preserved source remains unchanged;
-8. workflow provenance remains intact.
+8. workflow provenance remains intact;
+9. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
 
 A built output file alone is not evidence that the book is complete.
