@@ -2,13 +2,13 @@
 
 Workflow revision: `70afef29caf31f1fe58501ddd61a75f153366ae0`
 Branch: `work/good-intentions-ru-20260903`
-Scope: all currently translated units 1–14.
+Scope: all currently translated units 1–16.
 
 ## Overall reviewer outcome
 
-`PASS` for the currently translated range (units 1–14) at literary source-comparison level.
+`PASS` for the currently translated range (units 1–16) at literary source-comparison level.
 
-The earlier `CORRECTIONS_REQUIRED` outcome was caused by missing extracted source artifacts for units 9–11. The exact original EPUB was subsequently supplied again, verified against the recorded size and SHA-256, and used to restore the canonical 205/205 extracted source corpus. Units 9–11 were then freshly compared rather than inheriting their historical review flags. Unit 13's orphan translation was likewise freshly reconciled, and unit 14 was newly translated and independently re-reviewed.
+The earlier `CORRECTIONS_REQUIRED` outcome was caused by missing extracted source artifacts for units 9–11. The exact original EPUB was subsequently supplied again, verified against the recorded size and SHA-256, and used to restore the canonical 205/205 extracted source corpus. Units 9–11 were then freshly compared rather than inheriting their historical review flags. Unit 13's orphan translation was likewise freshly reconciled; units 14–16 were translated/continued and independently source-compared before being accepted.
 
 ## Unit results
 
@@ -28,6 +28,8 @@ The earlier `CORRECTIONS_REQUIRED` outcome was caused by missing extracted sourc
 | 12 | Chapter 10 | Yes | Corrected and re-checked; source-backed literary PASS |
 | 13 | Chapter 11 | Yes | Existing translation reconciled; no blocking fidelity defect found; literary PASS |
 | 14 | Chapter 12 | Yes | Newly translated, corrected after independent comparison; source-backed literary PASS |
+| 15 | Chapter 13 | Yes | Translation source-compared; opening `implications` wording corrected; literary PASS |
+| 16 | Chapter 14 | Yes | Newly translated and independently source-compared; literary PASS |
 
 `PASS` above is the literary reviewer outcome. Shared orchestration state is updated separately.
 
@@ -37,15 +39,17 @@ The dominant systematic error in the prior translation/review pass was **relatio
 
 The book style guide now contains an explicit relationship-intensity ladder and review rule so later translation/review distinguishes `interested / like / fancy / crush / fall for / love` rather than flattening them.
 
-Examples corrected during this audit include:
+Examples corrected or explicitly protected during this audit include:
 
 - Chapter 1: `Malfoy fancies me` no longer becomes `Малфой в меня влюблён`.
 - Chapter 2: `if he'd really fancied me the whole time` no longer becomes a claim that Draco was already explicitly `влюблён` in Harry at that point in Harry's POV.
 - Chapter 4: Ginny's `interest` is no longer upgraded to `она всё это время была в меня влюблена`.
 - Chapter 6: `a guy had a crush on him` is no longer automatically rendered as full `влюблённость`.
 - Chapter 7: `better at liking someone`, `when they fancied someone`, and `what liking men might be like` no longer get promoted to settled love; the source emphasis boundary around `liking men` is also preserved.
-- Chapter 8: Harry's note `I'm shit at liking people too` now remains at the `нравится`/attraction level rather than becoming `умею влюбляться`.
-- Chapter 9: `not like I'm gonna stop fancying you` now remains `ты ведь не перестанешь мне нравиться` rather than escalating to `перестану в тебя влюбляться`.
+- Chapter 8: Harry's note `I'm shit at liking people too` remains at the `нравится`/attraction level rather than becoming `умею влюбляться`.
+- Chapter 9: `not like I'm gonna stop fancying you` remains `ты ведь не перестанешь мне нравиться` rather than escalating to `перестану в тебя влюбляться`.
+- Chapter 13: Harry explicitly rejects the idea that Draco merely `fancies` him and recognizes that Draco is `in love`; the Russian preserves that escalation rather than flattening both terms.
+- Chapter 14: Harry's first explicit `I like Draco ... Malfoy` remains `Мне нравится Драко ... Малфой`, while Draco's already established `in love` remains stronger. The first kiss is not rewritten as proof that Harry already reciprocates Draco's love; the end note explicitly says Harry still thinks he is experimenting.
 
 ## Other material corrections
 
@@ -56,12 +60,14 @@ Examples corrected during this audit include:
 - Chapter 9: `Voldemort's possession` is rendered as Voldemort taking possession/control of Ginny rather than an ambiguous `одержимость Волдемортом`; tentative `mates` wording is kept tentative.
 - Chapter 10: Draco's distinction between not knowing how to *act* when he likes someone and still knowing how to *like* Harry was restored.
 - Chapter 10: `I'd like him as a friend` was restored as a platonic-feeling distinction rather than merely `хочу дружить с ним`.
-- Chapter 10: Harry's immobility after the near-kiss is now explicitly allowed to have been shock (`he could've just been in shock`) instead of vaguely saying the situation itself `могла быть шоком`.
+- Chapter 10: Harry's immobility after the near-kiss is explicitly allowed to have been shock (`he could've just been in shock`) instead of vaguely saying the situation itself `могла быть шоком`.
 - Chapter 10: `casual fixation for you to pick and choose when it suits you` no longer becomes a generic `случайная прихоть`; the accusation that Harry must not treat Draco's feelings as an unserious fixation available only when convenient is preserved.
 - Chapter 10: several literal calques and explicit-scene action errors were corrected without sanitizing the source.
 - Chapter 12: `smiley and withdrawn` is kept as `улыбчивым и ушедшим в себя`, not weakened/misread as simple distraction.
 - Chapter 12: the repeated emotional/sexual line `I want him to want me` / `when he wanted me` remains explicit rather than being softened into merely wanting company.
 - Chapter 12: Draco's final boundary `I'm not offering myself up just to get you off, as if that's all I want from you` remains a refusal to be used merely for Harry's release and preserves the fact that Draco wants more than sex.
+- Chapter 13: opening `implications` is rendered as the significance/meaning of what just happened rather than literal external `последствия`.
+- Chapter 14: POV changes, Narcissa's letter, Harry's self-questioning, the weaker `like/fancy` vocabulary, Draco's explicit love, the first-kiss consent sequence, and both author end notes are preserved.
 
 ## Source/repository repair completed
 
@@ -109,7 +115,7 @@ The contract says to preserve certainty, implication, and emotional intensity, b
 
 ### 5. Full-file state mutation is unnecessarily brittle
 
-`progress.json` is stored as a single minified line with all 205 unit records. The connected GitHub contents API only supports whole-file replacement, so changing three statuses requires safely round-tripping the complete large blob. This is operationally fragile for agents even though the state model itself is simple.
+`progress.json` is stored as a single minified line with all 205 unit records. The connected GitHub contents API only supports whole-file replacement, so changing statuses requires safely round-tripping the complete large blob. This is operationally fragile for agents even though the state model itself is simple.
 
 **Recommended contract change:** pretty-print the state file or split mutable per-unit state into a format that supports bounded edits; alternatively provide a repository helper command that updates statuses deterministically and validates the result.
 
