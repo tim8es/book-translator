@@ -25,6 +25,7 @@ class AgentContractTests(unittest.TestCase):
 
         self.assertTrue(policy["record_resolved_revision"])
         self.assertEqual(policy["resolved_revision_file"], ".book-translator-install.json")
+        self.assertFalse(policy["silent_mid_run_upgrade"])
 
     def test_manifest_prefers_isolated_workers_with_portable_fallback(self):
         manifest = json.loads((PROJECT_ROOT / "agent-manifest.json").read_text(encoding="utf-8"))
@@ -35,18 +36,20 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(execution["chapter_policy"], "sequential")
         self.assertTrue(execution["fresh_translator_per_chapter"])
         self.assertTrue(execution["fresh_reviewer_per_chapter"])
+        self.assertTrue(execution["reviewer_independent_from_translator"])
         self.assertEqual(execution["global_state_writer"], "orchestrator")
+        self.assertFalse(execution["parallel_chapter_translation_by_default"])
 
     def test_orchestration_protocol_is_explicit_and_single_writer(self):
         orchestration = (PROJECT_ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
-        agents = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        setup = (PROJECT_ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
 
         self.assertIn("Translator worker", orchestration)
         self.assertIn("Reviewer worker", orchestration)
         self.assertIn("single writer", orchestration.lower())
         self.assertIn("Only the orchestrator may update global mutable state", orchestration)
-        self.assertIn("isolated workers", agents.lower())
-        self.assertIn("single-agent bounded-context fallback", agents.lower())
+        self.assertIn("single_agent_bounded_context", setup)
+        self.assertIn("Do not translate multiple chapters concurrently by default", setup)
 
     def test_skill_preserves_one_link_bootstrap(self):
         skill = (PROJECT_ROOT / "SKILL.md").read_text(encoding="utf-8")
