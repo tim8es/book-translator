@@ -27,6 +27,54 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(policy["resolved_revision_file"], ".book-translator-install.json")
         self.assertFalse(policy["silent_mid_run_upgrade"])
 
+    def test_contract_read_order_is_single_and_complete(self):
+        manifest = json.loads((PROJECT_ROOT / "agent-manifest.json").read_text(encoding="utf-8"))
+        expected = [
+            "agent-manifest.json",
+            "SKILL.md",
+            "AGENTS.md",
+            "docs/AGENT_SETUP.md",
+            "docs/ORCHESTRATION.md",
+        ]
+
+        self.assertEqual(manifest["contract_read_order"], expected)
+
+        for relative_path in (
+            "README.md",
+            "SKILL.md",
+            "AGENTS.md",
+            "docs/AGENT_SETUP.md",
+            "docs/TRANSLATION_GUIDE.md",
+        ):
+            text = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn("contract_read_order", text, msg=relative_path)
+
+    def test_authoritative_bootstrap_checks_out_resolved_revision(self):
+        agents = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("git checkout --detach <resolved-revision>", agents)
+        self.assertNotIn("git clone --depth 1", agents)
+
+    def test_existing_repository_install_has_deterministic_collision_policy(self):
+        setup = (PROJECT_ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
+
+        self.assertIn("Existing repository collision policy", setup)
+        self.assertIn("Never overwrite a pre-existing unrelated file", setup)
+        self.assertIn(".book-translator/", setup)
+        self.assertIn("install_root", setup)
+
+    def test_book_metadata_template_records_workflow_provenance(self):
+        metadata = json.loads((PROJECT_ROOT / "docs" / "templates" / "metadata.json").read_text(encoding="utf-8"))
+        workflow = metadata["workflow"]
+
+        self.assertEqual(workflow["repository"], "https://github.com/tim8es/book-translator")
+        self.assertIn("requested_ref", workflow)
+        self.assertIn("resolved_revision", workflow)
+
+        guide = (PROJECT_ROOT / "docs" / "TRANSLATION_GUIDE.md").read_text(encoding="utf-8")
+        self.assertIn("resolved_revision", guide)
+        self.assertIn("docs/ORCHESTRATION.md", guide)
+
     def test_manifest_prefers_isolated_workers_with_portable_fallback(self):
         manifest = json.loads((PROJECT_ROOT / "agent-manifest.json").read_text(encoding="utf-8"))
         execution = manifest["execution"]
