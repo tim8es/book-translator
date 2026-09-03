@@ -69,6 +69,35 @@ class BookCliSmokeTests(unittest.TestCase):
         self.assertTrue((book / "style-guide.md").is_file())
         self.run_cli("validate", "sample-book")
 
+    def test_extract_records_install_provenance_in_book_metadata(self):
+        (self.repo / ".book-translator-install.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "canonical_repository": "https://github.com/tim8es/book-translator",
+                    "requested_ref": "agent-compatibility-and-skill",
+                    "resolved_revision": "0123456789abcdef",
+                    "install_root": ".",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        source = self.repo / "sample.md"
+        source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
+
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+
+        metadata = json.loads((self.repo / "books" / "sample" / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            metadata["workflow"],
+            {
+                "repository": "https://github.com/tim8es/book-translator",
+                "requested_ref": "agent-compatibility-and-skill",
+                "resolved_revision": "0123456789abcdef",
+            },
+        )
+
     def test_build_requires_reviewed_by_default(self):
         source = self.repo / "sample.txt"
         source.write_text(
