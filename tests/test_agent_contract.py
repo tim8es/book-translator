@@ -89,6 +89,29 @@ class AgentContractTests(unittest.TestCase):
         self.assertIn("not part of the agent execution contract", readme)
         self.assertIn("docs/translation.md", readme)
 
+    def test_readme_guides_zero_user_through_usage_modes(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8").lower()
+
+        for phrase in (
+            "start in 30 seconds",
+            "choose how to use it",
+            "option 1 — use it directly in a web ai",
+            "option 2 — use a private github workspace",
+            "recommended for full-book and multi-session translations",
+            "option 3 — use it on your computer",
+            "one workspace can contain many books",
+            "how resuming works",
+            "what book translator does for you",
+            "frequently asked questions",
+            "how it works internally",
+            "no api key",
+            "no programming knowledge",
+        ):
+            self.assertIn(phrase, readme)
+
+        self.assertNotIn("10 chapters", readme)
+        self.assertNotIn("ten chapters", readme)
+
     def test_skill_is_discovery_only(self):
         skill = (PROJECT_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
@@ -123,6 +146,24 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("Do not translate multiple chapters concurrently by default", setup)
         self.assertNotIn("Reviewer worker", setup)
         self.assertNotIn("target-language literary polish", setup)
+
+    def test_setup_contract_defines_persistent_multi_book_workspace_policy(self):
+        setup = (PROJECT_ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8").lower()
+
+        for phrase in (
+            "choose workspace persistence",
+            "persistent writable workspace",
+            "multi-session",
+            "multiple books",
+            "books/<book-slug>/",
+            "permanent branch per book",
+            "optional",
+            "do not claim",
+        ):
+            self.assertIn(phrase, setup)
+
+        self.assertNotIn("10 chapters", setup)
+        self.assertNotIn("ten chapters", setup)
 
     def test_orchestration_contract_preserves_execution_guarantees(self):
         text = (PROJECT_ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
