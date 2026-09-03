@@ -1,6 +1,6 @@
 # Agent setup protocol
 
-This file is authoritative for workflow revision resolution, capability detection, installation layout, collision handling, and installation provenance.
+This file is authoritative for workflow revision resolution, capability detection, installation layout, collision handling, workspace persistence selection, and installation provenance.
 
 It is loaded by the `bootstrap` context profile together with `AGENTS.md`. It does not define literary translation, review criteria, chapter sequencing, or durable chapter-state transitions.
 
@@ -27,11 +27,50 @@ Determine from the active environment whether you can:
 - run Python;
 - read the supplied source format;
 - create isolated workers or subagents;
+- create or access a persistent workspace/repository;
 - create the requested final artifact format.
 
 Do not ask the user to enumerate capabilities the environment can reveal directly.
 
 Capability detection is setup information. Execution topology is chosen later under `docs/ORCHESTRATION.md`.
+
+## Choose workspace persistence
+
+Choose the workspace model from the user's requested scope and the capabilities actually available in the environment.
+
+### Transient web workspace
+
+A temporary writable web/cloud workspace is acceptable when the requested work can reasonably finish within that environment and durable cross-session persistence is not required.
+
+Do not use a fixed chapter-count threshold to make this decision. Chapter and book sizes vary too much for a number such as ten chapters to be meaningful.
+
+Do not claim that a web interface provides a permanent virtual machine, permanent filesystem, GitHub repository creation, or cross-session persistence unless the active environment actually exposes that capability.
+
+If the environment is transient, record/export as much valid state as the environment permits and be explicit that later resume cannot be guaranteed from that workspace alone.
+
+### Persistent writable workspace
+
+For a full-book, long-running, or multi-session translation, prefer a **persistent writable workspace** when one is available. This may be:
+
+- a private GitHub/repository workspace accessible to the agent;
+- a local filesystem workspace;
+- another durable repository/filesystem provided by the active environment.
+
+A persistent workspace is the preferred durability boundary because repository/book state can be reconstructed without depending on prior chat history.
+
+Do not claim that a private repository, remote, push, or cloud workspace was created unless the active environment actually performed that operation.
+
+### Multiple books in one installation
+
+One Book Translator installation may contain **multiple books** under separate `books/<book-slug>/` workspaces.
+
+The book directory is the default durable storage boundary for one book. Each book keeps its own source, extraction, translation, metadata/provenance, progress, glossary, style guide, source-integrity state, and output.
+
+Do **not** require a permanent branch per book as the default storage model. Permanent per-book branches make book discovery, shared workflow updates, and beginner operation harder.
+
+Git branches or worktrees are **optional** isolation tools for advanced/concurrent execution when the active environment can manage them safely. They are not required for normal multi-book storage and should not be pushed onto a nontechnical user as a prerequisite.
+
+If a book needs stronger privacy or organizational isolation, a separate private repository/workspace is a valid alternative.
 
 ## Obtain a writable installation
 
@@ -97,6 +136,7 @@ Relative to `install_root`, a normal runtime installation contains:
 - `docs/TRANSLATION.md`;
 - `docs/templates/`;
 - `scripts/book.py`;
+- source-integrity helpers such as `scripts/corpus.py` when present in the selected workflow revision;
 - `books/.gitkeep` for an empty book root.
 
 A development copy additionally contains repository-development files such as:
@@ -152,7 +192,7 @@ For DOCX or PDF, do not claim automatic helper support that does not exist. Cont
 
 If no writable installation is possible, identify the exact unavailable operation and the smallest manual step required.
 
-Do not claim setup, file writes, Git operations, commands, workers, or artifacts were created when they were not.
+Do not claim setup, file writes, Git operations, commands, workers, repositories, persistence, or artifacts were created when they were not.
 
 ## Setup handoff
 
@@ -160,9 +200,10 @@ Setup is complete when:
 
 - one coherent workflow ref/revision has been selected;
 - the `bootstrap` contracts and installed runtime files come from that same revision;
+- an appropriate transient or persistent workspace model has been selected from actual capabilities and requested durability;
 - a writable `install_root` was selected without overwriting unrelated host files, or the exact read-only limitation was stated;
 - installation provenance was recorded as specifically as the environment permits;
-- relevant capabilities, including Python/source-format support and isolated workers, were detected;
+- relevant capabilities, including Python/source-format support, workspace persistence, and isolated workers, were detected;
 - manifest-required semantic inputs are available or are the only identified missing inputs.
 
 Then transition to the `orchestrator` context profile. Do not carry this setup document into Translator or Reviewer context merely because it was read during bootstrap.
