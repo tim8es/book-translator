@@ -50,6 +50,8 @@
 ## Recurring stylistic decisions
 
 - Book title: `Good Intentions` → `Благие намерения`.
+- Reader-facing chapter headings must not include the EPUB/spine ordinal when the extracted heading has the form `Chapter N: <author-facing title>`. Translate and display only the right-hand author-facing title: `Chapter 19: Chapter 19` → `Глава 19`; `Chapter 18: Chapter 17.5` → `Глава 17.5`; `Chapter 201: Epilogue 1` → `Эпилог 1`.
+- Preserve authorial fractional numbering exactly. In particular, `.5` chapters such as `15.5`, `17.5`, and `19.5` are intentional and must not be renumbered to the next integer. Technical sequential unit numbers remain only in workflow metadata/file names.
 - Preserve canon spell names as transliterated incantations (e.g. `Expelliarmus` → `Экспеллиармус`) unless the text explicitly discusses their literal meaning.
 - Use established Russian Harry Potter names/terms consistently as recorded in `glossary.md`.
 - `fuck/fucking` is functional: render according to syntax and emotional force (`блядь`, `нахуй`, `ёбаный/гребаный`, `чертовски`, etc.) rather than one-to-one repetition, while preserving density and intensity.
@@ -68,3 +70,4 @@
 
 - Extraction was re-run from EPUB spine with inline emphasis and scene separators preserved because the baseline helper drops `<em>` formatting.
 - During review, pay special attention to italic boundaries, POV switches after `---`, profanity intensity, speaker attribution, explicit-scene anatomy/actions, and upgrades/downgrades in relationship-intensity terms (`interested / like / fancy / crush / love`).
+- Verify reader-facing chapter headings against the author-facing portion of the source title; reject duplicated technical prefixes such as `Глава 19: Глава 19` and preserve intentional fractional chapter numbers.
