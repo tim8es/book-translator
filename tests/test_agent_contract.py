@@ -83,6 +83,12 @@ class AgentContractTests(unittest.TestCase):
         self.assertFalse((PROJECT_ROOT / "docs" / "TRANSLATION_GUIDE.md").exists())
         self.assertTrue((PROJECT_ROOT / "docs" / "TRANSLATION.md").is_file())
 
+    def test_public_tree_excludes_internal_development_specs(self):
+        self.assertFalse((PROJECT_ROOT / "docs" / "superpowers").exists())
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8").lower()
+        self.assertNotIn("docs/superpowers", readme)
+        self.assertNotIn("implementation plan", readme)
+
     def test_readme_is_explicitly_non_normative(self):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8").lower()
 
@@ -140,6 +146,7 @@ class AgentContractTests(unittest.TestCase):
             ".book-translator-install.json",
             "isolated workers",
             "docs/TRANSLATION.md",
+            "`scripts/corpus.py`;",
         ):
             self.assertIn(phrase, setup)
 
@@ -175,6 +182,9 @@ class AgentContractTests(unittest.TestCase):
             "do not silently",
             "CORRECTIONS_REQUIRED",
             "docs/TRANSLATION.md",
+            "contract_read_order",
+            "context_profiles",
+            "python scripts/corpus.py verify <book-slug>",
         ):
             self.assertIn(phrase.lower(), lowered)
 
