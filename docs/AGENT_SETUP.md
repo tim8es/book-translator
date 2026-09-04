@@ -113,6 +113,7 @@ For a namespaced installation, examples include:
 .book-translator/docs/ORCHESTRATION.md
 .book-translator/docs/TRANSLATION.md
 .book-translator/scripts/book.py
+.book-translator/scripts/corpus.py
 .book-translator/books/<book-slug>/
 ```
 
@@ -120,6 +121,7 @@ Helper commands are run relative to the chosen installation root, for example:
 
 ```bash
 python .book-translator/scripts/book.py validate <book-slug>
+python .book-translator/scripts/corpus.py verify <book-slug>
 ```
 
 when `install_root` is `.book-translator`.
@@ -136,7 +138,7 @@ Relative to `install_root`, a normal runtime installation contains:
 - `docs/TRANSLATION.md`;
 - `docs/templates/`;
 - `scripts/book.py`;
-- source-integrity helpers such as `scripts/corpus.py` when present in the selected workflow revision;
+- `scripts/corpus.py`;
 - `books/.gitkeep` for an empty book root.
 
 A development copy additionally contains repository-development files such as:
@@ -145,8 +147,7 @@ A development copy additionally contains repository-development files such as:
 - `.github/`;
 - `.gitignore`;
 - `LICENSE`;
-- `README.md`;
-- design/implementation planning documents.
+- `README.md`.
 
 Do not copy a real book workspace from the canonical repository into a new installation.
 
@@ -178,9 +179,9 @@ If the required inputs are already available, setup should continue without an e
 
 ## Helper and source-format capability
 
-`scripts/book.py` is optional and uses only the Python standard library.
+`scripts/book.py` and `scripts/corpus.py` are optional command-line helpers and use only the Python standard library. When Python is available, `book.py` handles structural extraction/validation/build operations and `corpus.py` handles source-corpus sealing, SHA-256 verification, and batch recovery.
 
-The source formats it can extract automatically are declared in `agent-manifest.json.source_formats.automatic_helper`. Formats declared in `agent_dependent` require reliable format handling by the active agent or an explicit minimal conversion/extraction step.
+The source formats `book.py` can extract automatically are declared in `agent-manifest.json.source_formats.automatic_helper`. Formats declared in `agent_dependent` require reliable format handling by the active agent or an explicit minimal conversion/extraction step.
 
 For EPUB extraction, preserve the package/spine reading order; do not assume every XHTML resource is a chapter.
 
