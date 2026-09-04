@@ -21,7 +21,7 @@ class CorpusCliTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
-        self.assertTrue(CORPUS_SCRIPT.is_file(), "scripts/corpus.py must provide batch source-corpus recovery")
+        self.assertTrue(CORPUS_SCRIPT.is_file(), "scripts/corpus.py must provide source-corpus integrity tooling")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
@@ -82,6 +82,33 @@ class CorpusCliTests(unittest.TestCase):
                     f"<html xmlns='http://www.w3.org/1999/xhtml'><body><h1>{title}</h1><p>Body {number}{body_suffix}.</p></body></html>",
                 )
 
+    def test_verify_rejects_modified_extracted_artifact(self):
+        source = self.repo / "sample.epub"
+        self.make_epub(source)
+        self.run_cli("book.py", "extract", str(source), "--slug", "sample", "--target-language", "ru")
+        self.run_cli("corpus.py", "seal", "sample")
+
+        book = self.repo / "books" / "sample"
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        extracted = book / progress["chapters"][0]["source_path"]
+        extracted.write_text(extracted.read_text(encoding="utf-8") + "\nTAMPERED\n", encoding="utf-8")
+
+        result = self.run_cli("corpus.py", "verify", "sample", expect=1)
+        self.assertIn("Extracted artifact hash mismatch", result.stderr)
+
+    def test_verify_rejects_modified_preserved_source(self):
+        source = self.repo / "sample.epub"
+        self.make_epub(source)
+        self.run_cli("book.py", "extract", str(source), "--slug", "sample", "--target-language", "ru")
+        self.run_cli("corpus.py", "seal", "sample")
+
+        stored_source = self.repo / "books" / "sample" / "source" / "sample.epub"
+        with stored_source.open("ab") as handle:
+            handle.write(b"tampered")
+
+        result = self.run_cli("corpus.py", "verify", "sample", expect=1)
+        self.assertIn("Preserved source hash mismatch", result.stderr)
+
     def test_restore_rebuilds_complete_corpus_without_mutating_translation_state(self):
         source = self.repo / "sample.epub"
         self.make_epub(source)
@@ -120,6 +147,7 @@ class CorpusCliTests(unittest.TestCase):
         self.assertEqual(manifest["source_sha256"], expected_sha)
         self.assertEqual(len(manifest["extracted"]), 3)
         self.run_cli("book.py", "validate", "sample")
+        self.run_cli("corpus.py", "verify", "sample")
 
     def test_restore_rejects_source_with_wrong_sha_before_writing(self):
         source = self.repo / "sample.epub"
