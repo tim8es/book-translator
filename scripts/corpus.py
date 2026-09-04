@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Integrity and batch-recovery helper for Book Translator source corpora.
 
-This helper complements scripts/book.py. It records a durable SHA-256 manifest for
-the preserved source and extracted artifacts, and can reconstruct the complete
-extracted corpus from one verified source file without mutating translation state.
+This helper complements scripts/book.py. It records and verifies a durable SHA-256
+manifest for the preserved source and extracted artifacts, and can reconstruct the
+complete extracted corpus from one verified source file without mutating translation
+state.
 """
 
 from __future__ import annotations
@@ -73,6 +74,15 @@ def source_file_path(book_dir: Path, metadata: dict) -> Path:
     return book_dir / "source" / source_file
 
 
+def normalized_expected_sha(value: str | None, label: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not SHA256_RE.fullmatch(normalized):
+        raise book.BookError(f"{label} must be a 64-character hexadecimal SHA-256 value")
+    return normalized
+
+
 def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path) -> dict:
     chapters = progress.get("chapters")
     if not isinstance(chapters, list):
@@ -105,6 +115,80 @@ def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path)
     }
 
 
+def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) -> tuple[str, int]:
+    if data.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        raise book.BookError(
+            f"Unsupported source-manifest.json schema_version: {data.get('schema_version')!r}"
+        )
+
+    if data.get("source_file") != metadata.get("source_file"):
+        raise book.BookError("source-manifest.json source_file disagrees with metadata.json")
+    if data.get("source_format") != metadata.get("source_format"):
+        raise book.BookError("source-manifest.json source_format disagrees with metadata.json")
+
+    chapters = progress.get("chapters")
+    if not isinstance(chapters, list):
+        raise book.BookError("progress.json must contain a chapters array")
+    items = data.get("extracted")
+    if not isinstance(items, list):
+        raise book.BookError("source-manifest.json extracted must be an array")
+    if data.get("chapter_count") != len(chapters) or len(items) != len(chapters):
+        raise book.BookError(
+            "source-manifest.json chapter_count/extracted entries disagree with progress.json"
+        )
+
+    expected_source_sha = normalized_expected_sha(
+        data.get("source_sha256") if isinstance(data.get("source_sha256"), str) else None,
+        "source-manifest.json source_sha256",
+    )
+    if not expected_source_sha:
+        raise book.BookError("source-manifest.json source_sha256 is missing")
+
+    source = source_file_path(book_dir, metadata)
+    if not source.is_file():
+        raise book.BookError(f"Preserved source is missing: {source.relative_to(book_dir).as_posix()}")
+    actual_source_sha = sha256_path(source)
+    if actual_source_sha != expected_source_sha:
+        raise book.BookError(
+            f"Preserved source hash mismatch: expected {expected_source_sha}, got {actual_source_sha}"
+        )
+
+    for record, item in zip(chapters, items):
+        if not isinstance(record, dict):
+            raise book.BookError("Every chapter entry must be an object")
+        if not isinstance(item, dict):
+            raise book.BookError("Every source-manifest.json extracted entry must be an object")
+
+        rel = checked_source_rel(book_dir, record.get("source_path"))
+        rel_text = rel.as_posix()
+        if item.get("path") != rel_text:
+            raise book.BookError(
+                f"Manifest path mismatch for chapter {record.get('number')}: expected {rel_text}, got {item.get('path')!r}"
+            )
+        if item.get("number") != record.get("number"):
+            raise book.BookError(f"Manifest chapter number mismatch for {rel_text}")
+        if item.get("title") != record.get("title"):
+            raise book.BookError(f"Manifest chapter title mismatch for {rel_text}")
+
+        expected_sha = normalized_expected_sha(
+            item.get("sha256") if isinstance(item.get("sha256"), str) else None,
+            f"manifest hash for {rel_text}",
+        )
+        if not expected_sha:
+            raise book.BookError(f"Manifest hash is missing for {rel_text}")
+
+        path = book_dir / rel
+        if not path.is_file():
+            raise book.BookError(f"Extracted artifact is missing: {rel_text}")
+        actual_sha = sha256_path(path)
+        if actual_sha != expected_sha:
+            raise book.BookError(
+                f"Extracted artifact hash mismatch for {rel_text}: expected {expected_sha}, got {actual_sha}"
+            )
+
+    return expected_source_sha, len(items)
+
+
 def write_manifest_atomic(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -128,13 +212,22 @@ def seal_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def normalized_expected_sha(value: str | None, label: str) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip().lower()
-    if not SHA256_RE.fullmatch(normalized):
-        raise book.BookError(f"{label} must be a 64-character hexadecimal SHA-256 value")
-    return normalized
+def verify_command(args: argparse.Namespace) -> int:
+    errors, _ = book.validate_book(args.slug)
+    if errors:
+        raise book.BookError("Cannot verify invalid book structure:\n- " + "\n- ".join(errors))
+
+    book_dir, metadata, progress = book.load_book(args.slug)
+    data = load_source_manifest(book_dir)
+    if data is None:
+        raise book.BookError("source-manifest.json is missing; seal the corpus before verification")
+
+    source_sha, chapter_count = verify_manifest(book_dir, metadata, progress, data)
+    print(
+        f"Verified source corpus for books/{args.slug}: "
+        f"{chapter_count} extracted artifact(s), SHA-256 {source_sha}"
+    )
+    return 0
 
 
 def restore_command(args: argparse.Namespace) -> int:
@@ -260,6 +353,7 @@ def restore_command(args: argparse.Namespace) -> int:
     errors, _ = book.validate_book(args.slug)
     if errors:
         raise book.BookError("Restored corpus but book validation still fails:\n- " + "\n- ".join(errors))
+    verify_manifest(book_dir, metadata, progress, new_manifest)
 
     print(
         f"Restored complete source corpus for books/{args.slug}: "
@@ -278,6 +372,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     seal.add_argument("slug", help="Book slug under books/.")
     seal.set_defaults(func=seal_command)
+
+    verify = subparsers.add_parser(
+        "verify",
+        help="Verify the preserved source and every extracted artifact against source-manifest.json.",
+    )
+    verify.add_argument("slug", help="Book slug under books/.")
+    verify.set_defaults(func=verify_command)
 
     restore = subparsers.add_parser(
         "restore",
