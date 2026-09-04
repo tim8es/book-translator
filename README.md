@@ -219,7 +219,7 @@ At a high level, the system is designed to:
 5. translate one chapter/unit at a time;
 6. review each translation against the original in a separate review role;
 7. keep shared decisions and progress consistent;
-8. detect structural/source-corpus problems instead of silently translating from incomplete inputs;
+8. detect structural or source-integrity problems instead of silently translating from incomplete or changed inputs;
 9. resume later from repository state;
 10. assemble the reviewed translation into an output when requested.
 
@@ -261,7 +261,7 @@ Yes **when the book state is stored in a persistent workspace** such as a privat
 
 ### Can another AI agent continue the same translation?
 
-Yes, if it can access the same Book Translator workflow revision and the durable book state. The workflow is designed not to require previous chat history for resume.
+Yes, if it can access the same Book Translator workflow revision and the durable book state. The workflow is designed not to require previous chat history for resume, including books pinned to older supported workflow revisions.
 
 ### Can I use PDF or DOCX?
 
@@ -298,6 +298,8 @@ agent-manifest.json
 
 `AGENTS.md` contains global invariants that apply to every role. Setup instructions do not travel into translation context, and detailed literary review criteria do not travel into setup context.
 
+Existing books keep the workflow revision recorded in `metadata.json.workflow`. If that recorded revision predates role-routed `context_profiles`, the orchestrator follows that revision's legacy manifest routing rather than silently upgrading the book.
+
 ## Contract responsibilities
 
 | File | Purpose |
@@ -331,7 +333,7 @@ The Reviewer compares source and translation. The Orchestrator owns durable shar
 
 `progress.json` tracks chapter work. `metadata.json.workflow` records the workflow provenance associated with the book. `glossary.md` and `style-guide.md` hold book-wide continuity decisions.
 
-When the source corpus is sealed, `source-manifest.json` records SHA-256 identities for the preserved source and extracted artifacts. This allows a later session to detect an incomplete/changed source corpus rather than treating whatever files happen to remain as authoritative.
+When the source corpus is sealed, `source-manifest.json` records SHA-256 identities for the preserved source and extracted artifacts. Before literary work resumes, those hashes can be checked so incomplete or changed source material is detected rather than silently accepted.
 
 ## Supported source formats
 
@@ -362,6 +364,7 @@ Source-corpus integrity/recovery helpers include:
 
 ```bash
 python scripts/corpus.py seal <book-slug>
+python scripts/corpus.py verify <book-slug>
 python scripts/corpus.py restore <book-slug> /path/to/original-source
 ```
 
@@ -385,8 +388,6 @@ The helpers use the Python standard library.
 │   └── corpus.py             # source-integrity/recovery helper
 └── tests/
 ```
-
-Design and implementation records for major architectural changes may also live under `docs/superpowers/`; they are development records, not runtime contracts.
 
 ## Tests
 
