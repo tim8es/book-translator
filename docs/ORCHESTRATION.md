@@ -16,10 +16,22 @@ At the start of a run:
 2. identify the active book or determine that a new book must be initialized;
 3. determine the workflow revision associated with that book;
 4. read `agent-manifest.json` from that revision;
-5. load the `orchestrator` entry from `context_profiles` from the same revision;
+5. select the execution contract using the schema-aware routing rules below;
 6. read only the durable book state needed to choose the next operation.
 
 For an existing book, `metadata.json.workflow` is the provenance source for its execution contract.
+
+## Workflow-contract compatibility
+
+Never project the currently installed manifest schema backward onto a book pinned to an older workflow revision.
+
+After reading `agent-manifest.json` from the book's recorded workflow revision:
+
+1. If that manifest contains a valid `context_profiles` mapping, use the role-specific profile declared by that same revision.
+2. If `context_profiles` is absent but the manifest contains a legacy `contract_read_order`, follow that recorded revision's legacy contract mechanism exactly. Do not require v3 `context_profiles`, and do not mix current v3 contract files into the legacy run.
+3. If neither routing mechanism can be interpreted safely, stop before state-changing work and require an explicit compatible workflow upgrade or report the exact reproducibility limitation.
+
+This compatibility rule applies to Orchestrator, Translator, and Reviewer contract selection. A legacy book may therefore continue under its recorded pre-v3 contract without being silently upgraded merely because the installed Book Translator revision now uses schema v3.
 
 ## Execution modes
 
@@ -47,7 +59,7 @@ When isolated workers are unavailable, preserve the same logical role boundaries
 2. complete the translation role and persist/return its artifact;
 3. end that role context;
 4. rebuild the reviewer context pack from durable files;
-5. independently perform review under `docs/TRANSLATION.md`;
+5. independently perform review under `docs/TRANSLATION.md` when the active workflow revision uses the v3 translation contract, or under the equivalent literary rules from the selected legacy contract;
 6. return the Reviewer outcome to the Orchestrator role;
 7. perform the state transition only from the Orchestrator role.
 
@@ -133,18 +145,21 @@ The preflight is book-wide, not chapter-by-chapter:
 2. compare `metadata.chapter_count` with the number of progress entries;
 3. verify that every `source_path` required by `progress.json` exists, not merely the next chapter;
 4. verify the preserved source declared by metadata is available when the active workspace is expected to be self-contained;
-5. when `source-manifest.json` exists, retain its source SHA-256 as the source identity for recovery;
+5. when `source-manifest.json` exists, verify the preserved source and every extracted artifact against its recorded SHA-256 values;
 6. run structural validation before selecting the next literary task.
 
-When Python is available:
+When Python is available, run structural validation and, for a sealed workspace, integrity verification:
 
 ```bash
 python scripts/book.py validate <book-slug>
+python scripts/corpus.py verify <book-slug>
 ```
+
+Run `corpus.py verify` only when `source-manifest.json` exists. A hash mismatch is a blocking integrity failure: do not continue literary work and do not regenerate the manifest merely to accept the changed files.
 
 A workspace with 205 progress entries and only 13 extracted artifacts is not a partially valid 13-chapter source corpus. It is an incomplete corpus and must be repaired before translation/review continues.
 
-If the original source is available but the extracted tree is incomplete, restore the complete source corpus in one batch. Do not repair missing extracted chapters one at a time.
+If the original source is available but the extracted tree is incomplete or integrity verification fails, restore the complete source corpus in one batch. Do not repair missing extracted chapters one at a time.
 
 For a sealed workspace:
 
@@ -158,7 +173,12 @@ For a legacy workspace without `source-manifest.json`, recovery requires a trust
 python scripts/corpus.py restore <book-slug> <source-file> --expected-sha256 <sha256>
 ```
 
-The restore operation must verify source identity and complete extraction before replacing canonical source artifacts. It must preserve `progress.json`, translation files, review states, glossary, and style guide. After recovery, run `python scripts/book.py validate <book-slug>` again before dispatching literary work.
+The restore operation must verify source identity and complete extraction before replacing canonical source artifacts. It must preserve `progress.json`, translation files, review states, glossary, and style guide. After recovery, run both structural validation and sealed-corpus verification before dispatching literary work:
+
+```bash
+python scripts/book.py validate <book-slug>
+python scripts/corpus.py verify <book-slug>
+```
 
 Do not substitute a later online edition, archive export, or same-named file when the recorded SHA-256 does not match. If no trusted source identity is available, report the source-reproducibility block instead of guessing.
 
@@ -177,7 +197,7 @@ Operational meanings:
 - `pending`: the chapter is known but its usable extracted source is not yet ready;
 - `extracted`: the source chapter artifact exists and is ready for translation;
 - `translated`: a complete translation artifact exists, but the required independent literary review has not yet produced an accepted PASS for that artifact;
-- `reviewed`: the current canonical translation artifact has passed review under `docs/TRANSLATION.md` and the Orchestrator has completed the required state acceptance/validation transition.
+- `reviewed`: the current canonical translation artifact has passed review under the literary contract associated with the book's workflow revision and the Orchestrator has completed the required state acceptance/validation transition.
 
 Never use `reviewed` as a convenience label for a translation that merely looks fluent or complete.
 
@@ -210,7 +230,7 @@ Do not retranslate a reviewed chapter without a concrete reason. If a reviewed t
 To dispatch the `translator` role:
 
 1. read `agent-manifest.json` from the book's workflow revision;
-2. load only the contracts named by the `translator` context profile;
+2. select the Translator contract using the workflow-contract compatibility rules above: use the `translator` `context_profiles` entry for v3 manifests, or the recorded legacy `contract_read_order` mechanism for pre-v3 manifests;
 3. add the task-specific durable inputs:
    - metadata relevant to language/book identity and workflow provenance;
    - current `glossary.md`;
@@ -220,13 +240,13 @@ To dispatch the `translator` role:
    - expected translation artifact/path;
    - exact task/output request.
 
-Do not include `docs/AGENT_SETUP.md` or this orchestration contract in the Translator context merely because the Orchestrator has them loaded.
+Do not include `docs/AGENT_SETUP.md` or this orchestration contract in the Translator context merely because the Orchestrator has them loaded when the active v3 profile does not require them. For a legacy workflow, follow that revision's own contract loading rules rather than inventing a v3 subset.
 
 If the chapter directly continues a scene and prior text is materially necessary, include the necessary bounded context. Otherwise prefer durable glossary/style decisions plus a small continuity excerpt over entire prior chapters.
 
 ## Accepting a Translator result
 
-The Translator returns a complete chapter artifact plus any proposals/warnings defined by `docs/TRANSLATION.md`.
+The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract.
 
 Before changing state to `translated`, the Orchestrator verifies that:
 
@@ -241,34 +261,34 @@ After accepting the artifact, persist `translated` and any accepted global decis
 
 To dispatch the `reviewer` role:
 
-1. load only the contracts named by the `reviewer` context profile from the same book workflow revision;
+1. select the Reviewer contract from the same book workflow revision using the compatibility rules above: use the `reviewer` `context_profiles` entry for v3 manifests, or the recorded legacy `contract_read_order` mechanism for pre-v3 manifests;
 2. include the current source chapter;
 3. include the current canonical translation artifact;
 4. include current glossary and style-guide decisions;
 5. include only bounded continuity context required to judge the passage;
-6. request one of the outcome categories defined by `docs/TRANSLATION.md`.
+6. request the review outcome defined by the active workflow revision.
 
 Do not pass the Translator's hidden reasoning or justification.
 
 ## Review/state boundary
 
-The Reviewer returns either `PASS` or `CORRECTIONS_REQUIRED` under `docs/TRANSLATION.md`.
+For the v3 literary contract, the Reviewer returns either `PASS` or `CORRECTIONS_REQUIRED` under `docs/TRANSLATION.md`. A legacy workflow follows the equivalent review/state semantics defined by that recorded revision.
 
 ```text
 translated artifact
-  -> Reviewer under docs/TRANSLATION.md
+  -> Reviewer under the active book workflow revision
   -> CORRECTIONS_REQUIRED: remain translated
        -> apply/obtain corrections
        -> review corrected artifact again
   -> PASS: Orchestrator accepts valid proposals
-       -> structural validation while still translated
+       -> structural/integrity validation while still translated
        -> persist reviewed
        -> validate the resulting state
 ```
 
 If the outcome is `CORRECTIONS_REQUIRED`, do not mark the chapter reviewed. Apply or obtain the corrections through the appropriate role boundary and re-run independent review on the corrected artifact until a Reviewer returns `PASS`.
 
-A `PASS` is necessary but not sufficient for the durable state transition. Before persisting `reviewed`, the Orchestrator must also ensure the reviewed artifact is the canonical artifact, required files exist, accepted global decisions have been applied consistently, and structural state validates.
+A `PASS` is necessary but not sufficient for the durable state transition. Before persisting `reviewed`, the Orchestrator must also ensure the reviewed artifact is the canonical artifact, required files exist, accepted global decisions have been applied consistently, and structural/integrity state validates.
 
 ## Context freshness
 
@@ -294,17 +314,17 @@ For an existing book:
 2. read the book's `metadata.json.workflow` before selecting the execution contract;
 3. use its `resolved_revision` when available, otherwise the most specific recorded requested ref;
 4. read `agent-manifest.json` from that recorded workflow revision;
-5. load the `orchestrator` context profile from that same revision;
+5. select the Orchestrator contract using the workflow-contract compatibility rules above: v3 `context_profiles` when present, otherwise the recorded legacy `contract_read_order` mechanism;
 6. read `progress.json`, `glossary.md`, `style-guide.md`, and `source-manifest.json` when present;
 7. run the source corpus preflight and repair the complete corpus if required;
 8. inspect only the bounded source/translation context required for the next operation;
 9. continue from the first non-`reviewed` chapter unless the user explicitly requests another scope.
 
-Do not use a successful lookup of the next chapter as a substitute for corpus preflight. A later missing source artifact is a repository-integrity defect even when the immediate chapter happens to exist.
+Do not use a successful lookup of the next chapter as a substitute for corpus preflight. A later missing or hash-mismatched source artifact is a repository-integrity defect even when the immediate chapter happens to exist.
 
 `<installation-root>/.book-translator-install.json` describes the workflow currently installed at that root, but it does not override an existing book's recorded workflow provenance.
 
-If the installed revision differs from the book revision, do not silently rewrite the book's provenance or execute it under the newer contract. Load the recorded workflow revision when possible; otherwise state the exact reproducibility limitation before making state-changing claims.
+If the installed revision differs from the book revision, do not silently rewrite the book's provenance or execute it under the newer contract. Load and interpret the recorded workflow revision when possible; otherwise state the exact reproducibility limitation before making state-changing claims.
 
 Different books in one workspace may legitimately retain different workflow revisions.
 
@@ -314,11 +334,11 @@ A workflow upgrade for an existing book is an explicit state transition, never a
 
 Before upgrading:
 
-1. record the current book provenance and validate current structure;
+1. record the current book provenance and validate current structure/integrity;
 2. resolve the requested new workflow revision;
 3. inspect compatibility relevant to the book's durable schema/state;
 4. update the book provenance only as part of the explicit upgrade;
-5. reload the `orchestrator` profile from the new revision;
+5. select the Orchestrator contract using the new revision's routing mechanism;
 6. validate the book again before continuing chapter work.
 
 If compatibility cannot be established safely, keep the existing book revision instead of guessing.
@@ -335,7 +355,7 @@ python scripts/book.py validate <book-slug>
 
 Use the equivalent helper path for a namespaced installation.
 
-At minimum, validation must protect these invariants:
+At minimum, structural validation must protect these invariants:
 
 - the preserved source declared by metadata exists when the workspace is expected to be self-contained;
 - chapter numbers/slugs are unique and ordered;
@@ -348,15 +368,17 @@ At minimum, validation must protect these invariants:
 - source identity/integrity state is retained when `source-manifest.json` exists;
 - no translation artifact replaced the preserved source.
 
-Structural validation cannot substitute for a Reviewer `PASS` under `docs/TRANSLATION.md`.
+When `source-manifest.json` exists, structural validation is not enough: `python scripts/corpus.py verify <book-slug>` must also confirm the preserved source and extracted SHA-256 values before literary work resumes.
+
+Neither structural nor integrity validation can substitute for a Reviewer `PASS` under the active literary contract.
 
 ## Failure handling
 
 - If translation fails or is incomplete, do not advance the chapter to `translated`.
 - If review fails to run, errors, or returns `CORRECTIONS_REQUIRED`, keep the chapter `translated`.
-- If corpus preflight or validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.
+- If corpus preflight, hash verification, or structural validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.
 - If the exact source is unavailable, do not silently use a same-title/same-name replacement.
-- If the required workflow revision cannot be loaded, do not silently substitute another revision and claim exact reproducibility.
+- If the required workflow revision cannot be loaded or its routing mechanism cannot be interpreted, do not silently substitute another revision and claim exact reproducibility.
 - If isolated workers are unavailable, use `single_agent_bounded_context` rather than asking the user to manually orchestrate roles.
 
 ## Building output
@@ -380,11 +402,12 @@ Before declaring a book complete, the Orchestrator verifies that:
 1. every intended chapter is present and in real reading order;
 2. every intended chapter is `reviewed` through the review/state boundary above;
 3. structural validation succeeds;
-4. glossary and style-guide decisions are consistent across the book;
-5. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under `docs/TRANSLATION.md` when a book-level consistency check warrants it;
-6. requested output artifacts are ordered/checked if output was requested;
-7. the preserved source remains unchanged;
-8. workflow provenance remains intact;
-9. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
+4. when `source-manifest.json` exists, sealed-corpus SHA-256 verification succeeds;
+5. glossary and style-guide decisions are consistent across the book;
+6. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under the active literary contract when a book-level consistency check warrants it;
+7. requested output artifacts are ordered/checked if output was requested;
+8. the preserved source remains unchanged;
+9. workflow provenance remains intact;
+10. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
 
 A built output file alone is not evidence that the book is complete.
