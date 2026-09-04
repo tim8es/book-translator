@@ -152,7 +152,7 @@ One persistent workspace can contain many books side by side:
 
 ```text
 books/
-├── good-intentions/
+├── my-book/
 ├── my-first-novel/
 └── another-book/
 ```
@@ -193,7 +193,7 @@ For example:
 **Today:**
 
 ```text
-Translate Good Intentions into Russian.
+Translate My Book into Russian.
 ```
 
 The agent translates/reviews chapters and records progress.
@@ -201,7 +201,7 @@ The agent translates/reviews chapters and records progress.
 **Tomorrow, in a new chat:**
 
 ```text
-Continue translating Good Intentions from the repository state.
+Continue translating My Book from the repository state.
 ```
 
 The agent can inspect the saved book workspace, determine what has already been completed, and continue from the next required operation instead of depending on yesterday's conversation.
