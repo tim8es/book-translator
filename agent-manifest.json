@@ -1,21 +1,38 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "book-translator",
   "repository": "https://github.com/tim8es/book-translator",
-  "purpose": "Agent-native, resumable literary book translation with source-comparison review.",
-  "primary_clients": ["ChatGPT Web", "Codex"],
-  "agent_agnostic": true,
-  "contract_read_order": [
-    "agent-manifest.json",
-    "SKILL.md",
-    "AGENTS.md",
-    "docs/AGENT_SETUP.md",
-    "docs/ORCHESTRATION.md"
+  "purpose": "Agent-native, resumable literary book translation with independent source-comparison review.",
+  "primary_clients": [
+    "ChatGPT Web",
+    "Codex"
   ],
+  "agent_agnostic": true,
   "skill_entrypoint": "SKILL.md",
-  "entrypoint": "AGENTS.md",
-  "setup_guide": "docs/AGENT_SETUP.md",
-  "orchestration_guide": "docs/ORCHESTRATION.md",
+  "contracts": {
+    "global": "AGENTS.md",
+    "setup": "docs/AGENT_SETUP.md",
+    "orchestration": "docs/ORCHESTRATION.md",
+    "translation": "docs/TRANSLATION.md"
+  },
+  "context_profiles": {
+    "bootstrap": [
+      "global",
+      "setup"
+    ],
+    "orchestrator": [
+      "global",
+      "orchestration"
+    ],
+    "translator": [
+      "global",
+      "translation"
+    ],
+    "reviewer": [
+      "global",
+      "translation"
+    ]
+  },
   "version_policy": {
     "default_ref": "main",
     "rule": "Use the latest main when the user does not explicitly pin a tag, commit, or branch; resolve that ref once at setup and keep the resolved revision stable for the active book run.",
@@ -37,51 +54,33 @@
   "defaults": {
     "output_format": "markdown",
     "book_root": "books",
-    "progress_file": "progress.json",
-    "translation_rules": "AGENTS.md"
+    "progress_file": "progress.json"
   },
   "bootstrap": {
     "preferred_method": "git_clone",
     "clone_url": "https://github.com/tim8es/book-translator.git",
-    "post_clone_entrypoint": "SKILL.md",
     "mandatory_external_dependencies": [],
     "optional_runtime": "Python 3 standard library",
     "canonical_install_root": ".",
-    "collision_install_root": ".book-translator",
-    "collision_rule": "Never overwrite a pre-existing unrelated file. If a runtime-path collision exists in a host repository, install the entire runtime set under .book-translator instead of mixing canonical and host files."
-  },
-  "execution": {
-    "preferred_mode": "isolated_workers",
-    "fallback_mode": "single_agent_bounded_context",
-    "chapter_policy": "sequential",
-    "fresh_translator_per_chapter": true,
-    "fresh_reviewer_per_chapter": true,
-    "reviewer_independent_from_translator": true,
-    "global_state_writer": "orchestrator",
-    "parallel_chapter_translation_by_default": false,
-    "worker_context_policy": "bounded"
+    "collision_install_root": ".book-translator"
   },
   "source_formats": {
-    "automatic_helper": ["epub", "html", "xhtml", "markdown", "txt"],
-    "agent_dependent": ["docx", "pdf"]
+    "automatic_helper": [
+      "epub",
+      "html",
+      "xhtml",
+      "markdown",
+      "txt"
+    ],
+    "agent_dependent": [
+      "docx",
+      "pdf"
+    ]
   },
-  "chapter_states": ["pending", "extracted", "translated", "reviewed"],
-  "completion_requirement": "Every intended chapter is reviewed under AGENTS.md and repository state validates.",
-  "agent_behavior": {
-    "ask_only_for_missing_required_inputs": true,
-    "automate_safe_defaults": true,
-    "preserve_source_immutable": true,
-    "resume_from_repository_state": true,
-    "do_not_require_chat_history": true,
-    "do_not_copy_canonical_book_contents": true,
-    "do_not_claim_unavailable_capabilities": true,
-    "do_not_require_user_to_manage_orchestration": true,
-    "do_not_overwrite_unrelated_host_files": true
-  },
-  "capability_fallbacks": {
-    "filesystem_and_git": "Clone the requested repository ref, resolve it to a concrete revision, check out that resolved revision, and work from that stable revision.",
-    "repository_api_without_shell": "Read the canonical files from the resolved revision through the available repository API and create/update equivalent workflow files in the writable target workspace without overwriting unrelated host files.",
-    "isolated_workers_unavailable": "Execute Translator and Reviewer as separate bounded-context roles in one agent session while preserving independent review and orchestrator-owned state transitions.",
-    "read_only": "Read the instructions, state exactly what cannot be performed, and give the minimum manual step needed. Do not claim setup or file writes occurred."
-  }
+  "chapter_states": [
+    "pending",
+    "extracted",
+    "translated",
+    "reviewed"
+  ]
 }

@@ -1,211 +1,358 @@
 # Book Translator
 
-**Agent-native workflow for translating full books with persistent state, literary fidelity checks, resumable review, and bounded-context orchestration.**
+**Give an AI agent a book. Get a reviewed translation you can stop and resume at any time.**
 
-Book Translator is designed primarily for **ChatGPT Web** and **Codex**, while remaining **agent-agnostic**: other capable AI agents can follow the same repository contract when they can read the repository and access the source book.
+Book Translator translates full books while keeping progress, terminology, style, review state, and source integrity between sessions. It is designed primarily for **ChatGPT Web** and **Codex**, while remaining **agent-agnostic** so other capable AI agents can use the same workflow.
 
-The repository is meant to be handed directly to an AI agent. The agent should set up everything it can itself, ask only for genuinely missing user inputs, and manage the translation as durable file-based state.
+**No programming knowledge required. No API key required.** You can start by giving an AI agent a repository link, a book, and the language you want.
 
-> Repository URL: `https://github.com/tim8es/book-translator`
+> Repository: `https://github.com/tim8es/book-translator`
 
-## Fastest start
+> **README is a human-facing overview and is not part of the agent execution contract.** The executable routing source is `agent-manifest.json`; role-specific rules live in the contracts referenced there.
 
-Give your AI agent:
+## Start in 30 seconds
 
-1. this repository URL;
-2. the source book file;
-3. the target language.
+If you already have a capable AI agent open:
+
+1. attach or otherwise give it access to your book;
+2. paste this message;
+3. change `Russian` to the language you want.
 
 ```text
-Use https://github.com/tim8es/book-translator to translate this book into Russian.
-Set up everything you can automatically, follow the repository instructions,
-and continue until the translation is reviewed.
+Use https://github.com/tim8es/book-translator to translate the attached book into Russian.
+Set up everything you can automatically, follow the repository workflow,
+keep durable progress when the environment allows it, and review the translation against the original.
 ```
 
-You do **not** need to explain repository structure, request subagents manually, copy prompts, install an LLM SDK, create a database, or configure an API key for the default workflow.
+That is enough to start. You do not need to understand Git, Python, repositories, subagents, chapter states, glossaries, or the internal review system first.
 
-## Canonical contract
+## Choose how to use it
 
-`agent-manifest.json` is the machine-readable bootstrap contract. Its `contract_read_order` is the single canonical instruction-loading order.
+There are three practical ways to use Book Translator.
 
-A capable agent should:
+| Mode | Best for | Persists between sessions? | Technical setup |
+| --- | --- | --- | --- |
+| **Web AI** | Trying Book Translator or work that can reasonably finish in the current AI workspace | Only if that web environment actually provides persistent files/workspace | None if the agent can prepare its own workspace |
+| **Private GitHub workspace** | **Full-book and multi-session translations** | Yes, when changes are saved to the repository | Usually the agent can prepare it; manual steps are available below |
+| **Local workspace** | Maximum local control/privacy, Codex and other coding agents | Yes, on your computer | One clone command, or ask an agent to do it |
 
-1. preserve an explicitly pinned branch/tag/commit, otherwise use the manifest default ref (`main`);
-2. resolve that ref once to a concrete revision when possible;
-3. read all contract files from that same revision according to `contract_read_order`;
-4. select a writable installation root without overwriting unrelated host files;
-5. record installation provenance;
-6. initialize or resume a book workspace;
-7. follow the chapter translation/review workflow until the requested scope is validated.
+**Option 2 is recommended for full-book and multi-session translations.**
 
-Do not silently switch workflow revisions during an active book run.
+Do not choose a mode by a fixed number of chapters. A five-chapter book can be larger than a thirty-chapter book. The important question is whether you expect the work to outlive the current AI session or temporary workspace.
 
-When integrating into an existing repository, see [`docs/AGENT_SETUP.md`](docs/AGENT_SETUP.md). A conflicting host file must never be overwritten automatically; the deterministic fallback is a namespaced `.book-translator/` installation.
+## Option 1 — Use it directly in a Web AI
 
-## Clients and compatibility
+This is the easiest way to try Book Translator.
 
-### ChatGPT Web
+### What you do
 
-Use whatever repository/file/workspace capabilities are actually available. Do not assume shell, Git, or isolated workers when they are unavailable.
+1. Open ChatGPT Web or another capable AI web interface.
+2. Attach the book.
+3. Send the prompt from [Start in 30 seconds](#start-in-30-seconds).
 
-When isolated workers are unavailable, Translator and Reviewer still run as separate bounded-context roles.
+If the AI environment provides a writable cloud workspace, repository access, or an equivalent virtual filesystem, the agent can prepare Book Translator there and perform the translation workflow inside that environment.
 
-### Codex
+### When to use this mode
 
-Codex is the most automated path when it has a writable workspace: it can clone/open the repository, run the optional Python helper, persist state, validate files, use Git, and use isolated worker sessions when supported.
+Use it when:
 
-### Other capable AI agents
+- you are testing the workflow;
+- the requested scope can reasonably finish in the current session/workspace;
+- you do not need to rely on that temporary environment as your long-term source of truth.
 
-Another agent can use Book Translator when it can at minimum:
+### Important limitation
 
-- read the repository contract;
-- access the source book;
-- produce the target-language text;
-- persist or return enough durable state to resume.
+A web AI does **not** automatically imply a permanent virtual machine or permanent filesystem. Capabilities differ by product and session.
 
-Filesystem, shell, Git, repository API, Python, and worker capabilities increase automation but are not requirements of the literary method itself.
+Book Translator should use persistence when it is actually available, but it must not pretend a temporary workspace will survive after the session ends.
 
-## Orchestrated chapter workflow
+For a long-running book, use a persistent workspace instead.
 
-When isolated workers/subagents are available:
+## Option 2 — Use a private GitHub workspace
+
+**Recommended for full-book and multi-session translations.**
+
+A private GitHub repository gives the translation a durable home. The book can be continued tomorrow, in another chat, on another computer, or by another capable AI agent that can access the same repository.
+
+### Easiest method: ask your agent to set it up
+
+If your AI agent can work with GitHub, give it a request like:
+
+```text
+Create or prepare a private GitHub workspace for my book translations.
+Install Book Translator from https://github.com/tim8es/book-translator there.
+Keep each book in its own books/<book-slug>/ workspace.
+Then translate the attached book into Russian and persist progress so another session can resume it.
+```
+
+The agent should use only GitHub/repository capabilities that are actually available. If it cannot create a repository or push changes, it should tell you the smallest manual step required instead of claiming the setup was completed.
+
+### Manual fallback
+
+If you prefer to create the private repository yourself:
+
+1. On GitHub, create a new **private** empty repository, for example `my-book-translations`.
+2. Clone Book Translator to your computer:
+
+```bash
+git clone https://github.com/tim8es/book-translator.git my-book-translations
+cd my-book-translations
+```
+
+3. Point the working copy at your new private repository and push it:
+
+```bash
+git remote rename origin book-translator
+git remote add origin https://github.com/YOUR-NAME/my-book-translations.git
+git push -u origin main
+```
+
+Replace `YOUR-NAME` with your GitHub username.
+
+The original Book Translator repository remains available as the `book-translator` remote, while your books and translation state live in your private `origin` repository.
+
+After that, open the private repository with your AI agent and say:
+
+```text
+Translate the attached book into Russian using the Book Translator workflow in this repository.
+```
+
+## Option 3 — Use it on your computer
+
+This is a good option for Codex and other coding agents that can work directly with your local files.
+
+### Easiest method: ask the agent
+
+Tell your coding agent:
+
+```text
+Clone https://github.com/tim8es/book-translator to my computer,
+prepare it as a persistent book-translation workspace,
+and use it to translate the attached book into Russian.
+```
+
+### Manual fallback
+
+If you have Git installed, the setup is:
+
+```bash
+git clone https://github.com/tim8es/book-translator.git
+cd book-translator
+```
+
+Then open that folder with your agent and give it the book plus the target language.
+
+A local workspace persists independently of a chat session. You can back it up, keep it private, or connect it to a private GitHub repository later.
+
+## One workspace can contain many books
+
+You do **not** need a separate Book Translator installation for every book.
+
+One persistent workspace can contain many books side by side:
+
+```text
+books/
+├── good-intentions/
+├── my-first-novel/
+└── another-book/
+```
+
+Each book has its own durable state:
+
+```text
+books/<book-slug>/
+├── source/              # preserved original
+├── extracted/           # extracted source chapters/sections
+├── translated/          # translated chapters
+├── output/              # assembled deliverables
+├── metadata.json        # book metadata + workflow provenance
+├── progress.json        # durable chapter queue
+├── source-manifest.json # source/extraction integrity when sealed
+├── glossary.md          # recurring terminology/continuity decisions
+└── style-guide.md       # evidence-based literary observations
+```
+
+The book folder is the primary unit of durable book state.
+
+### Do I need a Git branch for every book?
+
+No. A permanent branch per book is **not** required and is not the beginner default.
+
+Keeping books under separate `books/<book-slug>/` folders is simpler: the agent can see all available books, resume the right one, and keep workflow updates in one workspace.
+
+Advanced users or agents may use temporary branches/worktrees when they need isolation for concurrent work. That is an implementation technique, not something a normal user must manage.
+
+If one book needs stronger privacy or organizational isolation, putting that book in its own private repository is usually easier to understand than using a permanent branch as storage.
+
+## How resuming works
+
+Book Translator stores the state needed to continue in files, not only in chat history.
+
+For example:
+
+**Today:**
+
+```text
+Translate Good Intentions into Russian.
+```
+
+The agent translates/reviews chapters and records progress.
+
+**Tomorrow, in a new chat:**
+
+```text
+Continue translating Good Intentions from the repository state.
+```
+
+The agent can inspect the saved book workspace, determine what has already been completed, and continue from the next required operation instead of depending on yesterday's conversation.
+
+This is why a persistent GitHub or local workspace is recommended for serious full-book work.
+
+## What Book Translator does for you
+
+At a high level, the system is designed to:
+
+1. preserve the original book;
+2. extract its real reading order into manageable source units;
+3. create durable per-book progress and metadata;
+4. build a glossary and evidence-based style guide as the book develops;
+5. translate one chapter/unit at a time;
+6. review each translation against the original in a separate review role;
+7. keep shared decisions and progress consistent;
+8. detect structural or source-integrity problems instead of silently translating from incomplete or changed inputs;
+9. resume later from repository state;
+10. assemble the reviewed translation into an output when requested.
+
+The literary goal is fidelity rather than rewriting: meaning, ambiguity, tone, voice, character distinctions, rhythm, subtext, repetition, and meaningful formatting are all part of the review model.
+
+## Privacy and copyright
+
+For copyrighted, unpublished, confidential, or otherwise private books, use a **private GitHub repository** or a **local private workspace** unless you have the right and intention to publish the material.
+
+The canonical Book Translator repository contains the workflow, not bundled real books. Your real source books belong in your chosen private working environment.
+
+A temporary web-AI upload or workspace is subject to the capabilities and data handling of that product; Book Translator itself does not create a separate storage/privacy guarantee on top of the host environment.
+
+## Frequently asked questions
+
+### Do I need programming knowledge?
+
+No. The intended beginner path is to give the repository link and book to a capable AI agent and let the agent handle technical setup where its environment permits it.
+
+### Do I need Python?
+
+No. Python helpers automate extraction, validation, integrity, recovery, and build tasks when available, but Python is not required to understand the literary workflow. If a capability is unavailable, the active agent should use the documented fallback or tell you the minimum manual step required.
+
+### Do I need an API key?
+
+No API key is required by the default Book Translator workflow. The AI product you use may of course have its own account/subscription requirements.
+
+### Do I need Git?
+
+Not necessarily. For a simple Web AI trial, no Git knowledge is required. For persistent GitHub/local use, an AI coding agent can often manage Git for you. Manual copy/paste commands are provided as a fallback.
+
+### Can I translate several books in one repository?
+
+Yes. One workspace can contain many books under `books/<book-slug>/`, each with its own progress, source, glossary, style guide, provenance, and output.
+
+### Can I close the chat and continue later?
+
+Yes **when the book state is stored in a persistent workspace** such as a private GitHub repository or local folder. Do not rely on an ephemeral web workspace unless the product explicitly preserves it.
+
+### Can another AI agent continue the same translation?
+
+Yes, if it can access the same Book Translator workflow revision and the durable book state. The workflow is designed not to require previous chat history for resume, including books pinned to older supported workflow revisions.
+
+### Can I use PDF or DOCX?
+
+Potentially. EPUB, HTML/XHTML, Markdown, and TXT have automatic support in the included standard-library helper. PDF and DOCX depend on whether the active agent/environment can read or extract them reliably.
+
+### Should my working repository be private?
+
+Usually yes for copyrighted, unpublished, or personal books. Use a public repository only when you have the rights and explicitly want the source/translation state to be public.
+
+### Should I create one branch per book?
+
+No. Use separate book folders by default. Branch/worktree isolation is optional for advanced concurrent workflows, not a required storage model.
+
+---
+
+# How it works internally
+
+Everything below is technical reference. You do not need it to start translating.
+
+## Role-routed agent contract
+
+A full-book translation needs different kinds of reasoning. Loading setup, orchestration, literary, and state-management instructions into every worker wastes context and can mix responsibilities.
+
+Book Translator therefore routes each role to a focused instruction set:
+
+```text
+agent-manifest.json
+       │
+       ├─ bootstrap    → AGENTS.md + docs/AGENT_SETUP.md
+       ├─ orchestrator → AGENTS.md + docs/ORCHESTRATION.md
+       ├─ translator   → AGENTS.md + docs/TRANSLATION.md
+       └─ reviewer     → AGENTS.md + docs/TRANSLATION.md
+```
+
+`AGENTS.md` contains global invariants that apply to every role. Setup instructions do not travel into translation context, and detailed literary review criteria do not travel into setup context.
+
+Existing books keep the workflow revision recorded in `metadata.json.workflow`. If that recorded revision predates role-routed `context_profiles`, the orchestrator follows that revision's legacy manifest routing rather than silently upgrading the book.
+
+## Contract responsibilities
+
+| File | Purpose |
+| --- | --- |
+| `agent-manifest.json` | Machine-readable contract registry, context profiles, stable defaults, provenance locations, and source-format capabilities. |
+| `SKILL.md` | Thin one-link discovery/bootstrap entrypoint. |
+| `AGENTS.md` | Small global invariant layer safe to auto-load. |
+| `docs/AGENT_SETUP.md` | Ref/version resolution, capabilities, workspace/install selection, collisions, and installation provenance. |
+| `docs/ORCHESTRATION.md` | Book initialization/resume, role dispatch, bounded context, chapter state, single-writer persistence, validation, corpus preflight, and completion sequencing. |
+| `docs/TRANSLATION.md` | Authoritative literary translation and independent source-comparison review contract. |
+
+README remains human-facing; normative execution behavior lives in those contracts.
+
+## Translation and review model
+
+The Translator and Reviewer are separate logical roles.
 
 ```text
 Orchestrator
-  -> Chapter N Translator (fresh worker)
-  -> Chapter N Reviewer   (fresh independent worker)
-  -> Orchestrator validates + commits global state
-  -> Chapter N+1
+  → Translator
+  → Reviewer
+  → Orchestrator accepts valid state
+  → next chapter
 ```
 
-The orchestrator is the only writer of global mutable state such as `progress.json`, `glossary.md`, and `style-guide.md`.
+When independent workers/subagents are available, they can use separate bounded contexts. When they are unavailable, one physical agent can execute the same roles sequentially while rebuilding context from durable files.
 
-Chapters are sequential by default:
+The Reviewer compares source and translation. The Orchestrator owns durable shared-state transitions.
 
-```text
-T1 -> R1 -> state commit -> T2 -> R2 -> state commit -> ...
-```
+## Durable state and source integrity
 
-Parallel chapter translation is deliberately not the default because terminology, character voice, ambiguity, and continuity decisions can depend on earlier reviewed chapters.
+`progress.json` tracks chapter work. `metadata.json.workflow` records the workflow provenance associated with the book. `glossary.md` and `style-guide.md` hold book-wide continuity decisions.
 
-See [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md).
-
-## What the agent should do automatically
-
-A capable agent should:
-
-1. resolve and pin the workflow revision;
-2. load the canonical contract through `agent-manifest.json.contract_read_order`;
-3. inspect its capabilities and choose the documented execution mode/fallback;
-4. identify the source book and target language from available context/files;
-5. ask only for required information that is genuinely missing;
-6. create or resume a per-book workspace;
-7. preserve the original source unchanged;
-8. extract chapters in real reading order;
-9. initialize metadata, progress, glossary, and style guide;
-10. record book-specific workflow provenance in `metadata.json.workflow`;
-11. translate chapter by chapter;
-12. perform a separate source-to-translation fidelity review before marking a chapter `reviewed`;
-13. persist state so another session can resume without chat history;
-14. validate state and build the requested output.
-
-The authoritative literary behavior and quality rules are in [`AGENTS.md`](AGENTS.md). Bootstrap is in [`docs/AGENT_SETUP.md`](docs/AGENT_SETUP.md). Execution topology is in [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md).
-
-## Deterministic operational state
-
-Literary generation is not deterministic, but the process can be substantially more reproducible:
-
-- resolve the selected workflow ref once;
-- keep all contract files on the same resolved revision;
-- record the installed revision in `.book-translator-install.json`;
-- record each book's own workflow revision in `metadata.json.workflow`;
-- select chapters from `progress.json`;
-- keep global state single-writer through the orchestrator;
-- use explicit Translator and Reviewer roles;
-- give workers bounded task-specific context;
-- never choose arbitrarily between multiple incomplete books.
-
-A workspace may contain books initialized under different workflow revisions. Book-level provenance controls resume behavior; do not silently upgrade a book because the currently installed workflow is newer.
-
-## Required inputs
-
-Only two inputs are fundamentally required:
-
-| Input | Required | Notes |
-| --- | --- | --- |
-| Source book | Yes | File or content the agent can access. |
-| Target language | Yes | For example `ru`, `en`, `de`, or a language name. |
-| Source language | Usually no | Detect when possible. |
-| Title / author | No | Read from the source when possible. |
-| Output format | No | Markdown is the safe default. |
-
-The agent should not ask the user to choose technical defaults that it can select safely itself.
+When the source corpus is sealed, `source-manifest.json` records SHA-256 identities for the preserved source and extracted artifacts. Before literary work resumes, those hashes can be checked so incomplete or changed source material is detected rather than silently accepted.
 
 ## Supported source formats
 
-The included optional Python helper can automatically extract:
+The included standard-library helper can automatically extract:
 
 - EPUB;
 - HTML / XHTML;
 - Markdown;
 - TXT.
 
-DOCX and PDF can use the same repository workflow when the active agent can read them reliably, but automatic extraction is not claimed by the included helper.
+DOCX and PDF can use the same durable workflow when the active agent can read/extract them reliably, but the included helper does not claim automatic extraction for those formats.
 
-For EPUB, reading order comes from the EPUB package/spine.
-
-## Project structure
-
-```text
-.
-├── SKILL.md                  # portable discovery/bootstrap layer
-├── AGENTS.md                 # authoritative literary + durable-state rules
-├── agent-manifest.json       # machine-readable bootstrap/execution contract
-├── books/                    # per-book workspaces
-├── docs/
-│   ├── AGENT_SETUP.md        # version resolution, installation, capabilities
-│   ├── ORCHESTRATION.md      # worker roles, context bounds, single-writer rules
-│   ├── TRANSLATION_GUIDE.md  # repository state and resume reference
-│   └── templates/            # per-book state templates
-├── scripts/
-│   └── book.py               # optional stdlib-only extraction/validation/build helper
-└── tests/
-    ├── test_agent_contract.py
-    └── test_book_cli.py
-```
-
-Each real book gets:
-
-```text
-books/<book-slug>/
-├── source/         # immutable original
-├── extracted/      # original chapters/sections
-├── translated/     # translated chapters
-├── output/         # assembled deliverables
-├── metadata.json   # includes workflow provenance
-├── progress.json
-├── glossary.md
-└── style-guide.md
-```
-
-For a namespaced installation in an existing repository, the same structure lives under `.book-translator/`.
-
-## Resume without chat history
-
-`progress.json` is the durable work queue:
-
-```text
-pending -> extracted -> translated -> reviewed
-```
-
-A new session reconstructs work from repository state. If exactly one incomplete book exists, it can be resumed automatically. If several incomplete books exist and user intent does not identify one, the agent asks only which book to resume.
-
-Before resuming a book, use `metadata.json.workflow.resolved_revision` to determine the workflow contract that belongs to that book.
-
-`reviewed` means the translation was systematically compared against the original for completeness, meaning, tone, ambiguity, voice, rhythm, and meaningful formatting. Fluent prose alone is not enough.
+For EPUB, reading order follows the package/spine.
 
 ## Optional local CLI
 
-If Python 3 is available, the helper can automate structural work:
+The Python helpers perform structural operations; they do not call an LLM API and do not replace literary review.
+
+Typical commands:
 
 ```bash
 python scripts/book.py extract /path/to/book.epub --target-language ru
@@ -213,47 +360,44 @@ python scripts/book.py validate <book-slug>
 python scripts/book.py build <book-slug>
 ```
 
-Use `.book-translator/scripts/book.py` for a namespaced installation.
+Source-corpus integrity/recovery helpers include:
 
-The helper uses only the Python standard library. It does not call an LLM API and does not replace literary review.
+```bash
+python scripts/corpus.py seal <book-slug>
+python scripts/corpus.py verify <book-slug>
+python scripts/corpus.py restore <book-slug> /path/to/original-source
+```
 
-Run tests with:
+The helpers use the Python standard library.
+
+## Project structure
+
+```text
+.
+├── agent-manifest.json       # role/context router
+├── SKILL.md                  # discovery entrypoint
+├── AGENTS.md                 # global invariants
+├── books/                    # per-book durable state
+├── docs/
+│   ├── AGENT_SETUP.md        # technical setup authority
+│   ├── ORCHESTRATION.md      # execution/state authority
+│   ├── TRANSLATION.md        # literary translation/review authority
+│   └── templates/            # state templates
+├── scripts/
+│   ├── book.py               # extraction/validation/build helper
+│   └── corpus.py             # source-integrity/recovery helper
+└── tests/
+```
+
+## Tests
+
+Run the complete test suite with:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## Privacy and copyright
-
-The canonical repository contains the workflow, not bundled real books.
-
-Do not publish copyrighted source books or private translations unless you have the right to do so. Use a private working repository/workspace when source material should remain private.
-
-The canonical template must never copy example or user book contents from another workspace into `books/`.
-
-## Design principles
-
-- **One-link:** the repository URL is enough to discover the workflow.
-- **One contract order:** `contract_read_order` prevents divergent bootstrap sequences.
-- **Agent-agnostic:** ChatGPT Web and Codex are primary scenarios, not hard dependencies.
-- **Bounded context:** workers receive only task-relevant context.
-- **Independent review:** translation does not approve itself when isolation is available.
-- **Single writer:** the orchestrator owns shared mutable state.
-- **Per-book provenance:** each book records the workflow revision it belongs to.
-- **File-based:** state stays transparent and inspectable.
-- **Resumable:** another session can continue from repository state.
-- **Fidelity-first:** the translator is an interpreter, not a co-author.
-- **Capability-aware:** automate what the agent can do; explain only unavoidable manual steps.
-- **No hidden infrastructure:** no database, backend, queue, or mandatory LLM API integration.
-
-## Documentation
-
-- [`agent-manifest.json`](agent-manifest.json) — canonical machine-readable contract and `contract_read_order`.
-- [`SKILL.md`](SKILL.md) — portable discovery/bootstrap entrypoint.
-- [`AGENTS.md`](AGENTS.md) — authoritative literary and durable-state rules.
-- [`docs/AGENT_SETUP.md`](docs/AGENT_SETUP.md) — setup, version pinning, installation, collisions, and capabilities.
-- [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) — isolated workers, bounded context, fallbacks, and single-writer state.
-- [`docs/TRANSLATION_GUIDE.md`](docs/TRANSLATION_GUIDE.md) — repository state, formats, resume flow, and validation.
+Contract tests protect role routing and documentation boundaries. CLI/corpus tests protect extraction, provenance, validation, source integrity/recovery, and build behavior.
 
 ## License
 
