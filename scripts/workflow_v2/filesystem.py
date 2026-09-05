@@ -117,9 +117,6 @@ class FilesystemStorage:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            # Re-check immediately before replacement so ordinary stale writers
-            # cannot overwrite a newer durable revision. Cross-process claim/lease
-            # coordination is intentionally completed by Workflow v2 issue #8.
             latest = self.read(path)
             if latest.version != expected_version:
                 raise StorageVersionConflict(
@@ -136,6 +133,25 @@ class FilesystemStorage:
                     temp_path.unlink()
                 except FileNotFoundError:
                     pass
+
+    def delete_if_version(self, path: str, expected_version: str) -> None:
+        target = self._resolve(path)
+        current = self.read(path)
+        if current.version != expected_version:
+            raise StorageVersionConflict(
+                f"{path}: expected revision {expected_version}, current revision {current.version}"
+            )
+
+        latest = self.read(path)
+        if latest.version != expected_version:
+            raise StorageVersionConflict(
+                f"{path}: expected revision {expected_version}, current revision {latest.version}"
+            )
+        try:
+            target.unlink()
+        except FileNotFoundError as exc:
+            raise StorageNotFound(path) from exc
+        self._fsync_directory(target.parent)
 
     def list(self, prefix: str = "") -> list[str]:
         target = self._resolve(prefix, allow_empty=True)
