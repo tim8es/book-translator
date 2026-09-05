@@ -459,6 +459,8 @@ def extract_command(args: argparse.Namespace) -> int:
             }
         )
 
+    workflow = workflow_provenance()
+    workflow["review_evidence"] = "review-ledger-v1"
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "title": args.title or detected.get("title") or source.stem,
@@ -469,18 +471,25 @@ def extract_command(args: argparse.Namespace) -> int:
         "source_file": source.name,
         "chapter_count": len(chapter_records),
         "imported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "workflow": workflow_provenance(),
+        "workflow": workflow,
     }
     progress = {
         "schema_version": SCHEMA_VERSION,
         "book_slug": slug,
         "chapters": chapter_records,
     }
+    review_ledger = {
+        "schema_version": SCHEMA_VERSION,
+        "book_slug": slug,
+        "next_sequence": 1,
+        "records": [],
+    }
 
     repository = state_repository(book_dir)
     try:
         repository.create("metadata.json", SchemaKind.METADATA, metadata)
         repository.create("progress.json", SchemaKind.PROGRESS, progress)
+        repository.create("review-ledger.json", SchemaKind.REVIEW_LEDGER, review_ledger)
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise BookError(f"Cannot write workflow state for books/{slug}: {exc}") from exc
     create_support_files(book_dir)
