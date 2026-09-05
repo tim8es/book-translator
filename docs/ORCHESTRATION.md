@@ -225,6 +225,38 @@ Unless the user explicitly requests another scope:
 
 Do not retranslate a reviewed chapter without a concrete reason. If a reviewed translation changes materially, move it back to the appropriate non-reviewed state until the changed artifact passes review again.
 
+## Durable claim gate
+
+Before dispatching literary work, the Orchestrator must acquire a durable claim for the exact chapter or validated range and role being dispatched. Claim acquisition is an execution gate: if it conflicts, do not start the worker and do not ask the user to manually schedule competing sessions.
+
+When Python is available, acquire the claim with the active session identity:
+
+```bash
+python scripts/book.py claim <book-slug> <chapter-or-range> --role <translator|reviewer> --session-id <session-id>
+```
+
+Inspect current ownership when needed with:
+
+```bash
+python scripts/book.py claims <book-slug>
+```
+
+A lease timestamp is not automatic permission to reuse a unit. An expired claim remains occupied until explicit cleanup removes it and records the auditable `lease_expired` lifecycle evidence. When stale claims need reclamation, run:
+
+```bash
+python scripts/book.py cleanup-claims <book-slug>
+```
+
+Release a claim only from the owning session, after the Orchestrator has accepted the role result or explicitly abandoned that unit. Use the same session identity that acquired the claim:
+
+```bash
+python scripts/book.py release <book-slug> <chapter-or-range> --session-id <session-id>
+```
+
+For the normal chapter pipeline, acquire a translator claim before translator dispatch, release it after the translation result is durably accepted or abandoned, then acquire the reviewer claim before reviewer dispatch and release it after the review result is processed. Do not infer ownership from chat history; durable claim state is authoritative.
+
+Range claims provide safe coordination for an explicitly requested bounded range, but they do not enable parallel translation by themselves. The default sequential chapter policy above remains in force until a separate parallel execution mode defines its own scheduling and conflict policy.
+
 ## Translator context pack
 
 To dispatch the `translator` role:
