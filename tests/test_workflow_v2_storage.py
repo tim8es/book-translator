@@ -1,6 +1,7 @@
 import hashlib
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -88,6 +89,52 @@ class WorkflowV2FilesystemStorageTests(unittest.TestCase):
         loaded = storage.read("progress.json")
         self.assertEqual(loaded.content, b"two\n")
         self.assertEqual(loaded.version, current_version)
+
+    def test_concurrent_writers_cannot_both_commit_same_expected_revision(self):
+        barrier = threading.Barrier(2, timeout=1.0)
+
+        class CoordinatedStorage(FilesystemStorage):
+            def __init__(self, root):
+                super().__init__(root)
+                self._thread_reads = threading.local()
+
+            def read(self, path):
+                loaded = super().read(path)
+                count = getattr(self._thread_reads, "count", 0) + 1
+                self._thread_reads.count = count
+                if count == 2:
+                    try:
+                        barrier.wait()
+                    except threading.BrokenBarrierError:
+                        pass
+                return loaded
+
+        storage = CoordinatedStorage(self.root)
+        original = storage.create_if_absent("progress.json", b"original\n")
+        results: list[str] = []
+        results_lock = threading.Lock()
+
+        def write(content: bytes) -> None:
+            try:
+                storage.write_if_version("progress.json", content, original)
+            except StorageVersionConflict:
+                outcome = "conflict"
+            else:
+                outcome = "success"
+            with results_lock:
+                results.append(outcome)
+
+        threads = [
+            threading.Thread(target=write, args=(b"writer-a\n",)),
+            threading.Thread(target=write, args=(b"writer-b\n",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "concurrent CAS writer deadlocked")
+
+        self.assertEqual(sorted(results), ["conflict", "success"])
 
     def test_delete_if_version_removes_only_matching_revision(self):
         storage = self.storage()
