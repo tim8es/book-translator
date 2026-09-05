@@ -16,6 +16,7 @@ from .claims import (
 from .filesystem import FilesystemStorage
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .reviews import (
+    AcceptReviewResult,
     ReviewClaimError,
     ReviewConflict,
     ReviewError,
@@ -42,6 +43,7 @@ from .storage import (
 )
 
 __all__ = [
+    "AcceptReviewResult",
     "ActiveClaim",
     "ClaimAuditError",
     "ClaimConflict",
