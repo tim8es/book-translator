@@ -89,6 +89,44 @@ class WorkflowV2FilesystemStorageTests(unittest.TestCase):
         self.assertEqual(loaded.content, b"two\n")
         self.assertEqual(loaded.version, current_version)
 
+    def test_delete_if_version_removes_only_matching_revision(self):
+        storage = self.storage()
+        self.assertTrue(
+            hasattr(storage, "delete_if_version"),
+            "filesystem storage must expose delete_if_version",
+        )
+        version = storage.create_if_absent("claims/chapter-000001.json", b"claim\n")
+
+        storage.delete_if_version("claims/chapter-000001.json", version)
+
+        with self.assertRaises(StorageNotFound):
+            storage.read("claims/chapter-000001.json")
+
+    def test_delete_if_version_rejects_stale_revision_without_mutation(self):
+        storage = self.storage()
+        self.assertTrue(
+            hasattr(storage, "delete_if_version"),
+            "filesystem storage must expose delete_if_version",
+        )
+        first = storage.create_if_absent("claims/chapter-000001.json", b"first\n")
+        current = storage.write_if_version("claims/chapter-000001.json", b"second\n", first)
+
+        with self.assertRaises(StorageVersionConflict):
+            storage.delete_if_version("claims/chapter-000001.json", first)
+
+        loaded = storage.read("claims/chapter-000001.json")
+        self.assertEqual(loaded.content, b"second\n")
+        self.assertEqual(loaded.version, current)
+
+    def test_delete_if_version_missing_path_raises_not_found(self):
+        storage = self.storage()
+        self.assertTrue(
+            hasattr(storage, "delete_if_version"),
+            "filesystem storage must expose delete_if_version",
+        )
+        with self.assertRaises(StorageNotFound):
+            storage.delete_if_version("missing.json", "deadbeef")
+
     def test_missing_read_and_write_raise_not_found(self):
         storage = self.storage()
         with self.assertRaises(StorageNotFound):
