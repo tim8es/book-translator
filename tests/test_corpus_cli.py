@@ -118,6 +118,15 @@ class CorpusCliTests(unittest.TestCase):
 
         self.run_cli("book.py", "extract", str(source), "--slug", "sample", "--target-language", "ru")
         book = self.repo / "books" / "sample"
+
+        # This pre-existing restore regression intentionally models a legacy book
+        # whose reviewed lifecycle state predates machine review evidence.
+        metadata_path = book / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["workflow"].pop("review_evidence", None)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (book / "review-ledger.json").unlink()
+
         progress_path = book / "progress.json"
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
         translation_path = book / progress["chapters"][0]["translation_path"]
