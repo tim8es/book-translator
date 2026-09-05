@@ -1,4 +1,6 @@
 import hashlib
+import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -135,6 +137,99 @@ class WorkflowV2FilesystemStorageTests(unittest.TestCase):
             self.assertFalse(thread.is_alive(), "concurrent CAS writer deadlocked")
 
         self.assertEqual(sorted(results), ["conflict", "success"])
+
+    def test_cross_process_writers_cannot_both_commit_same_expected_revision(self):
+        storage = self.storage()
+        original = storage.create_if_absent("progress.json", b"original\n")
+        marker_a = self.root / "writer-a.ready"
+        marker_b = self.root / "writer-b.ready"
+        worker = r'''
+import sys
+import time
+from pathlib import Path
+
+from workflow_v2.filesystem import FilesystemStorage
+from workflow_v2.storage import StorageVersionConflict
+
+root = Path(sys.argv[1])
+expected = sys.argv[2]
+marker = Path(sys.argv[3])
+other_marker = Path(sys.argv[4])
+payload = sys.argv[5].encode("utf-8")
+
+class CoordinatedStorage(FilesystemStorage):
+    def __init__(self, root):
+        super().__init__(root)
+        self.read_count = 0
+
+    def read(self, path):
+        loaded = super().read(path)
+        self.read_count += 1
+        if self.read_count == 2:
+            marker.write_text("ready", encoding="utf-8")
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not other_marker.exists():
+                time.sleep(0.01)
+        return loaded
+
+storage = CoordinatedStorage(root)
+try:
+    storage.write_if_version("progress.json", payload, expected)
+except StorageVersionConflict:
+    print("conflict")
+    raise SystemExit(3)
+else:
+    print("success")
+    raise SystemExit(0)
+'''
+        env = os.environ.copy()
+        current_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(SCRIPTS) if not current_pythonpath else str(SCRIPTS) + os.pathsep + current_pythonpath
+        processes = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    worker,
+                    str(self.root),
+                    original,
+                    str(marker_a),
+                    str(marker_b),
+                    "writer-a\n",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            ),
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    worker,
+                    str(self.root),
+                    original,
+                    str(marker_b),
+                    str(marker_a),
+                    "writer-b\n",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            ),
+        ]
+
+        completed = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=8)
+            completed.append((process.returncode, stdout, stderr))
+
+        self.assertEqual(
+            sorted(code for code, _, _ in completed),
+            [0, 3],
+            msg="\n".join(f"code={code} stdout={stdout!r} stderr={stderr!r}" for code, stdout, stderr in completed),
+        )
 
     def test_delete_if_version_removes_only_matching_revision(self):
         storage = self.storage()
