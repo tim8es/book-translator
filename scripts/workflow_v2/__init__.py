@@ -15,6 +15,15 @@ from .claims import (
 )
 from .filesystem import FilesystemStorage
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
+from .reviews import (
+    ReviewClaimError,
+    ReviewConflict,
+    ReviewError,
+    ReviewEvidenceError,
+    ReviewLedgerManager,
+    ReviewRecordResult,
+    ReviewResolution,
+)
 from .schemas import (
     ParsedDocument,
     SchemaError,
@@ -47,6 +56,13 @@ __all__ = [
     "LoadedDocument",
     "ParsedDocument",
     "RepositoryError",
+    "ReviewClaimError",
+    "ReviewConflict",
+    "ReviewError",
+    "ReviewEvidenceError",
+    "ReviewLedgerManager",
+    "ReviewRecordResult",
+    "ReviewResolution",
     "SchemaError",
     "SchemaKind",
     "StorageAlreadyExists",
