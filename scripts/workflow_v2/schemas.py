@@ -154,8 +154,17 @@ def _validate_metadata(data: Mapping[str, Any], schema: SchemaKind) -> None:
     source_file = _require_nonempty_string(data, "source_file", schema)
     _validate_basename(source_file, schema, "source_file")
     _require_int(data, "chapter_count", schema, minimum=0)
-    if "workflow" in data and data["workflow"] is not None and not isinstance(data["workflow"], Mapping):
+    workflow = data.get("workflow")
+    if workflow is not None and not isinstance(workflow, Mapping):
         raise _field(schema, "workflow", "must be an object when present")
+    if isinstance(workflow, Mapping) and "review_evidence" in workflow:
+        review_evidence = workflow["review_evidence"]
+        if review_evidence != "review-ledger-v1":
+            raise _field(
+                schema,
+                "workflow.review_evidence",
+                f"unsupported review_evidence mode {review_evidence!r}; expected 'review-ledger-v1'",
+            )
 
 
 def _validate_progress(data: Mapping[str, Any], schema: SchemaKind) -> None:
