@@ -71,9 +71,10 @@ Audit events are created through `create_if_absent`; they are never the source o
 
 ## Claim schema
 
-The existing Workflow v2 `claim` schema is extended with these durable fields:
+The Workflow v2 `claim` schema contains these durable fields:
 
 - `schema_version`;
+- `claim_id`: collision-resistant UUID hex identity for this specific acquisition;
 - `unit_id` matching `chapter-[0-9]{6}`;
 - `role`: `translator` or `reviewer`;
 - `session_id`;
@@ -82,6 +83,8 @@ The existing Workflow v2 `claim` schema is extended with these durable fields:
 - `workflow_revision`: resolved workflow revision when available, otherwise the most specific recorded requested ref;
 - `claimed_at`;
 - `expires_at`.
+
+`claim_id` prevents an ABA lifecycle race: if a claim is deleted and later recreated for the same unit with otherwise identical content, the durable revision still changes, so a stale release/cleanup operation cannot delete the replacement claim.
 
 Times are UTC RFC 3339 timestamps. Expiry comparison is performed against an injected clock in domain logic so tests are deterministic.
 
@@ -259,13 +262,12 @@ Domain errors distinguish at least:
 - invalid selector/unit;
 - claim conflict;
 - ownership mismatch;
-- missing workflow provenance;
 - storage version conflict;
 - rollback failure;
-- invalid claim/event document;
-- audit-persistence failure.
+- invalid claim/audit document;
+- audit-persistence failure after a state mutation.
 
-Storage exceptions remain specific where their identity matters. CLI converts expected domain/storage conflicts to stable non-zero errors without stack traces.
+Storage exceptions remain specific where their identity matters. CLI converts expected domain/storage failures to stable non-zero errors without stack traces.
 
 ## Testing strategy
 
@@ -275,33 +277,30 @@ Development is test-first.
 
 - `delete_if_version` deletes only the expected revision;
 - stale version cannot delete replacement content;
-- two simultaneous writers using the backend cannot both commit from one expected revision;
-- lock ownership is released after ordinary success/failure;
+- simultaneous stale writers cannot both commit successfully;
+- mutation lock ownership releases on ordinary success/failure;
 - path safety remains enforced.
 
 ### Claim-domain tests
 
-- canonical numeric selectors map to stable unit IDs;
 - two sessions cannot acquire the same unit;
 - Translator and Reviewer conflict on the same unit;
 - expired claim is not silently stolen;
 - overlapping ranges are rejected deterministically;
 - partial range acquisition rolls back claims created by the failed attempt;
-- rollback conflicts are surfaced with remaining paths;
 - foreign session cannot release a claim;
 - stale release cannot delete a replacement claim;
+- delete/recreate ABA cannot reuse the prior durable claim revision because `claim_id` is unique;
 - cleanup removes expired but not live claims;
-- release/cleanup request events precede version-checked deletion;
-- completion events exist only after successful deletion;
-- injected clock and UUID factory make expiry/event tests deterministic.
+- cleanup records request/completion audit with reason and exact claim revision;
+- injected clock makes expiry boundaries deterministic.
 
 ### CLI tests
 
 - claim/list/release/cleanup happy paths;
-- default and explicit lease duration;
-- JSON output stability and canonical ordering;
+- JSON output stability;
 - non-zero conflicts;
-- range acquisition and range release reporting;
+- range behavior;
 - existing extract/validate/build/corpus behavior remains green.
 
 Full suite runs on Python 3.10 and 3.12.
@@ -310,11 +309,11 @@ Full suite runs on Python 3.10 and 3.12.
 
 Issue #8 acceptance criteria map as follows:
 
-1. **Two sessions cannot claim the same unit concurrently** — one canonical unit path + atomic `create_if_absent`, with concurrency tests.
-2. **Overlapping ranges are rejected deterministically** — normalized canonical ordering, atomic per-unit acquisition, rollback, and deterministic conflict reporting.
-3. **Lost updates fail with conflict** — strengthened filesystem critical section around `write_if_version` plus existing revision tokens.
-4. **Expired claims can be cleaned up with an auditable reason** — explicit cleanup request event with `lease_expired`, version-checked deletion, and completion event.
-5. **CLI supports claim/list/release/cleanup** — the four `book.py` surfaces above backed by domain operations.
+1. **Two sessions cannot claim the same unit concurrently** — one unit path + atomic `create_if_absent`, with concurrency/conflict tests.
+2. **Overlapping ranges are rejected deterministically** — canonical sorted range acquisition plus rollback and conflict tests.
+3. **Lost updates fail with conflict** — strengthened filesystem `write_if_version` mutation mutex and existing revision tokens.
+4. **Expired claims can be cleaned up with an auditable reason** — explicit cleanup request/completion audit plus version-checked deletion.
+5. **CLI supports claim/list/release/cleanup** — `book.py` subcommands backed by domain operations.
 
 ## Dependency and PR strategy
 
@@ -323,12 +322,3 @@ Until #23/#7 is merged, `feature/workflow-v2-claims-cas` is stacked on `feature/
 The #8 implementation PR may initially target `feature/workflow-v2-state-core` so its diff contains only #8 work. After #23 merges into `refactor/workflow-engine-v2`, the branch will be rebased/updated as needed and the PR retargeted to `refactor/workflow-engine-v2`, preserving a clean integration diff.
 
 No merge into the integration branch or `main` is performed without a separate integration decision.
-
-## Self-review resolutions
-
-The design was re-read for scope, ambiguity, and crash/concurrency semantics before implementation planning. Two issues were resolved explicitly:
-
-1. **Audit ordering:** a completion event is never written before version-checked deletion. Durable request events make failed/raced operations auditable without falsely claiming completion.
-2. **Unit identity:** claims use progress chapter numbers normalized to fixed canonical IDs, rather than titles/slugs whose textual representation may change.
-
-No TBD/TODO placeholders remain. The design stays within #8 and leaves review, resume, parallel-mode policy, GitHub backend, and migrations to their dedicated issues.
