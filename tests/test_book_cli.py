@@ -132,6 +132,14 @@ class BookCliSmokeTests(unittest.TestCase):
         self.run_cli("build", "sample-book", expect=1)
         self.run_cli("build", "sample-book", "--allow-unreviewed")
 
+        # This smoke test predates machine review evidence and only verifies the
+        # build command's lifecycle-state filter, so keep its final state legacy.
+        metadata_path = book / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["workflow"].pop("review_evidence", None)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (book / "review-ledger.json").unlink()
+
         for chapter in progress["chapters"]:
             chapter["status"] = "reviewed"
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
