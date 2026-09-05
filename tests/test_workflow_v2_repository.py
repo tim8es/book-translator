@@ -11,7 +11,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from workflow_v2.filesystem import FilesystemStorage
 from workflow_v2.schemas import SchemaError, SchemaKind
-from workflow_v2.storage import StorageVersionConflict
+from workflow_v2.storage import StorageNotFound, StorageVersionConflict
 
 try:
     from workflow_v2.repository import LoadedDocument, RepositoryError, WorkflowStateRepository
@@ -112,6 +112,38 @@ class WorkflowV2RepositoryTests(unittest.TestCase):
         loaded = repo.read("metadata.json", SchemaKind.METADATA)
         self.assertEqual(loaded.data["title"], "Second")
         self.assertEqual(loaded.version, current_version)
+
+    def test_delete_if_version_validates_and_removes_matching_document(self):
+        repo = self.repo()
+        self.assertTrue(
+            hasattr(repo, "delete_if_version"),
+            "workflow state repository must expose delete_if_version",
+        )
+        version = repo.create("metadata.json", SchemaKind.METADATA, self.metadata())
+
+        repo.delete_if_version("metadata.json", SchemaKind.METADATA, version)
+
+        with self.assertRaises(StorageNotFound):
+            self.storage.read("metadata.json")
+
+    def test_delete_if_version_rejects_stale_document_revision(self):
+        repo = self.repo()
+        self.assertTrue(
+            hasattr(repo, "delete_if_version"),
+            "workflow state repository must expose delete_if_version",
+        )
+        original = self.metadata()
+        first = repo.create("metadata.json", SchemaKind.METADATA, original)
+        replacement = dict(original)
+        replacement["title"] = "Replacement"
+        current = repo.write_if_version("metadata.json", SchemaKind.METADATA, replacement, first)
+
+        with self.assertRaises(StorageVersionConflict):
+            repo.delete_if_version("metadata.json", SchemaKind.METADATA, first)
+
+        loaded = repo.read("metadata.json", SchemaKind.METADATA)
+        self.assertEqual(loaded.version, current)
+        self.assertEqual(loaded.data["title"], "Replacement")
 
     def test_invalid_json_error_identifies_logical_path(self):
         repo = self.repo()
