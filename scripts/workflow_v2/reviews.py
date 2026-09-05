@@ -345,6 +345,13 @@ class ReviewLedgerManager:
         if review_commit is not None and (not isinstance(review_commit, str) or not review_commit.strip()):
             raise ReviewEvidenceError("review commit must be null or a non-empty string")
 
+        try:
+            durable_progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise ReviewEvidenceError(f"cannot verify current progress state: {exc}") from exc
+        if durable_progress.version != progress_revision or durable_progress.data != dict(progress):
+            raise ReviewConflict("progress state changed; re-read before recording review evidence")
+
         workflow_revision, contract_revision = self._workflow_context(metadata)
         unit_id, _, source_sha256, translation_sha256 = self._artifact_identity(
             progress,
