@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -21,9 +20,17 @@ import uuid
 from pathlib import Path
 
 import book
+from workflow_v2 import (
+    LoadedDocument,
+    RepositoryError,
+    SchemaError,
+    SchemaKind,
+    StorageError,
+    WorkflowStateRepository,
+)
+from workflow_v2.schemas import SCHEMA_VERSION, parse_document
 
 
-MANIFEST_SCHEMA_VERSION = 1
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -39,17 +46,65 @@ def manifest_path(book_dir: Path) -> Path:
     return book_dir / "source-manifest.json"
 
 
-def load_source_manifest(book_dir: Path) -> dict | None:
+def load_source_manifest_document(book_dir: Path) -> LoadedDocument | None:
     path = manifest_path(book_dir)
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        return book.state_repository(book_dir).read(
+            "source-manifest.json",
+            SchemaKind.SOURCE_MANIFEST,
+        )
+    except (SchemaError, RepositoryError, StorageError) as exc:
         raise book.BookError(f"Invalid source-manifest.json: {exc}") from exc
-    if not isinstance(data, dict):
-        raise book.BookError("source-manifest.json must contain an object")
-    return data
+
+
+def load_source_manifest(book_dir: Path) -> dict | None:
+    document = load_source_manifest_document(book_dir)
+    return document.data if document is not None else None
+
+
+def write_source_manifest(
+    book_dir: Path,
+    data: dict,
+    *,
+    expected_version: str | None = None,
+    create_only: bool = False,
+) -> str:
+    repository: WorkflowStateRepository = book.state_repository(book_dir)
+    try:
+        if expected_version is not None:
+            return repository.write_if_version(
+                "source-manifest.json",
+                SchemaKind.SOURCE_MANIFEST,
+                data,
+                expected_version,
+            )
+        if create_only:
+            return repository.create(
+                "source-manifest.json",
+                SchemaKind.SOURCE_MANIFEST,
+                data,
+            )
+
+        # `seal` intentionally replaces an existing manifest. Obtain the current
+        # raw revision without requiring the old manifest to be schema-valid, so
+        # resealing can repair a malformed prior manifest while still using CAS.
+        if manifest_path(book_dir).is_file():
+            current = repository.storage.read("source-manifest.json")
+            return repository.write_if_version(
+                "source-manifest.json",
+                SchemaKind.SOURCE_MANIFEST,
+                data,
+                current.version,
+            )
+        return repository.create(
+            "source-manifest.json",
+            SchemaKind.SOURCE_MANIFEST,
+            data,
+        )
+    except (SchemaError, RepositoryError, StorageError) as exc:
+        raise book.BookError(f"Cannot write source-manifest.json: {exc}") from exc
 
 
 def checked_source_rel(book_dir: Path, value: object) -> Path:
@@ -106,7 +161,7 @@ def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path)
         )
 
     return {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "source_file": metadata.get("source_file"),
         "source_format": metadata.get("source_format"),
         "source_sha256": sha256_path(source),
@@ -116,10 +171,10 @@ def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path)
 
 
 def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) -> tuple[str, int]:
-    if data.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-        raise book.BookError(
-            f"Unsupported source-manifest.json schema_version: {data.get('schema_version')!r}"
-        )
+    try:
+        data = parse_document(SchemaKind.SOURCE_MANIFEST, data).data
+    except SchemaError as exc:
+        raise book.BookError(f"Invalid source-manifest.json: {exc}") from exc
 
     if data.get("source_file") != metadata.get("source_file"):
         raise book.BookError("source-manifest.json source_file disagrees with metadata.json")
@@ -189,13 +244,6 @@ def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) 
     return expected_source_sha, len(items)
 
 
-def write_manifest_atomic(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temp, path)
-
-
 def seal_command(args: argparse.Namespace) -> int:
     errors, _ = book.validate_book(args.slug)
     if errors:
@@ -204,7 +252,7 @@ def seal_command(args: argparse.Namespace) -> int:
     book_dir, metadata, progress = book.load_book(args.slug)
     source = source_file_path(book_dir, metadata)
     data = build_manifest(book_dir, metadata, progress, source)
-    write_manifest_atomic(manifest_path(book_dir), data)
+    write_source_manifest(book_dir, data)
     print(
         f"Sealed source corpus for books/{args.slug}: "
         f"{data['chapter_count']} extracted artifact(s), SHA-256 {data['source_sha256']}"
@@ -243,7 +291,8 @@ def restore_command(args: argparse.Namespace) -> int:
             f"Source format mismatch: supplied {source_format}, metadata expects {expected_format}"
         )
 
-    existing_manifest = load_source_manifest(book_dir)
+    existing_document = load_source_manifest_document(book_dir)
+    existing_manifest = existing_document.data if existing_document is not None else None
     manifest_sha = normalized_expected_sha(
         str(existing_manifest.get("source_sha256")) if existing_manifest and existing_manifest.get("source_sha256") else None,
         "source-manifest.json source_sha256",
@@ -316,13 +365,17 @@ def restore_command(args: argparse.Namespace) -> int:
             )
 
         new_manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSION,
             "source_file": metadata.get("source_file"),
             "source_format": source_format,
             "source_sha256": actual_sha,
             "chapter_count": len(manifest_items),
             "extracted": manifest_items,
         }
+        try:
+            new_manifest = parse_document(SchemaKind.SOURCE_MANIFEST, new_manifest).data
+        except SchemaError as exc:
+            raise book.BookError(f"Cannot construct valid source-manifest.json: {exc}") from exc
 
         stored_source = source_file_path(book_dir, metadata)
         stored_source.parent.mkdir(parents=True, exist_ok=True)
@@ -337,7 +390,12 @@ def restore_command(args: argparse.Namespace) -> int:
         try:
             os.replace(staged_extracted, extracted_dir)
             os.replace(staged_source, stored_source)
-            write_manifest_atomic(manifest_path(book_dir), new_manifest)
+            write_source_manifest(
+                book_dir,
+                new_manifest,
+                expected_version=existing_document.version if existing_document is not None else None,
+                create_only=existing_document is None,
+            )
         except Exception:
             if extracted_dir.exists():
                 shutil.rmtree(extracted_dir, ignore_errors=True)
