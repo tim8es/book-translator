@@ -85,6 +85,7 @@ class WorkflowV2SchemaTests(unittest.TestCase):
             SchemaKind.REVIEW_LEDGER: {
                 "schema_version": 1,
                 "book_slug": "example",
+                "next_sequence": 1,
                 "records": [],
             },
             SchemaKind.SOURCE_MANIFEST: {
