@@ -1,6 +1,7 @@
 """Public internal API for Workflow v2 state infrastructure."""
 
 from .filesystem import FilesystemStorage
+from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import (
     ParsedDocument,
     SchemaError,
@@ -21,7 +22,9 @@ from .storage import (
 __all__ = [
     "FilesystemStorage",
     "InvalidStoragePath",
+    "LoadedDocument",
     "ParsedDocument",
+    "RepositoryError",
     "SchemaError",
     "SchemaKind",
     "StorageAlreadyExists",
@@ -31,5 +34,6 @@ __all__ = [
     "StorageVersionConflict",
     "StoredValue",
     "UnsupportedSchemaVersion",
+    "WorkflowStateRepository",
     "parse_document",
 ]
