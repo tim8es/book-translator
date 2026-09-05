@@ -97,6 +97,7 @@ class BookCliSmokeTests(unittest.TestCase):
                 "repository": "https://github.com/tim8es/book-translator",
                 "requested_ref": "agent-compatibility-and-skill",
                 "resolved_revision": "0123456789abcdef",
+                "review_evidence": "review-ledger-v1",
             },
         )
 
