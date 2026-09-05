@@ -12,6 +12,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
+WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow_v2"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
 
 
@@ -23,6 +24,7 @@ class CorpusCliTests(unittest.TestCase):
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         self.assertTrue(CORPUS_SCRIPT.is_file(), "scripts/corpus.py must provide source-corpus integrity tooling")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
+        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow_v2")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
 

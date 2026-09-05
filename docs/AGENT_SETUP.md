@@ -114,6 +114,7 @@ For a namespaced installation, examples include:
 .book-translator/docs/TRANSLATION.md
 .book-translator/scripts/book.py
 .book-translator/scripts/corpus.py
+.book-translator/scripts/workflow_v2/
 .book-translator/books/<book-slug>/
 ```
 
@@ -139,6 +140,7 @@ Relative to `install_root`, a normal runtime installation contains:
 - `docs/templates/`;
 - `scripts/book.py`;
 - `scripts/corpus.py`;
+- `scripts/workflow_v2/`;
 - `books/.gitkeep` for an empty book root.
 
 A development copy additionally contains repository-development files such as:
