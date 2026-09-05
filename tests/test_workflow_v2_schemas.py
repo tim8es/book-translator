@@ -62,21 +62,26 @@ class WorkflowV2SchemaTests(unittest.TestCase):
             ],
         }
 
+    def valid_claim(self):
+        return {
+            "schema_version": 1,
+            "claim_id": "0123456789abcdef0123456789abcdef",
+            "unit_id": "chapter-000001",
+            "role": "translator",
+            "session_id": "session-1",
+            "base_revision": "state-rev-1",
+            "base_commit": None,
+            "workflow_revision": "workflow-rev-1",
+            "claimed_at": "2026-09-05T12:00:00Z",
+            "expires_at": "2026-09-05T12:30:00Z",
+        }
+
     def test_all_schema_kinds_parse_version_one(self):
         self.require_api()
         documents = {
             SchemaKind.METADATA: self.valid_metadata(),
             SchemaKind.PROGRESS: self.valid_progress(),
-            SchemaKind.CLAIM: {
-                "schema_version": 1,
-                "unit_id": "chapter:1",
-                "role": "translator",
-                "session_id": "session-1",
-                "base_revision": "state-rev-1",
-                "workflow_revision": "workflow-rev-1",
-                "claimed_at": "2026-09-05T12:00:00+00:00",
-                "expires_at": "2026-09-05T12:30:00+00:00",
-            },
+            SchemaKind.CLAIM: self.valid_claim(),
             SchemaKind.REVIEW_LEDGER: {
                 "schema_version": 1,
                 "book_slug": "example",
@@ -112,6 +117,68 @@ class WorkflowV2SchemaTests(unittest.TestCase):
                 self.assertIsInstance(parsed, ParsedDocument)
                 self.assertFalse(parsed.legacy)
                 self.assertEqual(parsed.data, data)
+
+    def test_claim_requires_identity_canonical_unit_and_valid_lease_interval(self):
+        self.require_api()
+        parsed = parse_document(SchemaKind.CLAIM, self.valid_claim())
+        self.assertEqual(parsed.data["unit_id"], "chapter-000001")
+
+        missing_identity = self.valid_claim()
+        del missing_identity["claim_id"]
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.CLAIM, missing_identity)
+
+        bad_unit = self.valid_claim()
+        bad_unit["unit_id"] = "chapter:1"
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.CLAIM, bad_unit)
+
+        reversed_lease = self.valid_claim()
+        reversed_lease["expires_at"] = reversed_lease["claimed_at"]
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.CLAIM, reversed_lease)
+
+        non_utc = self.valid_claim()
+        non_utc["claimed_at"] = "2026-09-05T14:00:00+02:00"
+        non_utc["expires_at"] = "2026-09-05T14:30:00+02:00"
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.CLAIM, non_utc)
+
+        bad_commit = self.valid_claim()
+        bad_commit["base_commit"] = {"sha": "abc"}
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.CLAIM, bad_commit)
+
+    def test_claim_event_schema_validates_request_and_completion_shapes(self):
+        self.require_api()
+        self.assertTrue(hasattr(SchemaKind, "CLAIM_EVENT"), "claim_event schema kind is required")
+        claim = self.valid_claim()
+        request = {
+            "schema_version": 1,
+            "event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "action": "cleanup_requested",
+            "unit_id": claim["unit_id"],
+            "claim_revision": "claim-revision",
+            "claim": claim,
+            "occurred_at": "2026-09-05T13:00:00Z",
+            "reason": "lease_expired",
+        }
+        completion = {
+            "schema_version": 1,
+            "event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "action": "cleaned",
+            "unit_id": claim["unit_id"],
+            "request_event_id": request["event_id"],
+            "occurred_at": "2026-09-05T13:00:01Z",
+        }
+
+        self.assertEqual(parse_document(SchemaKind.CLAIM_EVENT, request).data, request)
+        self.assertEqual(parse_document(SchemaKind.CLAIM_EVENT, completion).data, completion)
+
+        invalid = dict(completion)
+        invalid["action"] = "deleted"
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.CLAIM_EVENT, invalid)
 
     def test_unknown_additional_fields_are_preserved(self):
         self.require_api()
@@ -177,15 +244,8 @@ class WorkflowV2SchemaTests(unittest.TestCase):
 
     def test_missing_version_is_rejected_for_non_legacy_schema_kinds(self):
         self.require_api()
-        claim = {
-            "unit_id": "chapter:1",
-            "role": "reviewer",
-            "session_id": "session-1",
-            "base_revision": "state-rev-1",
-            "workflow_revision": "workflow-rev-1",
-            "claimed_at": "2026-09-05T12:00:00+00:00",
-            "expires_at": "2026-09-05T12:30:00+00:00",
-        }
+        claim = self.valid_claim()
+        del claim["schema_version"]
         with self.assertRaises(SchemaError):
             parse_document(SchemaKind.CLAIM, claim, allow_legacy=True)
 
