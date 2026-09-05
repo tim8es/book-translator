@@ -24,12 +24,15 @@ from xml.etree import ElementTree as ET
 from workflow_v2 import (
     FilesystemStorage,
     RepositoryError,
+    ReviewEvidenceError,
+    ReviewLedgerManager,
     SchemaError,
     SchemaKind,
     StorageError,
     WorkflowStateRepository,
 )
 from workflow_v2.claim_cli import ClaimCliError, register_claim_commands
+from workflow_v2.reviews import REVIEW_EVIDENCE_VERSION
 from workflow_v2.schemas import SCHEMA_VERSION
 
 
@@ -460,7 +463,7 @@ def extract_command(args: argparse.Namespace) -> int:
         )
 
     workflow = workflow_provenance()
-    workflow["review_evidence"] = "review-ledger-v1"
+    workflow["review_evidence"] = REVIEW_EVIDENCE_VERSION
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "title": args.title or detected.get("title") or source.stem,
@@ -524,6 +527,20 @@ def load_book(slug: str) -> tuple[Path, dict, dict]:
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise BookError(f"Invalid workflow state in books/{slug}: {exc}") from exc
     return book_dir, metadata, progress
+
+
+def _review_artifact_reader(book_dir: Path):
+    root = book_dir.resolve(strict=False)
+
+    def read(relative_path: str) -> bytes:
+        target = (root / relative_path).resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise OSError(f"artifact path escapes book workspace: {relative_path}") from exc
+        return target.read_bytes()
+
+    return read
 
 
 def validate_book(slug: str) -> tuple[list[str], list[str]]:
@@ -614,6 +631,41 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
             errors.append(f"Extracted chapter is not referenced in progress.json: {path}")
         for path in sorted(referenced_extracted - actual):
             errors.append(f"progress.json references missing extracted chapter: {path}")
+
+    if isinstance(workflow, dict) and workflow.get("review_evidence") == REVIEW_EVIDENCE_VERSION:
+        repository = state_repository(book_dir)
+        ledger_valid = False
+        try:
+            ledger = repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
+        except (SchemaError, RepositoryError, StorageError) as exc:
+            errors.append(f"review-ledger.json is required and must be valid: {exc}")
+        else:
+            if ledger.data.get("book_slug") != progress.get("book_slug"):
+                errors.append(
+                    "review-ledger.json book_slug does not match progress.json book_slug"
+                )
+            else:
+                ledger_valid = True
+
+        if ledger_valid:
+            manager = ReviewLedgerManager(
+                repository,
+                artifact_reader=_review_artifact_reader(book_dir),
+            )
+            for chapter in chapters:
+                if not isinstance(chapter, dict) or chapter.get("status") != "reviewed":
+                    continue
+                number = chapter.get("number")
+                try:
+                    resolution = manager.resolve_unit(progress, metadata, number)
+                except ReviewEvidenceError as exc:
+                    errors.append(f"Chapter {number}: review-ledger validation failed: {exc}")
+                    continue
+                if resolution.state != "pass":
+                    errors.append(
+                        f"Chapter {number}: status=reviewed requires current PASS review evidence; "
+                        f"review state={resolution.state}"
+                    )
 
     return errors, warnings
 
