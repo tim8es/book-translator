@@ -56,6 +56,14 @@ class ReviewResolution:
     history: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class AcceptReviewResult:
+    unit_id: str
+    status: str
+    progress_revision: str
+    changed: bool
+
+
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -388,3 +396,73 @@ class ReviewLedgerManager:
         except (StorageError, RepositoryError, SchemaError) as exc:
             raise ReviewEvidenceError(f"cannot persist review evidence: {exc}") from exc
         return ReviewRecordResult(record=copy.deepcopy(record), ledger_revision=new_revision)
+
+    def accept_review(
+        self,
+        progress: Mapping[str, Any],
+        progress_revision: str,
+        metadata: Mapping[str, Any],
+        chapter_number: int,
+    ) -> AcceptReviewResult:
+        if not isinstance(progress_revision, str) or not progress_revision.strip():
+            raise ReviewEvidenceError("progress revision must be a non-empty string")
+
+        chapter = self._chapter(progress, chapter_number)
+        status = chapter.get("status")
+        if status not in {"translated", "reviewed"}:
+            raise ReviewEvidenceError(
+                f"chapter {chapter_number} must be translated before review can be accepted; status={status!r}"
+            )
+
+        try:
+            durable = self.repository.read("progress.json", SchemaKind.PROGRESS)
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise ReviewEvidenceError(f"cannot verify current progress state: {exc}") from exc
+        if durable.version != progress_revision or durable.data != dict(progress):
+            raise ReviewConflict("progress state changed; re-read before accepting review")
+
+        resolution = self.resolve_unit(progress, metadata, chapter_number)
+        if resolution.state != "pass":
+            raise ReviewEvidenceError(
+                f"chapter {chapter_number} requires current PASS review evidence; review state={resolution.state}"
+            )
+
+        if status == "reviewed":
+            return AcceptReviewResult(
+                unit_id=resolution.unit_id,
+                status="reviewed",
+                progress_revision=progress_revision,
+                changed=False,
+            )
+
+        updated = copy.deepcopy(dict(progress))
+        target = self._chapter(updated, chapter_number)
+        target["status"] = "reviewed"
+
+        # Re-resolve immediately before the lifecycle CAS. Workflow-coordinated
+        # writers remain excluded by the unit claim; this second read also catches
+        # ordinary out-of-band artifact changes that occurred during acceptance.
+        latest_resolution = self.resolve_unit(updated, metadata, chapter_number)
+        if latest_resolution.state != "pass":
+            raise ReviewEvidenceError(
+                f"chapter {chapter_number} review evidence became {latest_resolution.state} before promotion"
+            )
+
+        try:
+            new_revision = self.repository.write_if_version(
+                "progress.json",
+                SchemaKind.PROGRESS,
+                updated,
+                progress_revision,
+            )
+        except StorageVersionConflict as exc:
+            raise ReviewConflict("progress state changed before review promotion completed") from exc
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise ReviewEvidenceError(f"cannot persist reviewed lifecycle state: {exc}") from exc
+
+        return AcceptReviewResult(
+            unit_id=resolution.unit_id,
+            status="reviewed",
+            progress_revision=new_revision,
+            changed=True,
+        )
