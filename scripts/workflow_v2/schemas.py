@@ -239,7 +239,93 @@ def _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:
 
 def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None:
     _require_nonempty_string(data, "book_slug", schema)
-    _require_list(data, "records", schema)
+    next_sequence = _require_int(data, "next_sequence", schema, minimum=1)
+    records = _require_list(data, "records", schema)
+
+    record_ids: set[str] = set()
+    sequences: set[int] = set()
+    last_by_unit: dict[str, str] = {}
+
+    for index, record in enumerate(records):
+        prefix = f"records[{index}]"
+        if not isinstance(record, Mapping):
+            raise _field(schema, prefix, "must be an object")
+
+        record_id = _require_nonempty_string(record, "record_id", schema, path=f"{prefix}.record_id")
+        _validate_hex_id(record_id, schema, f"{prefix}.record_id")
+        if record_id in record_ids:
+            raise _field(schema, f"{prefix}.record_id", "must be unique within the ledger")
+        record_ids.add(record_id)
+
+        sequence = _require_int(record, "sequence", schema, minimum=1, path=f"{prefix}.sequence")
+        if sequence in sequences:
+            raise _field(schema, f"{prefix}.sequence", "must be unique within the ledger")
+        if sequence != index + 1:
+            raise _field(schema, f"{prefix}.sequence", f"must equal {index + 1} in stored order")
+        sequences.add(sequence)
+
+        unit_id = _require_nonempty_string(record, "unit_id", schema, path=f"{prefix}.unit_id")
+        _validate_unit_id(unit_id, schema, f"{prefix}.unit_id")
+
+        outcome = _require_nonempty_string(record, "outcome", schema, path=f"{prefix}.outcome")
+        if outcome not in {"PASS", "CORRECTIONS_REQUIRED"}:
+            raise _field(schema, f"{prefix}.outcome", "must be PASS or CORRECTIONS_REQUIRED")
+
+        source_sha256 = _require_nonempty_string(record, "source_sha256", schema, path=f"{prefix}.source_sha256")
+        _validate_sha256(source_sha256, schema, f"{prefix}.source_sha256")
+        translation_sha256 = _require_nonempty_string(
+            record,
+            "translation_sha256",
+            schema,
+            path=f"{prefix}.translation_sha256",
+        )
+        _validate_sha256(translation_sha256, schema, f"{prefix}.translation_sha256")
+
+        _require_nonempty_string(record, "workflow_revision", schema, path=f"{prefix}.workflow_revision")
+        _require_nonempty_string(
+            record,
+            "review_contract_revision",
+            schema,
+            path=f"{prefix}.review_contract_revision",
+        )
+        _require_nonempty_string(
+            record,
+            "reviewer_session_id",
+            schema,
+            path=f"{prefix}.reviewer_session_id",
+        )
+        reviewed_at = _require_nonempty_string(record, "reviewed_at", schema, path=f"{prefix}.reviewed_at")
+        _parse_utc_timestamp(reviewed_at, schema, f"{prefix}.reviewed_at")
+        _require_nonempty_string(record, "state_revision", schema, path=f"{prefix}.state_revision")
+
+        if "review_commit" not in record:
+            raise _field(schema, f"{prefix}.review_commit", "is required")
+        review_commit = record["review_commit"]
+        if review_commit is not None and (not isinstance(review_commit, str) or not review_commit.strip()):
+            raise _field(schema, f"{prefix}.review_commit", "must be null or a non-empty string")
+
+        _require_int(record, "correction_round", schema, minimum=0, path=f"{prefix}.correction_round")
+
+        if "supersedes_record_id" not in record:
+            raise _field(schema, f"{prefix}.supersedes_record_id", "is required")
+        supersedes = record["supersedes_record_id"]
+        expected_supersedes = last_by_unit.get(unit_id)
+        if supersedes is not None:
+            if not isinstance(supersedes, str):
+                raise _field(schema, f"{prefix}.supersedes_record_id", "must be null or a record id")
+            _validate_hex_id(supersedes, schema, f"{prefix}.supersedes_record_id")
+        if supersedes != expected_supersedes:
+            if expected_supersedes is None:
+                message = "must be null for the first record of a unit"
+            else:
+                message = f"must reference the immediately preceding record {expected_supersedes} for this unit"
+            raise _field(schema, f"{prefix}.supersedes_record_id", message)
+
+        last_by_unit[unit_id] = record_id
+
+    expected_next = len(records) + 1
+    if next_sequence != expected_next:
+        raise _field(schema, "next_sequence", f"must equal {expected_next} for the stored history")
 
 
 def _validate_source_manifest(data: Mapping[str, Any], schema: SchemaKind) -> None:
