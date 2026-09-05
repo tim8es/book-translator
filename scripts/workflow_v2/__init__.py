@@ -1,5 +1,18 @@
 """Public internal API for Workflow v2 state infrastructure."""
 
+from .claims import (
+    ActiveClaim,
+    ClaimAuditError,
+    ClaimConflict,
+    ClaimError,
+    ClaimLifecycleResult,
+    ClaimManager,
+    ClaimOwnershipError,
+    ClaimRollbackError,
+    InvalidClaimSelector,
+    canonical_unit_id,
+    resolve_selector,
+)
 from .filesystem import FilesystemStorage
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import (
@@ -20,7 +33,16 @@ from .storage import (
 )
 
 __all__ = [
+    "ActiveClaim",
+    "ClaimAuditError",
+    "ClaimConflict",
+    "ClaimError",
+    "ClaimLifecycleResult",
+    "ClaimManager",
+    "ClaimOwnershipError",
+    "ClaimRollbackError",
     "FilesystemStorage",
+    "InvalidClaimSelector",
     "InvalidStoragePath",
     "LoadedDocument",
     "ParsedDocument",
@@ -35,5 +57,7 @@ __all__ = [
     "StoredValue",
     "UnsupportedSchemaVersion",
     "WorkflowStateRepository",
+    "canonical_unit_id",
     "parse_document",
+    "resolve_selector",
 ]
