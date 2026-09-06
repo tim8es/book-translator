@@ -29,6 +29,7 @@ from workflow_v2 import (
     StorageError,
     WorkflowStateRepository,
 )
+from workflow_v2.claim_cli import ClaimCliError, register_claim_commands
 from workflow_v2.schemas import SCHEMA_VERSION
 
 
@@ -353,8 +354,34 @@ def template_text(name: str, fallback: str) -> str:
 
 
 def create_support_files(book_dir: Path) -> None:
-    glossary_fallback = """# Glossary\n\n| Original | Translation | Type | Notes |\n| --- | --- | --- | --- |\n"""
-    style_fallback = """# Style Guide\n\n## Narration\n\n- Point of view:\n- Narrative distance:\n- Register:\n- Typical sentence length and movement:\n\n## Prose tendencies\n\n- Terse or expansive:\n- Plain or lexically rich:\n- Restrained or expressive:\n\n## Character voices\n\n## Recurring stylistic decisions\n\n## Ambiguities to preserve\n\n## Review notes\n"""
+    glossary_fallback = """# Glossary
+
+| Original | Translation | Type | Notes |
+| --- | --- | --- | --- |
+"""
+    style_fallback = """# Style Guide
+
+## Narration
+
+- Point of view:
+- Narrative distance:
+- Register:
+- Typical sentence length and movement:
+
+## Prose tendencies
+
+- Terse or expansive:
+- Plain or lexically rich:
+- Restrained or expressive:
+
+## Character voices
+
+## Recurring stylistic decisions
+
+## Ambiguities to preserve
+
+## Review notes
+"""
     (book_dir / "glossary.md").write_text(template_text("glossary.md", glossary_fallback), encoding="utf-8")
     (book_dir / "style-guide.md").write_text(template_text("style-guide.md", style_fallback), encoding="utf-8")
 
@@ -655,6 +682,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.set_defaults(func=build_command)
 
+    register_claim_commands(subparsers, repo_root())
     return parser
 
 
@@ -662,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except BookError as exc:
+    except (BookError, ClaimCliError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

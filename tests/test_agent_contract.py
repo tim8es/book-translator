@@ -197,6 +197,17 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("20. Is meaningful formatting preserved?", text)
         self.assertNotIn("git checkout --detach <resolved-revision>", text)
 
+    def test_orchestration_contract_requires_durable_claim_gate(self):
+        text = (PROJECT_ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
+
+        for phrase in (
+            "python scripts/book.py claim",
+            "python scripts/book.py claims",
+            "python scripts/book.py release",
+            "python scripts/book.py cleanup-claims",
+        ):
+            self.assertIn(phrase, text)
+
     def test_translation_contract_preserves_literary_guarantees(self):
         text = (PROJECT_ROOT / "docs" / "TRANSLATION.md").read_text(encoding="utf-8")
         lowered = text.lower()

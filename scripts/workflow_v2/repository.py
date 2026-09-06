@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .schemas import SchemaKind, parse_document
-from .storage import StorageBackend
+from .storage import StorageBackend, StorageVersionConflict
 
 
 class RepositoryError(RuntimeError):
@@ -84,3 +84,16 @@ class WorkflowStateRepository:
     ) -> str:
         content = self._serialize(path, schema, data)
         return self.storage.write_if_version(path, content, expected_version)
+
+    def delete_if_version(
+        self,
+        path: str,
+        schema: SchemaKind,
+        expected_version: str,
+    ) -> None:
+        loaded = self.read(path, schema)
+        if loaded.version != expected_version:
+            raise StorageVersionConflict(
+                f"{path}: expected revision {expected_version}, current revision {loaded.version}"
+            )
+        self.storage.delete_if_version(path, expected_version)
