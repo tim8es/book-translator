@@ -52,7 +52,7 @@ The mutex is obtained with `create_if_absent`. If present and expired, a contend
 1. Acquire the coordination mutex as `claim_admission`.
 2. While holding it, reject acquisition if `.workflow/finalization.json` exists.
 3. Run the existing deterministic unit-conflict preflight and create the requested unit claims.
-4. Release the coordination mutex with version-checked delete.
+4. Release the coordination mutex with version-checked delete in a `finally` path.
 5. Existing range rollback semantics remain unchanged for ordinary create conflicts/errors.
 
 Because finalization admission uses the same mutex, a claim cannot appear after finalization has installed its marker.
@@ -67,12 +67,24 @@ Schema fields:
 - `lock_id`: 32 lowercase hex characters
 - `book_slug`: exact progress `book_slug`
 - `workflow_revision`: immutable metadata `workflow.resolved_revision`
-- `base_progress_revision`: progress storage revision observed before promotion
-- `candidate_progress_revision`: deterministic storage revision/hash of the all-reviewed candidate progress document
+- `base_progress_revision`: backend storage revision observed before promotion
+- `candidate_progress_sha256`: SHA-256 of the deterministic serialized all-reviewed candidate progress bytes
+- `phase`: `preparing` or `promoted`
+- `promoted_progress_revision`: null in `preparing`; actual backend storage revision after successful progress CAS in `promoted`
 - `session_id`: session that first created the marker (audit only; recovery is not owner-bound)
 - `started_at`: UTC timestamp
 
 The marker is transient authoritative coordination state only while finalization is unfinished. It is removed after successful post-validation and report writes.
+
+`candidate_progress_sha256` is deliberately content-based rather than a predicted storage version. `StorageBackend` revision tokens are opaque and future backends (#17) need not use content hashes.
+
+## Deterministic document identity
+
+Expose one repository serialization helper used by both ordinary repository writes and finalize candidate hashing. Finalize must not duplicate JSON formatting rules or infer backend revision tokens.
+
+The helper validates through the declared schema and returns the exact canonical UTF-8 bytes that `create`/`write_if_version` would persist. Candidate SHA-256 is computed from those bytes.
+
+For recovery, the current raw `progress.json` storage bytes are hashed and compared with `candidate_progress_sha256` after schema validation.
 
 ## Finalization state transition
 
@@ -89,6 +101,8 @@ Before acquiring locks, finalize computes a read-only candidate from current sta
 
 The candidate progress document is a deterministic deep copy of current progress with every chapter status set to `reviewed`. No durable mutation occurs during initial preflight.
 
+Filesystem CLI pre/postflight reuses the same structural + corpus normalization path already used by `status`/`resume`, including explicit `private_external` source behavior. Finalize domain logic receives verified corpus/preflight data rather than reimplementing filesystem-specific corpus rules.
+
 ### Admission and revalidation
 
 Finalize then:
@@ -104,23 +118,25 @@ Finalize immediately re-reads metadata, progress, ledger, artifacts and corpus s
 
 ### One-CAS lifecycle promotion
 
-The manager computes the deterministic serialized candidate progress revision before writing.
+Recovery cases are resolved from marker phase, backend revision, and candidate content hash:
 
-Recovery cases:
+- `phase=preparing` and current progress revision == `base_progress_revision`: revalidate exact PASS/artifact identities, then CAS-write the full candidate document once;
+- `phase=preparing` and current raw progress SHA-256 == `candidate_progress_sha256`: a previous process committed progress but crashed before updating the marker; promote marker phase with CAS using the current actual backend revision;
+- `phase=promoted` and current progress revision == `promoted_progress_revision` and content hash == `candidate_progress_sha256`: promotion is already complete; do not write progress again;
+- any other progress revision/content combination: fail closed as a concurrent/unexpected state change. Do not claim completion.
 
-- current progress revision == `base_progress_revision`: revalidate exact PASS/artifact identities, then CAS-write the full candidate document once;
-- current progress revision == `candidate_progress_revision`: promotion already completed by a previous interrupted finalize; do not write progress again;
-- any other progress revision: fail closed as a concurrent/unexpected state change. Do not claim completion.
+After a successful progress CAS, finalize CAS-updates the marker to `phase=promoted` and records the actual backend revision returned by storage. Crash between those two writes is covered by the content-hash recovery case above.
 
 The candidate write changes all remaining `translated` chapters to `reviewed` together. Already-`reviewed` chapters remain `reviewed`. No sequential per-chapter promotion is used.
 
-Immediately before the CAS, finalize rechecks zero active claims and current PASS identities while the finalization marker blocks new claim admission.
+Immediately before the progress CAS, finalize rechecks zero active claims and current PASS identities while the finalization marker blocks new claim admission.
 
 ## Crash and retry semantics
 
 - Crash before the finalization marker: no finalize mutation exists; retry starts normally.
-- Crash after marker creation but before progress CAS: retry adopts the compatible marker, sees current progress at `base_progress_revision`, revalidates, and performs the CAS.
-- Crash after progress CAS: retry sees current progress at `candidate_progress_revision` and continues without another lifecycle write.
+- Crash after marker creation but before progress CAS: retry adopts the compatible `preparing` marker, sees current progress at `base_progress_revision`, revalidates, and performs the CAS.
+- Crash after progress CAS but before marker phase update: retry matches candidate content SHA-256, records the actual current backend revision in the marker, and continues.
+- Crash after marker phase update: retry verifies `promoted_progress_revision` + candidate content hash and continues without another lifecycle write.
 - Crash while writing generated reports: progress may already be fully reviewed, but reports are non-authoritative; retry regenerates all reports from current authoritative state.
 - Crash after all reports but before marker deletion: retry reproduces the same report bytes, verifies postconditions, then removes the marker.
 
@@ -183,7 +199,7 @@ Before lifecycle promotion, expected failures (missing/stale/corrections review,
 
 ### Conflict / uncertain mutation
 
-Storage CAS conflicts, incompatible recovery marker, unexpected progress revision, or report write conflict fail closed. If progress may already have been promoted, retain the finalization marker so a later `finalize` retry performs recovery rather than admitting new claims.
+Storage CAS conflicts, incompatible recovery marker, unexpected progress revision/content hash, marker phase conflict, or report write conflict fail closed. If progress may already have been promoted, retain the finalization marker so a later `finalize` retry performs recovery rather than admitting new claims.
 
 ### Stale coordination mutex
 
@@ -226,7 +242,8 @@ Strict TDD slices:
 3. Atomic promotion RED/GREEN:
    - all chapters promoted by one progress CAS;
    - stale progress conflict cannot partially promote;
-   - exact PASS identity rechecked immediately before CAS.
+   - exact PASS identity rechecked immediately before CAS;
+   - backend-neutral candidate hash identity, including crash after progress CAS before marker phase update.
 4. Crash recovery RED/GREEN:
    - retry before CAS;
    - retry after CAS;
@@ -249,5 +266,5 @@ Every production change requires full Python 3.10/3.12 CI. Final PR audit requir
 - Generated `STATE.md`: deterministic completion snapshot projection.
 - Generated final quality report: deterministic completion snapshot projection.
 - No partial lifecycle promotion: one CAS of complete `progress.json` candidate.
-- Idempotence: base/candidate revision recovery plus byte-identical report writes.
+- Idempotence: base revision + candidate content hash + promoted backend revision recovery, plus byte-identical report writes.
 - Failure-path coverage: dedicated TDD and #18 reliability extension.
