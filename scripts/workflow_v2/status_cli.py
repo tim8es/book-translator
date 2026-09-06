@@ -12,6 +12,7 @@ from typing import Any
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError
+from .source_cli import normalize_structural_errors, register_source_overrides, source_storage_mode
 from .status import StatusError, StatusResolver
 from .storage import StorageError
 
@@ -61,38 +62,46 @@ def _resolver(root: Path, slug: str) -> StatusResolver:
 
 
 def _default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str, Any]]:
-    """Reuse the existing structural and corpus validators without copying their logic."""
+    """Reuse the existing structural and corpus validators without copying hash logic."""
 
     try:
         book_module = importlib.import_module("book")
         structural_errors, _ = book_module.validate_book(slug)
         book_dir, metadata, progress = book_module.load_book(slug)
+        structural_errors = normalize_structural_errors(book_dir, metadata, structural_errors)
     except Exception as exc:
         raise StatusCliError(f"cannot run structural preflight: {exc}") from exc
 
     manifest_path = book_dir / "source-manifest.json"
+    mode = source_storage_mode(metadata)
     if not manifest_path.is_file():
+        if mode is not None:
+            return structural_errors, {
+                "state": "invalid",
+                "storage_mode": mode,
+                "error": "source-manifest.json is missing for explicit-source book",
+            }
         return structural_errors, {"state": "unsealed"}
 
     try:
         corpus_module = importlib.import_module("corpus")
         manifest = corpus_module.load_source_manifest(book_dir)
         if manifest is None:
+            if mode is not None:
+                return structural_errors, {
+                    "state": "invalid",
+                    "storage_mode": mode,
+                    "error": "source-manifest.json is missing for explicit-source book",
+                }
             return structural_errors, {"state": "unsealed"}
-        source_sha256, chapter_count = corpus_module.verify_manifest(
-            book_dir,
-            metadata,
-            progress,
-            manifest,
-        )
+        verified = corpus_module.verify_manifest(book_dir, metadata, progress, manifest)
     except Exception as exc:
-        return structural_errors, {"state": "invalid", "error": str(exc)}
+        payload: dict[str, Any] = {"state": "invalid", "error": str(exc)}
+        if mode is not None:
+            payload["storage_mode"] = mode
+        return structural_errors, payload
 
-    return structural_errors, {
-        "state": "verified",
-        "source_sha256": source_sha256,
-        "chapter_count": chapter_count,
-    }
+    return structural_errors, dict(verified)
 
 
 def _snapshot(
@@ -126,7 +135,14 @@ def status_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
     print(f"{args.slug}: {state} workflow={payload.get('workflow_revision') or '-'}")
     print(_counts("lifecycle", payload["lifecycle"]))
     print(_counts("reviews", payload["reviews"]))
-    print(f"claims={len(payload['claims'])} corpus={payload['corpus'].get('state', 'unknown')}")
+    corpus = payload["corpus"]
+    line = f"claims={len(payload['claims'])} corpus={corpus.get('state', 'unknown')}"
+    mode = corpus.get("storage_mode")
+    if mode:
+        attached = corpus.get("source_attached")
+        attached_text = "yes" if attached is True else "no" if attached is False else "unknown"
+        line += f" source={mode} attached={attached_text}"
+    print(line)
     for error in payload["errors"]:
         print(f"ERROR: {error}")
     return 0
@@ -176,8 +192,9 @@ def register_status_commands(
     preflight: Preflight | None = None,
     error_factory: ErrorFactory = StatusCliError,
 ) -> None:
-    """Register read-only status/resume commands on the main book.py parser."""
+    """Register explicit-source overrides plus read-only status/resume commands."""
 
+    register_source_overrides(subparsers, root, error_factory=error_factory)
     resolved_preflight = preflight or (lambda slug: _default_preflight(root, slug))
 
     status = subparsers.add_parser("status", help="Report repository-authoritative workflow status.")
