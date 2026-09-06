@@ -13,7 +13,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from workflow_v2.reviews import ReviewResolution
-from workflow_v2.schemas import SchemaKind, parse_document
 
 try:
     epub_output = importlib.import_module("workflow_v2.epub_output")
@@ -192,21 +191,29 @@ class WorkflowV2OutputManifestTests(unittest.TestCase):
             },
         }
 
-    def test_output_manifest_schema_kind_accepts_contract_and_rejects_unsafe_path(self):
-        kind = getattr(SchemaKind, "OUTPUT_MANIFEST", None)
-        self.assertIsNotNone(kind, "SchemaKind.OUTPUT_MANIFEST is not implemented")
-        parsed = parse_document(kind, self.manifest())
-        self.assertEqual(parsed.data["artifact_path"], "output/sample.epub")
+    def test_output_manifest_validator_accepts_contract_and_rejects_unsafe_path_and_hashes(self):
+        validate = self.api("validate_output_manifest")
+        manifest = self.manifest()
+        self.assertEqual(validate(manifest), manifest)
 
-        invalid = self.manifest()
-        invalid["artifact_path"] = "../sample.epub"
+        invalid_path = self.manifest()
+        invalid_path["artifact_path"] = "../sample.epub"
         with self.assertRaises(Exception):
-            parse_document(kind, invalid)
+            validate(invalid_path)
 
-    def test_manifest_builder_emits_valid_schema(self):
-        kind = getattr(SchemaKind, "OUTPUT_MANIFEST", None)
-        self.assertIsNotNone(kind, "SchemaKind.OUTPUT_MANIFEST is not implemented")
+        invalid_hash = self.manifest()
+        invalid_hash["artifact_sha256"] = "not-a-hash"
+        with self.assertRaises(Exception):
+            validate(invalid_hash)
+
+        invalid_fingerprint = self.manifest()
+        invalid_fingerprint["input_fingerprint"] = "ABC"
+        with self.assertRaises(Exception):
+            validate(invalid_fingerprint)
+
+    def test_manifest_builder_emits_valid_contract(self):
         build_manifest = self.api("build_output_manifest")
+        validate = self.api("validate_output_manifest")
         manifest = build_manifest(
             book_slug="sample",
             preview=False,
@@ -221,7 +228,7 @@ class WorkflowV2OutputManifestTests(unittest.TestCase):
                 "review_ledger": "ledger-rev",
             },
         )
-        self.assertEqual(parse_document(kind, manifest).data, manifest)
+        self.assertEqual(validate(manifest), manifest)
 
     def test_output_status_distinguishes_missing_current_stale_and_invalid_hash(self):
         resolve_status = self.api("resolve_output_status")
