@@ -30,7 +30,7 @@ from workflow_v2 import (
     WorkflowStateRepository,
 )
 from workflow_v2.schemas import SCHEMA_VERSION, parse_document
-from workflow_v2.source_cli import normalize_structural_errors, source_storage_mode
+from workflow_v2.source_cli import normalize_structural_errors
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -153,17 +153,82 @@ def _assert_source_matches_metadata(source: Path, metadata: dict) -> tuple[str, 
         raise book.BookError(
             f"Source filename mismatch: expected {expected_filename!r}, got {source.name!r}"
         )
-    expected_size = explicit.get("size_bytes")
-    actual_size = source.stat().st_size
-    if actual_size != expected_size:
-        raise book.BookError(f"Source size mismatch: expected {expected_size}, got {actual_size}")
     expected_sha = normalized_expected_sha(
         explicit.get("sha256") if isinstance(explicit.get("sha256"), str) else None,
         "metadata source sha256",
     )
     if actual_sha != expected_sha:
         raise book.BookError(f"Source SHA-256 mismatch: expected {expected_sha}, got {actual_sha}")
+    expected_size = explicit.get("size_bytes")
+    actual_size = source.stat().st_size
+    if actual_size != expected_size:
+        raise book.BookError(f"Source size mismatch: expected {expected_size}, got {actual_size}")
     return actual_sha, int(expected_size), str(explicit.get("storage_mode"))
+
+
+def _trusted_restore_identity(
+    source: Path,
+    metadata: dict,
+    manifest: dict | None,
+    argument_sha: str | None,
+) -> tuple[str, str]:
+    """Resolve and verify source identity before restore performs any write."""
+
+    explicit = _explicit_source(metadata)
+    if explicit is not None:
+        expected_filename = explicit.get("filename")
+        if source.name != expected_filename:
+            raise book.BookError(
+                f"Source filename mismatch: expected {expected_filename!r}, got {source.name!r}"
+            )
+        expected_sha = normalized_expected_sha(
+            explicit.get("sha256") if isinstance(explicit.get("sha256"), str) else None,
+            "metadata source sha256",
+        )
+        if argument_sha and argument_sha != expected_sha:
+            raise book.BookError("--expected-sha256 disagrees with metadata source identity")
+
+        actual_sha = sha256_path(source)
+        if actual_sha != expected_sha:
+            raise book.BookError(f"SHA-256 mismatch: expected {expected_sha}, got {actual_sha}")
+
+        expected_size = explicit.get("size_bytes")
+        actual_size = source.stat().st_size
+        if actual_size != expected_size:
+            raise book.BookError(f"Source size mismatch: expected {expected_size}, got {actual_size}")
+
+        if manifest is not None:
+            expected_manifest = {
+                "source_file": metadata.get("source_file"),
+                "source_format": metadata.get("source_format"),
+                "source_storage_mode": explicit.get("storage_mode"),
+                "source_size_bytes": expected_size,
+                "source_sha256": expected_sha,
+            }
+            for key, value in expected_manifest.items():
+                if manifest.get(key) != value:
+                    raise book.BookError(
+                        f"source-manifest.json {key} disagrees with metadata.json"
+                    )
+        return expected_sha or actual_sha, str(explicit.get("storage_mode"))
+
+    manifest_sha = normalized_expected_sha(
+        str(manifest.get("source_sha256")) if manifest and manifest.get("source_sha256") else None,
+        "source-manifest.json source_sha256",
+    )
+    if manifest_sha and argument_sha and manifest_sha != argument_sha:
+        raise book.BookError(
+            "--expected-sha256 disagrees with source-manifest.json; refusing to choose between source identities"
+        )
+    expected_sha = manifest_sha or argument_sha
+    if not expected_sha:
+        raise book.BookError(
+            "No trusted source SHA-256 is recorded. Supply --expected-sha256 from durable provenance before restoring."
+        )
+    actual_sha = sha256_path(source)
+    if actual_sha != expected_sha:
+        raise book.BookError(f"SHA-256 mismatch: expected {expected_sha}, got {actual_sha}")
+    return expected_sha, "legacy_embedded"
 
 
 def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path) -> dict:
@@ -369,24 +434,13 @@ def restore_command(args: argparse.Namespace) -> int:
 
     existing_document = load_source_manifest_document(book_dir)
     existing_manifest = existing_document.data if existing_document is not None else None
-    manifest_sha = normalized_expected_sha(
-        str(existing_manifest.get("source_sha256")) if existing_manifest and existing_manifest.get("source_sha256") else None,
-        "source-manifest.json source_sha256",
-    )
     argument_sha = normalized_expected_sha(args.expected_sha256, "--expected-sha256")
-    if manifest_sha and argument_sha and manifest_sha != argument_sha:
-        raise book.BookError(
-            "--expected-sha256 disagrees with source-manifest.json; refusing to choose between source identities"
-        )
-    expected_sha = manifest_sha or argument_sha
-    if not expected_sha:
-        raise book.BookError(
-            "No trusted source SHA-256 is recorded. Supply --expected-sha256 from durable provenance before restoring."
-        )
-
-    actual_sha = sha256_path(source)
-    if actual_sha != expected_sha:
-        raise book.BookError(f"SHA-256 mismatch: expected {expected_sha}, got {actual_sha}")
+    expected_sha, restore_mode = _trusted_restore_identity(
+        source,
+        metadata,
+        existing_manifest,
+        argument_sha,
+    )
 
     extracted_chapters, _ = book.extract_chapters(source, source_format)
     records = progress.get("chapters")
@@ -404,7 +458,10 @@ def restore_command(args: argparse.Namespace) -> int:
             raise book.BookError("source-manifest.json extracted must be an array")
         for item in items:
             if isinstance(item, dict) and isinstance(item.get("path"), str) and isinstance(item.get("sha256"), str):
-                recorded_hashes[item["path"]] = normalized_expected_sha(item["sha256"], f"manifest hash for {item['path']}") or ""
+                recorded_hashes[item["path"]] = normalized_expected_sha(
+                    item["sha256"],
+                    f"manifest hash for {item['path']}",
+                ) or ""
 
     with tempfile.TemporaryDirectory(prefix=".corpus-restore-", dir=book_dir) as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -444,7 +501,7 @@ def restore_command(args: argparse.Namespace) -> int:
             "schema_version": SCHEMA_VERSION,
             "source_file": metadata.get("source_file"),
             "source_format": source_format,
-            "source_sha256": actual_sha,
+            "source_sha256": expected_sha,
             "chapter_count": len(manifest_items),
             "extracted": manifest_items,
         }
@@ -458,9 +515,11 @@ def restore_command(args: argparse.Namespace) -> int:
             raise book.BookError(f"Cannot construct valid source-manifest.json: {exc}") from exc
 
         stored_source = source_file_path(book_dir, metadata)
-        stored_source.parent.mkdir(parents=True, exist_ok=True)
-        staged_source = stored_source.with_name(f".{stored_source.name}.{uuid.uuid4().hex}.tmp")
-        shutil.copy2(source, staged_source)
+        staged_source: Path | None = None
+        if restore_mode != "private_external":
+            stored_source.parent.mkdir(parents=True, exist_ok=True)
+            staged_source = stored_source.with_name(f".{stored_source.name}.{uuid.uuid4().hex}.tmp")
+            shutil.copy2(source, staged_source)
 
         extracted_dir = book_dir / "extracted"
         backup_dir = book_dir / f".extracted-backup-{uuid.uuid4().hex}"
@@ -469,7 +528,8 @@ def restore_command(args: argparse.Namespace) -> int:
             os.replace(extracted_dir, backup_dir)
         try:
             os.replace(staged_extracted, extracted_dir)
-            os.replace(staged_source, stored_source)
+            if staged_source is not None:
+                os.replace(staged_source, stored_source)
             write_source_manifest(
                 book_dir,
                 new_manifest,
@@ -481,7 +541,7 @@ def restore_command(args: argparse.Namespace) -> int:
                 shutil.rmtree(extracted_dir, ignore_errors=True)
             if had_existing and backup_dir.exists():
                 os.replace(backup_dir, extracted_dir)
-            if staged_source.exists():
+            if staged_source is not None and staged_source.exists():
                 staged_source.unlink()
             raise
         else:
@@ -496,7 +556,7 @@ def restore_command(args: argparse.Namespace) -> int:
 
     print(
         f"Restored complete source corpus for books/{args.slug}: "
-        f"{len(records)} extracted artifact(s), SHA-256 {actual_sha}"
+        f"{len(records)} extracted artifact(s), SHA-256 {expected_sha}"
     )
     return 0
 
