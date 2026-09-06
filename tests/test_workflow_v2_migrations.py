@@ -9,9 +9,8 @@ SCRIPTS = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 try:
-    from workflow_v2.schemas import SchemaError, SchemaKind, parse_document
+    from workflow_v2.schemas import SchemaKind, parse_document
 except ModuleNotFoundError:
-    SchemaError = None
     SchemaKind = None
     parse_document = None
 
@@ -26,13 +25,23 @@ except ModuleNotFoundError:
     detect_schema_version = None
     migrate_document = None
 
+try:
+    from workflow_v2.migration_journal import (
+        MigrationJournalError,
+        serialize_migration_journal,
+        validate_migration_journal,
+    )
+except ModuleNotFoundError:
+    MigrationJournalError = None
+    serialize_migration_journal = None
+    validate_migration_journal = None
+
 
 class WorkflowV2MigrationRegistryTests(unittest.TestCase):
     def require_api(self):
         self.assertIsNotNone(migrate_document, "workflow_v2.migrations is not implemented")
         self.assertIsNotNone(detect_schema_version, "detect_schema_version is not implemented")
         self.assertIsNotNone(MigrationCompatibilityError, "migration compatibility error is not implemented")
-        self.assertIsNotNone(SchemaKind, "workflow_v2.schemas is unavailable")
 
     @staticmethod
     def metadata():
@@ -139,7 +148,7 @@ class WorkflowV2MigrationRegistryTests(unittest.TestCase):
                 self.assertEqual(result.to_version, 1)
                 self.assertTrue(result.changed)
                 self.assertEqual(result.data, current)
-                self.assertEqual(legacy, original, "migration must not mutate caller data")
+                self.assertEqual(legacy, original)
                 self.assertEqual(parse_document(kind, result.data).data, current)
 
     def test_explicit_v1_is_validated_and_returned_unchanged(self):
@@ -168,20 +177,18 @@ class WorkflowV2MigrationRegistryTests(unittest.TestCase):
         self.assertIn("v0", str(legacy_error.exception).lower())
 
 
-class WorkflowV2MigrationJournalSchemaTests(unittest.TestCase):
-    def require_journal_schema(self):
-        self.assertIsNotNone(SchemaKind)
-        self.assertIsNotNone(parse_document)
-        kind = getattr(SchemaKind, "MIGRATION_JOURNAL", None)
-        self.assertIsNotNone(kind, "SchemaKind.MIGRATION_JOURNAL is not implemented")
-        return kind
+class WorkflowV2MigrationJournalTests(unittest.TestCase):
+    def require_api(self):
+        self.assertIsNotNone(validate_migration_journal, "migration journal validator is not implemented")
+        self.assertIsNotNone(serialize_migration_journal, "migration journal serializer is not implemented")
+        self.assertIsNotNone(MigrationJournalError, "migration journal error is not implemented")
 
     @staticmethod
     def valid_journal():
-        original = b'{"legacy": true}\n'
         import base64
         import hashlib
 
+        original = b'{"legacy": true}\n'
         return {
             "schema_version": 1,
             "operation": "workflow_upgrade",
@@ -213,63 +220,61 @@ class WorkflowV2MigrationJournalSchemaTests(unittest.TestCase):
             ],
         }
 
-    def test_valid_prepared_journal_parses(self):
-        kind = self.require_journal_schema()
+    def test_valid_prepared_journal_validates_and_serializes_canonically(self):
+        self.require_api()
         journal = self.valid_journal()
-        parsed = parse_document(kind, journal)
-        self.assertEqual(parsed.data, journal)
+        validated = validate_migration_journal(journal)
+        self.assertEqual(validated, journal)
+        payload = serialize_migration_journal(journal)
+        self.assertTrue(payload.endswith(b"\n"))
+        self.assertEqual(payload, serialize_migration_journal(copy.deepcopy(journal)))
 
     def test_journal_rejects_invalid_phase_operation_and_unsafe_path(self):
-        kind = self.require_journal_schema()
-        for field, value in (
-            ("phase", "rolling-back"),
-            ("operation", "finalize"),
-        ):
+        self.require_api()
+        for field, value in (("phase", "rolling-back"), ("operation", "finalize")):
             with self.subTest(field=field):
                 invalid = self.valid_journal()
                 invalid[field] = value
-                with self.assertRaises(SchemaError):
-                    parse_document(kind, invalid)
+                with self.assertRaises(MigrationJournalError):
+                    validate_migration_journal(invalid)
 
         invalid = self.valid_journal()
         invalid["documents"][0]["path"] = "../metadata.json"
-        with self.assertRaises(SchemaError):
-            parse_document(kind, invalid)
+        with self.assertRaises(MigrationJournalError):
+            validate_migration_journal(invalid)
 
     def test_journal_rejects_bad_hash_base64_and_original_identity_combinations(self):
-        kind = self.require_journal_schema()
-
+        self.require_api()
         bad_hash = self.valid_journal()
         bad_hash["documents"][0]["target_sha256"] = "not-a-hash"
-        with self.assertRaises(SchemaError):
-            parse_document(kind, bad_hash)
+        with self.assertRaises(MigrationJournalError):
+            validate_migration_journal(bad_hash)
 
         bad_base64 = self.valid_journal()
         bad_base64["documents"][0]["original_bytes_base64"] = "***not-base64***"
-        with self.assertRaises(SchemaError):
-            parse_document(kind, bad_base64)
+        with self.assertRaises(MigrationJournalError):
+            validate_migration_journal(bad_base64)
 
         inconsistent_missing = self.valid_journal()
         inconsistent_missing["documents"][1]["original_revision"] = "should-be-null"
-        with self.assertRaises(SchemaError):
-            parse_document(kind, inconsistent_missing)
+        with self.assertRaises(MigrationJournalError):
+            validate_migration_journal(inconsistent_missing)
 
         inconsistent_existing = self.valid_journal()
         inconsistent_existing["documents"][0]["original_sha256"] = None
-        with self.assertRaises(SchemaError):
-            parse_document(kind, inconsistent_existing)
+        with self.assertRaises(MigrationJournalError):
+            validate_migration_journal(inconsistent_existing)
 
     def test_applied_journal_requires_resulting_revision_for_every_document(self):
-        kind = self.require_journal_schema()
+        self.require_api()
         applied = self.valid_journal()
         applied["phase"] = "applied"
-        with self.assertRaises(SchemaError):
-            parse_document(kind, applied)
+        with self.assertRaises(MigrationJournalError):
+            validate_migration_journal(applied)
 
         for entry in applied["documents"]:
             entry["resulting_revision"] = "new-storage-revision"
-        parsed = parse_document(kind, applied)
-        self.assertEqual(parsed.data["phase"], "applied")
+        self.assertEqual(validate_migration_journal(applied)["phase"], "applied")
 
 
 if __name__ == "__main__":
