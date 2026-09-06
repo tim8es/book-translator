@@ -12,11 +12,11 @@ SCRIPTS = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from workflow_v2 import FilesystemStorage, WorkflowStateRepository
+from workflow_v2.migrations import MigrationCompatibilityError
 
 try:
-    from workflow_v2.migrations import MigrationCompatibilityError, MigrationPlanner
+    from workflow_v2.migrations import MigrationPlanner
 except ImportError:
-    MigrationCompatibilityError = None
     MigrationPlanner = None
 
 
@@ -43,7 +43,6 @@ class WorkflowV2MigrationPlannerTests(unittest.TestCase):
 
     def require_api(self):
         self.assertIsNotNone(MigrationPlanner, "MigrationPlanner is not implemented")
-        self.assertIsNotNone(MigrationCompatibilityError)
 
     @staticmethod
     def installed(revision=NEW):
