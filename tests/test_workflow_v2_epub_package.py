@@ -124,6 +124,21 @@ class WorkflowV2EpubPackageTests(unittest.TestCase):
             self.assertIn("properties=\"cover-image\"", opf)
             self.assertIn("image/png", opf)
 
+    def test_validator_rejects_cover_media_type_that_disagrees_with_extension(self):
+        validate = self.api("validate_epub_bytes")
+        valid = self.build(
+            cover={
+                "name": "cover.png",
+                "media_type": "image/png",
+                "content": b"fake-png-bytes",
+            }
+        )
+        with zipfile.ZipFile(io.BytesIO(valid), "r") as zf:
+            opf = zf.read("EPUB/package.opf").replace(b"image/png", b"image/jpeg")
+        mismatched = self.repack(valid, replace={"EPUB/package.opf": opf})
+        with self.assertRaises(Exception):
+            validate(mismatched, expected_unit_count=2)
+
     def test_validator_accepts_valid_package_and_rejects_container_and_content_corruption(self):
         validate = self.api("validate_epub_bytes")
         valid = self.build()
