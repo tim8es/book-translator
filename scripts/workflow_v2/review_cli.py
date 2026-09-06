@@ -271,7 +271,7 @@ def _positive_chapter(value: str) -> int:
 
 
 def register_review_commands(subparsers: argparse._SubParsersAction, root: Path) -> None:
-    """Register review evidence and read-only status/resume commands."""
+    """Register review evidence and workflow orchestration commands."""
 
     record = subparsers.add_parser("review-record", help="Record hash-bound Reviewer evidence.")
     record.add_argument("slug", help="Book slug under books/.")
@@ -306,3 +306,9 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
     accept.set_defaults(func=lambda args: accept_review_command(args, root))
 
     register_status_commands(subparsers, root, error_factory=ReviewCliError)
+
+    # Lazy import avoids a status/review registration cycle while extending the
+    # already-created legacy Markdown build parser in one place.
+    from .epub_cli import register_epub_commands
+
+    register_epub_commands(subparsers, root, error_factory=ReviewCliError)
