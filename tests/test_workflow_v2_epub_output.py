@@ -62,7 +62,7 @@ class WorkflowV2EpubOutputIdentityTests(unittest.TestCase):
         }
         self.artifacts = {
             "extracted/001-one.md": b"# One\n\nAlpha.\n",
-            "translated/001-one.md": b"# Один\n\nАльфа.\n",
+            "translated/001-one.md": "# Один\n\nАльфа.\n".encode("utf-8"),
         }
 
     def api(self, name):
@@ -112,10 +112,10 @@ class WorkflowV2EpubOutputIdentityTests(unittest.TestCase):
     def test_relevant_translation_metadata_order_cover_and_review_changes_change_fingerprint(self):
         baseline = self.fingerprint(self.snapshot())
 
-        self.artifacts["translated/001-one.md"] = b"# Один\n\nИзменено.\n"
+        self.artifacts["translated/001-one.md"] = "# Один\n\nИзменено.\n".encode("utf-8")
         changed_translation = self.fingerprint(self.snapshot())
         self.assertNotEqual(changed_translation, baseline)
-        self.artifacts["translated/001-one.md"] = b"# Один\n\nАльфа.\n"
+        self.artifacts["translated/001-one.md"] = "# Один\n\nАльфа.\n".encode("utf-8")
 
         metadata = copy.deepcopy(self.metadata)
         metadata["title"] = "Changed title"
