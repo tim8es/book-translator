@@ -194,7 +194,7 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
         self.assertEqual(artifact.read_bytes(), original_artifact)
         self.assertEqual(manifest.read_bytes(), original_manifest)
 
-    def test_relevant_metadata_cover_translation_and_review_changes_are_stale_but_order_tamper_is_invalid(self):
+    def test_relevant_metadata_order_cover_translation_and_review_changes_are_stale(self):
         cases = ("metadata", "order", "cover", "translation", "review")
         for case in cases:
             with self.subTest(case=case):
@@ -210,10 +210,20 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
                     data["title"] = "Relevant metadata change"
                     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 elif case == "order":
-                    path = book / "progress.json"
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    data["chapters"] = list(reversed(data["chapters"]))
-                    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    progress_path = book / "progress.json"
+                    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                    progress["chapters"] = list(reversed(progress["chapters"]))
+                    progress_path.write_text(
+                        json.dumps(progress, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    manifest_path = book / "source-manifest.json"
+                    source_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    source_manifest["extracted"] = list(reversed(source_manifest["extracted"]))
+                    manifest_path.write_text(
+                        json.dumps(source_manifest, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
                 elif case == "cover":
                     (book / "cover.png").write_bytes(b"PNG-COVER-V1")
                     path = book / "metadata.json"
@@ -251,13 +261,8 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
                     )
                     self.run_cli("release", slug, "1", "--session-id", "reviewer-change", "--json")
 
-                if case == "order":
-                    changed = self.status(slug, expect=1)
-                    self.assertEqual(changed["state"], "invalid", changed)
-                    self.assertIn("source corpus must be verified", changed["reason"])
-                else:
-                    changed = self.status(slug)
-                    self.assertEqual(changed["state"], "stale", changed)
+                changed = self.status(slug)
+                self.assertEqual(changed["state"], "stale", changed)
 
     def test_semantically_duplicate_pass_evidence_does_not_make_output_stale(self):
         self.initialize_final_book()
