@@ -32,6 +32,7 @@ from .schemas import (
     UnsupportedSchemaVersion,
     parse_document,
 )
+from .source_schema import install_source_schema_extensions
 from .storage import (
     InvalidStoragePath,
     StorageAlreadyExists,
@@ -41,6 +42,8 @@ from .storage import (
     StorageVersionConflict,
     StoredValue,
 )
+
+install_source_schema_extensions()
 
 __all__ = [
     "AcceptReviewResult",
