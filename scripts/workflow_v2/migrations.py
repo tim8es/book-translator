@@ -631,7 +631,6 @@ class MigrationPlanner:
             raise MigrationCompatibilityError("metadata workflow upgrade_history must be an array")
 
         workflow_without_new_history = copy.deepcopy(target_workflow)
-        workflow_without_new_history["upgrade_history"] = copy.deepcopy(existing_history)
         target_metadata["workflow"] = workflow_without_new_history
 
         metadata_needs_change = (
