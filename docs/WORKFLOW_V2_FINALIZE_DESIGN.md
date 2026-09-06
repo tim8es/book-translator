@@ -142,6 +142,18 @@ Immediately before the progress CAS, finalize rechecks zero active claims and cu
 
 A successful rerun with unchanged state performs no substantive progress or report changes.
 
+## Orchestration visibility and mutation admission
+
+An unfinished finalization must be visible to a fresh session.
+
+`StatusResolver.status()` reads `.workflow/finalization.json` when present and exposes a deterministic `finalization` field. Inactive status is `{ "active": false }`. Active status includes `active=true`, marker `phase`, `workflow_revision`, and `started_at`. A malformed marker or workflow/book mismatch makes status invalid.
+
+`StatusResolver.resume()` gives an active, valid finalization marker priority over ordinary unit work and returns `operation="finalize"` with orchestrator context. This ensures a fresh session resumes completion instead of trying per-chapter `accept_review` after a crash.
+
+`ReviewLedgerManager.accept_review()` rejects lifecycle promotion while a finalization marker exists. Review recording already requires a live reviewer claim, and no new reviewer claim can be admitted once finalization starts.
+
+Out-of-band direct artifact edits are not made impossible by the storage abstraction; instead, exact source/translation hashes are revalidated immediately before the progress CAS and again during post-validation. Any such edit invalidates completion and prevents successful marker removal.
+
 ## Completion snapshot
 
 Add backend-neutral `workflow_v2.finalize` logic that builds one completion snapshot from:
@@ -248,7 +260,9 @@ Strict TDD slices:
    - retry before CAS;
    - retry after CAS;
    - retry after partial report generation;
-   - successful rerun is idempotent.
+   - successful rerun is idempotent;
+   - `status/resume` exposes and resumes active finalization;
+   - direct `accept_review` is blocked while finalization is active.
 5. Reports/CLI RED/GREEN:
    - deterministic `STATE.md`, `FINAL_QUALITY_GATES.md`, and regenerated `REVIEW_REPORT.md`;
    - JSON success output;
@@ -263,6 +277,8 @@ Every production change requires full Python 3.10/3.12 CI. Final PR audit requir
 - Book-level lock and claim rejection: finalization marker + serialized coordination admission.
 - No active claims / corpus / translation / PASS/hash verification: initial and immediate pre-CAS revalidation.
 - Validate before and after promotion: explicit pre/post phases.
+- Fresh-session recovery: active marker is visible in status and `resume` selects `finalize`.
+- Competing lifecycle promotion: `accept_review` rejects while finalization is active.
 - Generated `STATE.md`: deterministic completion snapshot projection.
 - Generated final quality report: deterministic completion snapshot projection.
 - No partial lifecycle promotion: one CAS of complete `progress.json` candidate.
