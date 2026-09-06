@@ -8,7 +8,7 @@ Make EPUB a deterministic, validated Workflow v2 deliverable rather than a manua
 
 - Extend `book.py build <slug>` with `--format markdown|epub`; default remains Markdown.
 - EPUB builds use canonical `progress.json` chapter order.
-- Normal builds require `reviewed` lifecycle; `--allow-unreviewed` remains explicit preview mode and permits `translated`/`reviewed` units only.
+- Normal builds require `reviewed` lifecycle plus current PASS evidence; `--allow-unreviewed` remains explicit preview mode and permits `translated`/`reviewed` units without claiming final-review completion.
 - Generate a deterministic EPUB 3 package with metadata, language, nav/TOC, spine, CSS, chapter XHTML and optional cover.
 - Validate every generated EPUB before reporting success.
 - Write deterministic `output/manifest.json` describing the artifact and the exact build inputs.
@@ -31,7 +31,7 @@ Add `scripts/workflow_v2/epub_output.py` with no argparse dependency. It owns:
 
 The module uses only Python stdlib (`zipfile`, `xml.etree.ElementTree`, `html`, `hashlib`, `json`, `pathlib`, `io`). No third-party runtime dependency is introduced.
 
-### CLI adapter
+### CLI adapter and preflight
 
 Keep `book.py` as the user-facing parser and existing Markdown builder. Add a thin `workflow_v2/epub_cli.py` adapter that registers/executes the EPUB/build-status branch and translates expected failures into the existing concise CLI error surface.
 
@@ -40,6 +40,13 @@ The existing `build` command remains backward-compatible:
 - no `--format` means `markdown`;
 - `--output` remains supported for Markdown and EPUB, but the extension must match the selected format;
 - `--allow-unreviewed` remains the explicit preview gate.
+
+EPUB build must not rely on raw `book.validate_book()` alone, because explicit `private_external` books intentionally have no source binary in `books/<slug>/source/`. The CLI reuses the same normalized structural + corpus preflight path used by status/finalize (`status_cli.default_preflight` or an equivalent shared adapter):
+
+- structural errors after explicit-source normalization must be empty;
+- corpus state must be `verified`;
+- final build additionally requires every included unit to be `reviewed` with current PASS evidence;
+- preview build requires each included unit to be `translated` or `reviewed`, but does not claim review completion.
 
 `book.py build-status` is read-only and never rewrites manifests or artifacts.
 
@@ -53,7 +60,7 @@ The deterministic package contains:
 - `EPUB/nav.xhtml`;
 - `EPUB/styles.css`;
 - one XHTML document per included unit in canonical order;
-- optional cover asset and cover XHTML when `metadata.cover_path` is present.
+- optional cover asset when `metadata.cover_path` is present, referenced from OPF with EPUB 3 `cover-image` semantics.
 
 `package.opf` uses EPUB 3.0 metadata. Required metadata:
 
@@ -88,7 +95,7 @@ Each chapter must render at least one non-empty body element or build fails.
 - must exist and be a regular file;
 - supported extensions are `.jpg`, `.jpeg`, `.png`, `.gif`, `.svg`;
 - its exact bytes participate in the build fingerprint;
-- it is copied into the EPUB with the correct media type and referenced from OPF/cover XHTML.
+- it is copied into the EPUB with the correct media type and referenced from OPF as the cover image.
 
 Existing books without `cover_path` need no migration.
 
@@ -101,14 +108,16 @@ The build-input snapshot is deterministic data derived only from relevant inputs
 - selected format and preview mode;
 - metadata fields affecting EPUB bytes: title, author, target language, cover path;
 - workflow resolved revision;
-- metadata/progress/review-ledger storage revisions;
 - ordered units: unit id/number/title/translation path/status + exact translation SHA-256;
+- for final builds, normalized current review identity per unit: resolved state, exact source/translation hashes, workflow revision and review-contract revision;
 - optional cover SHA-256;
 - explicit build configuration version.
 
+Raw storage revision tokens are **not** part of the fingerprint. In particular, `review-ledger.json` revision is not a direct fingerprint input: appending semantically duplicate PASS evidence must not stale otherwise identical output. Final-build review identity is derived through the same current-resolution logic as #9/#21.
+
 The fingerprint is SHA-256 of canonical JSON for that snapshot.
 
-Repository HEAD is recorded separately in the output manifest as best-effort provenance (`repository_commit`, nullable). It does not participate in staleness because unrelated commits must not invalidate an otherwise identical artifact.
+Repository/storage revisions are still recorded separately in the manifest as provenance. Repository HEAD is best-effort (`repository_commit`, nullable) and does not participate in staleness because unrelated commits must not invalidate an otherwise identical artifact.
 
 ## Output manifest
 
@@ -136,6 +145,8 @@ Repository HEAD is recorded separately in the output manifest as best-effort pro
 
 The manifest is a generated projection, not authoritative workflow state.
 
+If an existing manifest+artifact already resolve as `current`, an identical rebuild returns unchanged and preserves the existing manifest bytes. This prevents an unrelated new Git HEAD from causing provenance-only churn.
+
 ## Staleness semantics
 
 `build-status` recomputes the current input snapshot/fingerprint and validates the stored manifest/artifact:
@@ -145,7 +156,7 @@ The manifest is a generated projection, not authoritative workflow state.
 - `stale`: manifest/artifact are structurally valid but the current relevant input fingerprint differs;
 - `invalid`: manifest malformed/unsupported, path unsafe, artifact hash mismatch, EPUB invalid or manifest/artifact identity inconsistent.
 
-Relevant mutations that must produce `stale`: translation bytes, title/author/target language, chapter order/title/path/status, cover path/bytes, workflow/build contract configuration.
+Relevant mutations that must produce `stale`: translation bytes, title/author/target language, chapter order/title/path/status, current review identity for final builds, cover path/bytes, workflow/build contract configuration.
 
 Changing an unrelated repository file/commit alone does not produce `stale`.
 
@@ -171,7 +182,7 @@ The validator rejects unless all are true:
 - nav XHTML parses and links every chapter in order;
 - spine count equals expected unit count and every `idref` resolves;
 - every chapter XHTML parses and has non-empty body text/content;
-- optional cover references resolve.
+- optional cover reference resolves and media type matches its supported extension.
 
 ## Integration with #12
 
@@ -183,16 +194,17 @@ Preview builds may use translated-but-unreviewed units, are marked `preview: tru
 
 1. Domain snapshot/fingerprint + stale resolution.
 2. Deterministic EPUB assembly + validator.
-3. CLI `build --format epub`, preview gate, output manifest and `build-status`.
-4. #18 reliability: incomplete build, interrupted artifact/manifest window, stale relevant input, identical rebuild idempotence.
+3. CLI `build --format epub`, private-source preflight, preview gate, output manifest and `build-status`.
+4. #18 reliability: incomplete build, interrupted artifact/manifest window, stale relevant input, semantically duplicate review evidence, unrelated Git commit and identical rebuild idempotence.
 5. Full matrix CI and final diff/review/ancestry audit.
 
 ## Acceptance criteria
 
 - One command builds and validates a readable EPUB from a complete reviewed book.
 - Existing Markdown build behavior remains compatible.
+- `private_external` final builds work without persisting the private source binary.
 - Output manifest identifies exact relevant workflow state and artifact hash.
-- Relevant source-state changes are reported stale; unrelated commit changes are not.
+- Relevant source/review state changes are reported stale; semantically duplicate review evidence and unrelated commits are not.
 - Incomplete/unreviewed final build fails unless preview mode is explicit.
 - Generated EPUB and manifest are byte-identical on unchanged successful rebuild.
 - Failure/interruption never reports a mismatched output as current.
