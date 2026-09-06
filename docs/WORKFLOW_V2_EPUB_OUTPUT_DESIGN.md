@@ -31,6 +31,8 @@ Add `scripts/workflow_v2/epub_output.py` with no argparse dependency. It owns:
 
 The module uses only Python stdlib (`zipfile`, `xml.etree.ElementTree`, `html`, `hashlib`, `json`, `pathlib`, `io`). No third-party runtime dependency is introduced.
 
+`output/manifest.json` is intentionally **not** registered as an authoritative `SchemaKind`: it is a generated delivery projection. Its strict v1 shape is validated by `epub_output.validate_output_manifest()` before use. This keeps migration semantics for machine workflow state separate from generated output metadata.
+
 ### CLI adapter and preflight
 
 Keep `book.py` as the user-facing parser and existing Markdown builder. Add a thin `workflow_v2/epub_cli.py` adapter that registers/executes the EPUB/build-status branch and translates expected failures into the existing concise CLI error surface.
@@ -121,7 +123,7 @@ Repository/storage revisions are still recorded separately in the manifest as pr
 
 ## Output manifest
 
-`books/<slug>/output/manifest.json` is generated only after the candidate EPUB validates successfully. Schema:
+`books/<slug>/output/manifest.json` is generated only after the candidate EPUB validates successfully. Strict domain-validated schema:
 
 ```json
 {
@@ -152,7 +154,7 @@ If an existing manifest+artifact already resolve as `current`, an identical rebu
 `build-status` recomputes the current input snapshot/fingerprint and validates the stored manifest/artifact:
 
 - `missing`: manifest or artifact is absent;
-- `current`: manifest parses, artifact exists and validates, artifact SHA matches, input fingerprint matches current relevant inputs;
+- `current`: manifest validates, artifact exists and validates, artifact SHA matches, input fingerprint matches current relevant inputs;
 - `stale`: manifest/artifact are structurally valid but the current relevant input fingerprint differs;
 - `invalid`: manifest malformed/unsupported, path unsafe, artifact hash mismatch, EPUB invalid or manifest/artifact identity inconsistent.
 
@@ -192,7 +194,7 @@ Preview builds may use translated-but-unreviewed units, are marked `preview: tru
 
 ## TDD slices
 
-1. Domain snapshot/fingerprint + stale resolution.
+1. Domain snapshot/fingerprint + strict generated-manifest validation + stale resolution.
 2. Deterministic EPUB assembly + validator.
 3. CLI `build --format epub`, private-source preflight, preview gate, output manifest and `build-status`.
 4. #18 reliability: incomplete build, interrupted artifact/manifest window, stale relevant input, semantically duplicate review evidence, unrelated Git commit and identical rebuild idempotence.
