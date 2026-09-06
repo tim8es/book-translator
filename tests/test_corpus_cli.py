@@ -166,7 +166,9 @@ class CorpusCliTests(unittest.TestCase):
         expected_sha = hashlib.sha256(source.read_bytes()).hexdigest()
         self.run_cli("book.py", "extract", str(source), "--slug", "sample", "--target-language", "ru")
 
-        wrong = self.repo / "wrong.epub"
+        wrong_dir = self.repo / "wrong-source"
+        wrong_dir.mkdir()
+        wrong = wrong_dir / "sample.epub"
         self.make_epub(wrong, body_suffix=" changed")
         book = self.repo / "books" / "sample"
         shutil.rmtree(book / "extracted")
