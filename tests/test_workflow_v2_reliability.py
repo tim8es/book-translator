@@ -145,10 +145,96 @@ class WorkflowV2Phase1ReliabilityTests(unittest.TestCase):
         )
         return claim
 
+    def replace_claim_with_expired(
+        self,
+        book,
+        *,
+        role,
+        session_id,
+        claim_id,
+    ):
+        repository = self.book_repository(book)
+        path = ".workflow/claims/chapter-000001.json"
+        current = repository.read(path, SchemaKind.CLAIM)
+        repository.delete_if_version(path, SchemaKind.CLAIM, current.version)
+        return self.write_claim(
+            book,
+            role=role,
+            session_id=session_id,
+            claim_id=claim_id,
+        )
+
     def claim_events(self, book):
         repository = self.book_repository(book)
         paths = repository.storage.list(".workflow/claim-events")
         return [repository.read(path, SchemaKind.CLAIM_EVENT).data for path in paths]
+
+    def progress_document(self, book):
+        return self.book_repository(book).read("progress.json", SchemaKind.PROGRESS)
+
+    def write_translation(self, book, text="# Один\n\nАльфа.\n"):
+        progress = self.progress_document(book).data
+        translation = book / progress["chapters"][0]["translation_path"]
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_text(text, encoding="utf-8")
+        return translation
+
+    def mark_translated(self, book, text="# Один\n\nАльфа.\n"):
+        translation = self.write_translation(book, text)
+        repository = self.book_repository(book)
+        loaded = repository.read("progress.json", SchemaKind.PROGRESS)
+        updated = dict(loaded.data)
+        updated["chapters"] = [dict(chapter) for chapter in loaded.data["chapters"]]
+        updated["chapters"][0]["status"] = "translated"
+        revision = repository.write_if_version(
+            "progress.json",
+            SchemaKind.PROGRESS,
+            updated,
+            loaded.version,
+        )
+        return translation, revision
+
+    def claim_reviewer(self, session_id="reviewer-crashed"):
+        return self.run_book(
+            "claim",
+            "sample",
+            "1",
+            "--role",
+            "reviewer",
+            "--session-id",
+            session_id,
+            "--base-commit",
+            "dispatch-commit",
+            "--json",
+        )
+
+    def record_pass(self, session_id="reviewer-crashed"):
+        return self.canonical_json(
+            self.run_book(
+                "review-record",
+                "sample",
+                "1",
+                "--outcome",
+                "PASS",
+                "--session-id",
+                session_id,
+                "--review-commit",
+                "review-commit",
+                "--json",
+            )
+        )
+
+    def release_claim(self, session_id):
+        return self.canonical_json(
+            self.run_book(
+                "release",
+                "sample",
+                "1",
+                "--session-id",
+                session_id,
+                "--json",
+            )
+        )
 
     def test_fresh_resume_blocks_on_surviving_live_claim_without_mutation(self):
         book = self.initialize_book()
@@ -257,6 +343,166 @@ class WorkflowV2Phase1ReliabilityTests(unittest.TestCase):
         self.assertFalse(
             (book / ".workflow" / "claims" / "chapter-000001.json").exists()
         )
+
+    def test_crash_after_translation_bytes_keeps_extracted_lifecycle_until_claim_cleanup(self):
+        book = self.initialize_book()
+        self.run_book(
+            "claim",
+            "sample",
+            "1",
+            "--role",
+            "translator",
+            "--session-id",
+            "translator-crashed",
+            "--base-commit",
+            "dispatch-commit",
+            "--json",
+        )
+        translation = self.write_translation(book)
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertEqual(status["lifecycle"]["extracted"], 1)
+        self.assertEqual(status["lifecycle"]["translated"], 0)
+        blocked = self.canonical_json(
+            self.run_book("resume", "sample", "--json", expect=1)
+        )
+        self.assertEqual(blocked["reason"], "unit_claimed")
+
+        self.replace_claim_with_expired(
+            book,
+            role="translator",
+            session_id="translator-crashed",
+            claim_id="2" * 32,
+        )
+        self.run_book("cleanup-claims", "sample", "--json")
+        before = self.authoritative_snapshot(book)
+        resumed = self.canonical_json(self.run_book("resume", "sample", "--json"))
+        after = self.authoritative_snapshot(book)
+
+        self.assertEqual(resumed["operation"], "translate")
+        self.assertEqual(translation.read_text(encoding="utf-8"), "# Один\n\nАльфа.\n")
+        self.assertEqual(self.progress_document(book).data["chapters"][0]["status"], "extracted")
+        self.assertEqual(after, before)
+
+    def test_crash_after_translated_progress_blocks_until_claim_cleanup_then_resumes_review(self):
+        book = self.initialize_book()
+        self.run_book(
+            "claim",
+            "sample",
+            "1",
+            "--role",
+            "translator",
+            "--session-id",
+            "translator-crashed",
+            "--base-commit",
+            "dispatch-commit",
+            "--json",
+        )
+        self.mark_translated(book)
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertEqual(status["lifecycle"]["translated"], 1)
+        self.assertEqual(status["reviews"]["missing"], 1)
+        blocked = self.canonical_json(
+            self.run_book("resume", "sample", "--json", expect=1)
+        )
+        self.assertEqual(blocked["reason"], "unit_claimed")
+
+        self.replace_claim_with_expired(
+            book,
+            role="translator",
+            session_id="translator-crashed",
+            claim_id="3" * 32,
+        )
+        self.run_book("cleanup-claims", "sample", "--json")
+        ledger_before = (book / "review-ledger.json").read_bytes()
+        resumed = self.canonical_json(self.run_book("resume", "sample", "--json"))
+
+        self.assertEqual(resumed["operation"], "review")
+        self.assertEqual((book / "review-ledger.json").read_bytes(), ledger_before)
+
+    def test_crash_after_pass_blocks_until_claim_cleanup_then_accept_review_is_idempotent(self):
+        book = self.initialize_book()
+        self.mark_translated(book)
+        self.claim_reviewer()
+        recorded = self.record_pass()
+        self.assertEqual(recorded["record"]["outcome"], "PASS")
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertEqual(status["lifecycle"]["translated"], 1)
+        self.assertEqual(status["reviews"]["pass"], 1)
+        self.assertEqual(status["claims"][0]["role"], "reviewer")
+        blocked = self.canonical_json(
+            self.run_book("resume", "sample", "--json", expect=1)
+        )
+        self.assertEqual(blocked["reason"], "unit_claimed")
+
+        self.replace_claim_with_expired(
+            book,
+            role="reviewer",
+            session_id="reviewer-crashed",
+            claim_id="4" * 32,
+        )
+        self.run_book("cleanup-claims", "sample", "--json")
+        resumed = self.canonical_json(self.run_book("resume", "sample", "--json"))
+        self.assertEqual(resumed["operation"], "accept_review")
+
+        first = self.canonical_json(
+            self.run_book("accept-review", "sample", "1", "--json")
+        )
+        self.assertTrue(first["changed"])
+        storage = self.book_storage(book)
+        progress_after_first = storage.read("progress.json")
+        ledger_after_first = storage.read("review-ledger.json")
+
+        second = self.canonical_json(
+            self.run_book("accept-review", "sample", "1", "--json")
+        )
+        self.assertFalse(second["changed"])
+        progress_after_second = storage.read("progress.json")
+        ledger_after_second = storage.read("review-ledger.json")
+        self.assertEqual(progress_after_second.content, progress_after_first.content)
+        self.assertEqual(progress_after_second.version, progress_after_first.version)
+        self.assertEqual(ledger_after_second.content, ledger_after_first.content)
+        self.assertEqual(ledger_after_second.version, ledger_after_first.version)
+
+    def test_stale_pass_on_translated_unit_resumes_review(self):
+        book = self.initialize_book()
+        translation, _ = self.mark_translated(book)
+        self.claim_reviewer("reviewer-a")
+        self.record_pass("reviewer-a")
+        self.release_claim("reviewer-a")
+
+        translation.write_text("# Один\n\nИзменённая Альфа.\n", encoding="utf-8")
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertTrue(status["valid"])
+        self.assertEqual(status["reviews"]["stale"], 1)
+        resumed = self.canonical_json(self.run_book("resume", "sample", "--json"))
+        self.assertEqual(resumed["operation"], "review")
+
+    def test_stale_pass_on_reviewed_unit_fails_closed(self):
+        book = self.initialize_book()
+        translation, _ = self.mark_translated(book)
+        self.claim_reviewer("reviewer-a")
+        self.record_pass("reviewer-a")
+        self.release_claim("reviewer-a")
+        accepted = self.canonical_json(
+            self.run_book("accept-review", "sample", "1", "--json")
+        )
+        self.assertTrue(accepted["changed"])
+
+        translation.write_text("# Один\n\nИзменённая Альфа.\n", encoding="utf-8")
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertFalse(status["valid"])
+        self.assertEqual(status["reviews"]["stale"], 1)
+        self.assertTrue(
+            any("reviewed without current PASS evidence" in error for error in status["errors"])
+        )
+        resumed = self.canonical_json(
+            self.run_book("resume", "sample", "--json", expect=1)
+        )
+        self.assertEqual(resumed["operation"], "blocked")
+        self.assertEqual(resumed["reason"], "preflight_failed")
 
 
 if __name__ == "__main__":
