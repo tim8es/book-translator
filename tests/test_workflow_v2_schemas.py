@@ -229,6 +229,32 @@ class WorkflowV2SchemaTests(unittest.TestCase):
             parse_document(SchemaKind.SOURCE_MANIFEST, data)
         self.assertIn("source_sha256", str(ctx.exception))
 
+    def test_explicit_source_contract_is_enforced_by_schema_api(self):
+        self.require_api()
+        data = self.valid_metadata()
+        data["source"] = {
+            "storage_mode": "private_external",
+            "filename": "wrong.md",
+            "size_bytes": 10,
+            "sha256": "a" * 64,
+        }
+        with self.assertRaises(SchemaError) as ctx:
+            parse_document(SchemaKind.METADATA, data)
+        self.assertIn("source.filename", str(ctx.exception))
+
+        manifest = {
+            "schema_version": 1,
+            "source_file": "example.md",
+            "source_format": "markdown",
+            "source_sha256": "a" * 64,
+            "source_storage_mode": "private_external",
+            "chapter_count": 0,
+            "extracted": [],
+        }
+        with self.assertRaises(SchemaError) as ctx:
+            parse_document(SchemaKind.SOURCE_MANIFEST, manifest)
+        self.assertIn("source_size_bytes", str(ctx.exception))
+
     def test_legacy_metadata_and_progress_are_normalized_in_memory_only(self):
         self.require_api()
         for kind, original in (
