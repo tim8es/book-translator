@@ -19,6 +19,7 @@ if str(SCRIPTS) not in sys.path:
 from workflow_v2.filesystem import FilesystemStorage
 from workflow_v2.repository import WorkflowStateRepository
 from workflow_v2.schemas import SchemaKind
+from workflow_v2.storage import StorageVersionConflict
 
 
 REVISION = "0123456789abcdef"
@@ -503,6 +504,106 @@ class WorkflowV2Phase1ReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(resumed["operation"], "blocked")
         self.assertEqual(resumed["reason"], "preflight_failed")
+
+    def test_concurrent_glossary_cas_rejects_stale_writer_without_lost_update(self):
+        book = self.initialize_book()
+        storage_a = FilesystemStorage(book)
+        storage_b = FilesystemStorage(book)
+        first_a = storage_a.read("glossary.md")
+        first_b = storage_b.read("glossary.md")
+        self.assertEqual(first_a.version, first_b.version)
+
+        winner = b"# Glossary\n\nalpha = A\n"
+        loser = b"# Glossary\n\nalpha = B\n"
+        new_version = storage_a.write_if_version(
+            "glossary.md", winner, first_a.version
+        )
+        with self.assertRaises(StorageVersionConflict):
+            storage_b.write_if_version("glossary.md", loser, first_b.version)
+
+        fresh = FilesystemStorage(book).read("glossary.md")
+        self.assertEqual(fresh.content, winner)
+        self.assertEqual(fresh.version, new_version)
+        self.assertNotIn(b"alpha = B", fresh.content)
+
+    def test_missing_extracted_artifact_blocks_fresh_resume_without_mutation(self):
+        book = self.initialize_book()
+        baseline = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertTrue(baseline["valid"])
+        progress = self.progress_document(book).data
+        extracted = book / progress["chapters"][0]["source_path"]
+        extracted.unlink()
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertFalse(status["valid"])
+        self.assertEqual(status["corpus"]["state"], "invalid")
+        before = self.authoritative_snapshot(book)
+        resumed = self.canonical_json(
+            self.run_book("resume", "sample", "--json", expect=1)
+        )
+        after = self.authoritative_snapshot(book)
+        self.assertEqual(resumed["operation"], "blocked")
+        self.assertEqual(resumed["reason"], "preflight_failed")
+        self.assertEqual(after, before)
+        self.assertEqual(self.book_storage(book).list(".workflow/claims"), [])
+
+    def test_tampered_extracted_artifact_blocks_fresh_resume_without_mutation(self):
+        book = self.initialize_book()
+        progress = self.progress_document(book).data
+        extracted = book / progress["chapters"][0]["source_path"]
+        extracted.write_text(
+            extracted.read_text(encoding="utf-8") + "tampered\n",
+            encoding="utf-8",
+        )
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertFalse(status["valid"])
+        self.assertEqual(status["corpus"]["state"], "invalid")
+        self.assertIn("hash mismatch", status["corpus"]["error"])
+        before = self.authoritative_snapshot(book)
+        resumed = self.canonical_json(
+            self.run_book("resume", "sample", "--json", expect=1)
+        )
+        after = self.authoritative_snapshot(book)
+        self.assertEqual(resumed["operation"], "blocked")
+        self.assertEqual(resumed["reason"], "preflight_failed")
+        self.assertEqual(after, before)
+        self.assertEqual(self.book_storage(book).list(".workflow/claims"), [])
+
+    def test_private_source_restart_and_read_only_commands_are_deterministic(self):
+        book = self.initialize_book(private=True)
+        metadata = json.loads((book / "metadata.json").read_text(encoding="utf-8"))
+        source_path = book / "source" / metadata["source_file"]
+        self.assertFalse(source_path.exists())
+
+        before = self.authoritative_snapshot(book)
+        status_one_result = self.run_book("status", "sample", "--json")
+        status_one = self.canonical_json(status_one_result)
+        status_two_result = self.run_book("status", "sample", "--json")
+        status_two = self.canonical_json(status_two_result)
+        resume_one_result = self.run_book("resume", "sample", "--json")
+        resume_one = self.canonical_json(resume_one_result)
+        resume_two_result = self.run_book("resume", "sample", "--json")
+        resume_two = self.canonical_json(resume_two_result)
+        after = self.authoritative_snapshot(book)
+
+        self.assertEqual(status_one_result.stdout, status_two_result.stdout)
+        self.assertEqual(resume_one_result.stdout, resume_two_result.stdout)
+        self.assertEqual(status_one, status_two)
+        self.assertEqual(resume_one, resume_two)
+        self.assertTrue(status_one["valid"])
+        self.assertEqual(status_one["corpus"]["state"], "verified")
+        self.assertEqual(status_one["corpus"]["storage_mode"], "private_external")
+        self.assertFalse(status_one["corpus"]["source_attached"])
+        self.assertEqual(
+            status_one["corpus"]["source_sha256"], metadata["source"]["sha256"]
+        )
+        self.assertEqual(
+            status_one["corpus"]["source_size_bytes"],
+            metadata["source"]["size_bytes"],
+        )
+        self.assertEqual(resume_one["operation"], "translate")
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":
