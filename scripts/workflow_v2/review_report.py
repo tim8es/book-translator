@@ -192,8 +192,8 @@ def render_review_report_markdown(snapshot: Mapping[str, Any]) -> str:
         "",
         "## Units",
         "",
-        "| Unit | State | Source SHA-256 | Translation SHA-256 | Current outcome | Workflow revision | Review commit |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Unit | State | Source SHA-256 | Translation SHA-256 | Current outcome | Workflow revision | Review contract revision | Review commit |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
 
     for unit in snapshot["units"]:
@@ -208,6 +208,7 @@ def render_review_report_markdown(snapshot: Mapping[str, Any]) -> str:
                     _markdown_cell(unit["translation_sha256"]),
                     _markdown_cell(current.get("outcome")),
                     _markdown_cell(current.get("workflow_revision")),
+                    _markdown_cell(current.get("review_contract_revision")),
                     _markdown_cell(current.get("review_commit")),
                 )
             )
@@ -233,6 +234,7 @@ def render_review_report_markdown(snapshot: Mapping[str, Any]) -> str:
                 f"source_sha256=`{record['source_sha256']}` "
                 f"translation_sha256=`{record['translation_sha256']}` "
                 f"workflow_revision=`{record['workflow_revision']}` "
+                f"review_contract_revision=`{record['review_contract_revision']}` "
                 f"review_commit=`{record['review_commit'] or '-'}` "
                 f"reviewed_at=`{record['reviewed_at']}`"
             )
