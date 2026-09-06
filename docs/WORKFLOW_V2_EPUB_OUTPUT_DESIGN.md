@@ -40,7 +40,7 @@ Keep `book.py` as the user-facing parser and existing Markdown builder. Add a th
 The existing `build` command remains backward-compatible:
 
 - no `--format` means `markdown`;
-- `--output` remains supported for Markdown and EPUB, but the extension must match the selected format;
+- `--output` remains supported for both formats; EPUB outputs must use `.epub`, while Markdown preserves its legacy filename semantics;
 - `--allow-unreviewed` remains the explicit preview gate.
 
 EPUB build must not rely on raw `book.validate_book()` alone, because explicit `private_external` books intentionally have no source binary in `books/<slug>/source/`. The CLI reuses the same normalized structural + corpus preflight path used by status/finalize (`status_cli.default_preflight` or an equivalent shared adapter):
