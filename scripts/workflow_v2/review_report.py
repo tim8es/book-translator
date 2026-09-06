@@ -161,3 +161,84 @@ def build_review_report_snapshot(
         "summary": summary,
         "units": units,
     }
+
+
+def _markdown_cell(value: Any) -> str:
+    if value is None:
+        return "-"
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def render_review_report_markdown(snapshot: Mapping[str, Any]) -> str:
+    """Render a deterministic Markdown audit view of a review-report snapshot."""
+
+    summary = snapshot["summary"]
+    coverage = summary["pass_coverage"]
+    lines = [
+        f"# Review Report — {snapshot['book_slug']}",
+        "",
+        "Generated from authoritative `review-ledger.json`, `progress.json`, current artifact bytes, and workflow revision.",
+        "",
+        f"PASS coverage: **{coverage['passed']}/{coverage['total']} ({coverage['percent']}%)**",
+        "",
+        "## Summary",
+        "",
+        f"- `pass`: {summary['pass']}",
+        f"- `corrections_required`: {summary['corrections_required']}",
+        f"- `missing`: {summary['missing']}",
+        f"- `stale`: {summary['stale']}",
+        f"- `untranslated`: {summary['untranslated']}",
+        f"- duplicate review records: {summary['duplicate_records']}",
+        "",
+        "## Units",
+        "",
+        "| Unit | State | Source SHA-256 | Translation SHA-256 | Current outcome | Workflow revision | Review commit |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+
+    for unit in snapshot["units"]:
+        current = unit["current_review"] or {}
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _markdown_cell(unit["unit_id"]),
+                    f"`{_markdown_cell(unit['state'])}`",
+                    _markdown_cell(unit["source_sha256"]),
+                    _markdown_cell(unit["translation_sha256"]),
+                    _markdown_cell(current.get("outcome")),
+                    _markdown_cell(current.get("workflow_revision")),
+                    _markdown_cell(current.get("review_commit")),
+                )
+            )
+            + " |"
+        )
+
+    lines.extend(("", "## History", ""))
+    history_found = False
+    for unit in snapshot["units"]:
+        if not unit["history"]:
+            continue
+        history_found = True
+        lines.extend((f"### {unit['unit_id']}", ""))
+        for record in unit["history"]:
+            duplicate_of = record.get("duplicate_of_record_id")
+            duplicate = f"`{duplicate_of}`" if duplicate_of is not None else "-"
+            lines.append(
+                "- "
+                f"sequence={record['sequence']} "
+                f"outcome=`{record['outcome']}` "
+                f"classification=`{record['classification']}` "
+                f"duplicate_of={duplicate} "
+                f"source_sha256=`{record['source_sha256']}` "
+                f"translation_sha256=`{record['translation_sha256']}` "
+                f"workflow_revision=`{record['workflow_revision']}` "
+                f"review_commit=`{record['review_commit'] or '-'}` "
+                f"reviewed_at=`{record['reviewed_at']}`"
+            )
+        lines.append("")
+
+    if not history_found:
+        lines.append("No review records.")
+
+    return "\n".join(lines).rstrip() + "\n"
