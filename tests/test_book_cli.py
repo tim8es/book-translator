@@ -10,6 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
+WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow_v2"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
 
 
@@ -19,6 +20,7 @@ class BookCliSmokeTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / "book.py")
+        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow_v2")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
 
@@ -142,6 +144,39 @@ class BookCliSmokeTests(unittest.TestCase):
         (self.repo / "books" / "sample" / "style-guide.md").unlink()
         result = self.run_cli("validate", "sample", expect=1)
         self.assertIn("Missing style-guide.md", result.stderr)
+
+    def test_validate_rejects_unsupported_explicit_schema_version(self):
+        source = self.repo / "sample.md"
+        source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+
+        metadata_path = self.repo / "books" / "sample" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["schema_version"] = 2
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        result = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("unsupported version 2", result.stderr)
+
+    def test_validate_accepts_legacy_state_without_rewriting(self):
+        source = self.repo / "sample.md"
+        source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+
+        book = self.repo / "books" / "sample"
+        paths = [book / "metadata.json", book / "progress.json"]
+        original_bytes = {}
+        for path in paths:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            del data["schema_version"]
+            content = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            path.write_bytes(content)
+            original_bytes[path.name] = content
+
+        self.run_cli("validate", "sample")
+
+        for path in paths:
+            self.assertEqual(path.read_bytes(), original_bytes[path.name])
 
     def test_extract_minimal_epub_uses_spine_order_and_metadata(self):
         source = self.repo / "sample.epub"

@@ -21,8 +21,17 @@ from typing import Iterable
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
+from workflow_v2 import (
+    FilesystemStorage,
+    RepositoryError,
+    SchemaError,
+    SchemaKind,
+    StorageError,
+    WorkflowStateRepository,
+)
+from workflow_v2.schemas import SCHEMA_VERSION
 
-SCHEMA_VERSION = 1
+
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
 CANONICAL_REPOSITORY = "https://github.com/tim8es/book-translator"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -332,8 +341,8 @@ def book_dir_for(slug: str) -> Path:
     return repo_root() / "books" / slug
 
 
-def safe_write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def state_repository(book_dir: Path) -> WorkflowStateRepository:
+    return WorkflowStateRepository(FilesystemStorage(book_dir))
 
 
 def template_text(name: str, fallback: str) -> str:
@@ -441,8 +450,12 @@ def extract_command(args: argparse.Namespace) -> int:
         "chapters": chapter_records,
     }
 
-    safe_write_json(book_dir / "metadata.json", metadata)
-    safe_write_json(book_dir / "progress.json", progress)
+    repository = state_repository(book_dir)
+    try:
+        repository.create("metadata.json", SchemaKind.METADATA, metadata)
+        repository.create("progress.json", SchemaKind.PROGRESS, progress)
+    except (SchemaError, RepositoryError, StorageError) as exc:
+        raise BookError(f"Cannot write workflow state for books/{slug}: {exc}") from exc
     create_support_files(book_dir)
 
     print(f"Extracted {len(chapter_records)} chapter(s) into books/{slug}/extracted/")
@@ -459,11 +472,21 @@ def load_book(slug: str) -> tuple[Path, dict, dict]:
         raise BookError(f"Missing metadata.json for books/{slug}")
     if not progress_path.is_file():
         raise BookError(f"Missing progress.json for books/{slug}")
+
+    repository = state_repository(book_dir)
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        progress = json.loads(progress_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise BookError(f"Invalid JSON in books/{slug}: {exc}") from exc
+        metadata = repository.read(
+            "metadata.json",
+            SchemaKind.METADATA,
+            allow_legacy=True,
+        ).data
+        progress = repository.read(
+            "progress.json",
+            SchemaKind.PROGRESS,
+            allow_legacy=True,
+        ).data
+    except (SchemaError, RepositoryError, StorageError) as exc:
+        raise BookError(f"Invalid workflow state in books/{slug}: {exc}") from exc
     return book_dir, metadata, progress
 
 
@@ -555,11 +578,6 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
             errors.append(f"Extracted chapter is not referenced in progress.json: {path}")
         for path in sorted(referenced_extracted - actual):
             errors.append(f"progress.json references missing extracted chapter: {path}")
-
-    if metadata.get("schema_version") != SCHEMA_VERSION:
-        warnings.append(f"metadata.json schema_version is {metadata.get('schema_version')}, expected {SCHEMA_VERSION}")
-    if progress.get("schema_version") != SCHEMA_VERSION:
-        warnings.append(f"progress.json schema_version is {progress.get('schema_version')}, expected {SCHEMA_VERSION}")
 
     return errors, warnings
 
