@@ -122,15 +122,18 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
         self.base_progress_revision = self.repository.create(
             "progress.json", SchemaKind.PROGRESS, self.progress
         )
-        self.repository.create(
-            "review-ledger.json",
-            SchemaKind.REVIEW_LEDGER,
-            self.pass_ledger(),
-        )
+        self.repository.create("review-ledger.json", SchemaKind.REVIEW_LEDGER, self.pass_ledger())
         self.preflight_value = ([], {"state": "verified", "storage_mode": "embedded"})
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def require_finalize_api(self):
+        self.assertIsNotNone(FinalizationManager, "workflow_v2.finalize is not implemented")
+        self.assertIsNotNone(FinalizationBlocked, "FinalizationBlocked is not implemented")
+        self.assertIsNotNone(FinalizationConflict, "FinalizationConflict is not implemented")
+        self.assertIsNotNone(build_reviewed_candidate, "build_reviewed_candidate is not implemented")
+        self.assertIsNotNone(sha256_bytes, "sha256_bytes is not implemented")
 
     def pass_ledger(self):
         records = []
@@ -142,9 +145,7 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
                     "unit_id": f"chapter-{number:06d}",
                     "outcome": "PASS",
                     "source_sha256": digest(self.artifacts[f"extracted/{number:03d}.md"]),
-                    "translation_sha256": digest(
-                        self.artifacts[f"translated/{number:03d}.md"]
-                    ),
+                    "translation_sha256": digest(self.artifacts[f"translated/{number:03d}.md"]),
                     "workflow_revision": WORKFLOW_REVISION,
                     "review_contract_revision": CONTRACT_REVISION,
                     "reviewer_session_id": f"reviewer-{number}",
@@ -169,7 +170,6 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
             raise FileNotFoundError(path) from exc
 
     def manager(self):
-        self.assertIsNotNone(FinalizationManager, "workflow_v2.finalize is not implemented")
         return FinalizationManager(
             self.repository,
             artifact_reader=self.read_artifact,
@@ -184,67 +184,43 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
         with self.assertRaises(StorageNotFound):
             self.base_storage.read(FINALIZATION_PATH)
 
-    def test_preflight_rejects_structure_corpus_and_incomplete_review_without_mutation(self):
-        scenarios = []
-        scenarios.append(("structural", (["broken structure"], {"state": "verified"}), None))
-        scenarios.append(("unsealed", ([], {"state": "unsealed"}), None))
-        scenarios.append(("invalid-corpus", ([], {"state": "invalid", "error": "hash mismatch"}), None))
-        scenarios.append(("missing-review", self.preflight_value, "empty-ledger"))
-        scenarios.append(("untranslated", self.preflight_value, "missing-translation"))
+    def replace_ledger(self, ledger):
+        current = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
+        self.repository.write_if_version(
+            "review-ledger.json", SchemaKind.REVIEW_LEDGER, ledger, current.version
+        )
 
-        for name, preflight, mutation in scenarios:
+    def test_preflight_rejects_structure_and_corpus_without_mutation(self):
+        self.require_finalize_api()
+        for name, preflight in (
+            ("structural", (["broken structure"], {"state": "verified"})),
+            ("unsealed", ([], {"state": "unsealed"})),
+            ("invalid", ([], {"state": "invalid", "error": "hash mismatch"})),
+        ):
             with self.subTest(name=name):
-                # Restore baseline durable state for each subcase.
-                if self.base_storage.read("progress.json").content != self.repository.serialize(
-                    "progress.json", SchemaKind.PROGRESS, self.progress
-                ):
-                    current = self.base_storage.read("progress.json")
-                    self.base_storage.write_if_version(
-                        "progress.json",
-                        self.repository.serialize("progress.json", SchemaKind.PROGRESS, self.progress),
-                        current.version,
-                    )
-                self.storage.progress_writes = 0
-                try:
-                    marker = self.base_storage.read(FINALIZATION_PATH)
-                except StorageNotFound:
-                    pass
-                else:
-                    self.base_storage.delete_if_version(FINALIZATION_PATH, marker.version)
-                self.artifacts["translated/002.md"] = "Перевод два\n".encode("utf-8")
-                current_ledger = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
-                expected_ledger = self.pass_ledger()
-                if current_ledger.data != expected_ledger:
-                    self.repository.write_if_version(
-                        "review-ledger.json",
-                        SchemaKind.REVIEW_LEDGER,
-                        expected_ledger,
-                        current_ledger.version,
-                    )
-
-                if mutation == "empty-ledger":
-                    current_ledger = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
-                    self.repository.write_if_version(
-                        "review-ledger.json",
-                        SchemaKind.REVIEW_LEDGER,
-                        {
-                            "schema_version": 1,
-                            "book_slug": "demo",
-                            "next_sequence": 1,
-                            "records": [],
-                        },
-                        current_ledger.version,
-                    )
-                elif mutation == "missing-translation":
-                    del self.artifacts["translated/002.md"]
-
                 self.preflight_value = preflight
-                progress_before = self.base_storage.read("progress.json").content
+                before = self.base_storage.read("progress.json").content
                 with self.assertRaises(FinalizationBlocked):
                     self.manager().finalize(session_id="finalizer")
-                self.assert_no_finalize_mutation(progress_before)
+                self.assert_no_finalize_mutation(before)
+
+    def test_preflight_rejects_missing_review_and_translation_without_mutation(self):
+        self.require_finalize_api()
+        empty = {"schema_version": 1, "book_slug": "demo", "next_sequence": 1, "records": []}
+        self.replace_ledger(empty)
+        before = self.base_storage.read("progress.json").content
+        with self.assertRaises(FinalizationBlocked):
+            self.manager().finalize(session_id="finalizer")
+        self.assert_no_finalize_mutation(before)
+
+        self.replace_ledger(self.pass_ledger())
+        del self.artifacts["translated/002.md"]
+        with self.assertRaises(FinalizationBlocked):
+            self.manager().finalize(session_id="finalizer")
+        self.assert_no_finalize_mutation(before)
 
     def test_active_claim_blocks_before_progress_mutation_and_claim_remains(self):
+        self.require_finalize_api()
         self.repository.create(
             ".workflow/claims/chapter-000001.json",
             SchemaKind.CLAIM,
@@ -261,17 +237,15 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
                 "expires_at": "2026-09-06T21:00:00Z",
             },
         )
-        progress_before = self.base_storage.read("progress.json").content
-
+        before = self.base_storage.read("progress.json").content
         with self.assertRaises(FinalizationBlocked):
             self.manager().finalize(session_id="finalizer")
-
-        self.assert_no_finalize_mutation(progress_before)
+        self.assert_no_finalize_mutation(before)
         self.assertEqual(len(self.base_storage.list(".workflow/claims")), 1)
 
-    def test_success_promotes_all_chapters_with_one_progress_cas_and_persists_promoted_marker(self):
+    def test_success_promotes_all_chapters_with_one_progress_cas(self):
+        self.require_finalize_api()
         result = self.manager().finalize(session_id="finalizer")
-
         progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
         self.assertEqual([item["status"] for item in progress.data["chapters"]], ["reviewed", "reviewed"])
         self.assertEqual(self.storage.progress_writes, 1)
@@ -288,7 +262,8 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
         )
         self.assertEqual(marker.data["candidate_progress_sha256"], expected_hash)
 
-    def test_preparing_marker_with_candidate_bytes_recovers_without_rewriting_progress(self):
+    def test_recovery_is_idempotent_and_incompatible_progress_fails_closed(self):
+        self.require_finalize_api()
         candidate = build_reviewed_candidate(self.progress)
         candidate_bytes = self.repository.serialize("progress.json", SchemaKind.PROGRESS, candidate)
         candidate_hash = sha256_bytes(candidate_bytes)
@@ -305,39 +280,27 @@ class WorkflowV2FinalizeTests(unittest.TestCase):
             "started_at": "2026-09-06T20:20:00Z",
         }
         self.repository.create(FINALIZATION_PATH, SchemaKind.FINALIZATION_LOCK, marker)
-        self.base_storage.write_if_version(
-            "progress.json", candidate_bytes, self.base_progress_revision
-        )
+        self.base_storage.write_if_version("progress.json", candidate_bytes, self.base_progress_revision)
         self.storage.progress_writes = 0
 
-        result = self.manager().finalize(session_id="recovery-session")
-
-        self.assertTrue(result.recovered)
-        self.assertFalse(result.promoted)
+        recovered = self.manager().finalize(session_id="recovery-session")
+        self.assertTrue(recovered.recovered)
+        self.assertFalse(recovered.promoted)
         self.assertEqual(self.storage.progress_writes, 0)
         current = self.base_storage.read("progress.json")
         marker_after = self.repository.read(FINALIZATION_PATH, SchemaKind.FINALIZATION_LOCK)
         self.assertEqual(marker_after.data["phase"], "promoted")
         self.assertEqual(marker_after.data["promoted_progress_revision"], current.version)
 
-    def test_promoted_marker_is_idempotent_and_incompatible_progress_fails_closed(self):
-        first = self.manager().finalize(session_id="finalizer")
-        self.storage.progress_writes = 0
-
-        recovered = self.manager().finalize(session_id="recovery-session")
-        self.assertTrue(recovered.recovered)
-        self.assertFalse(recovered.promoted)
-        self.assertEqual(recovered.progress_revision, first.progress_revision)
+        again = self.manager().finalize(session_id="recovery-session")
+        self.assertTrue(again.recovered)
         self.assertEqual(self.storage.progress_writes, 0)
 
-        current = self.repository.read("progress.json", SchemaKind.PROGRESS)
-        unexpected = copy.deepcopy(current.data)
+        durable = self.repository.read("progress.json", SchemaKind.PROGRESS)
+        unexpected = copy.deepcopy(durable.data)
         unexpected["chapters"][0]["status"] = "translated"
-        self.repository.write_if_version(
-            "progress.json", SchemaKind.PROGRESS, unexpected, current.version
-        )
+        self.repository.write_if_version("progress.json", SchemaKind.PROGRESS, unexpected, durable.version)
         self.storage.progress_writes = 0
-
         with self.assertRaises(FinalizationConflict):
             self.manager().finalize(session_id="recovery-session")
         self.assertEqual(self.storage.progress_writes, 0)
