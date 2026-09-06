@@ -1,7 +1,8 @@
-"""Explicit Workflow v2 schema migration and compatibility planning."""
+"""Explicit Workflow v2 schema migration, planning, and execution."""
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -11,6 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .coordination import CoordinationError
+from .migration_journal import (
+    MIGRATION_PATH,
+    MigrationJournalError,
+    load_migration_journal,
+    serialize_migration_journal,
+)
 from .repository import RepositoryError, WorkflowStateRepository
 from .reviews import REVIEW_CONTRACT_PATH, REVIEW_EVIDENCE_VERSION
 from .schemas import SchemaError, SchemaKind, parse_document
@@ -20,7 +28,12 @@ from .source_integrity import (
     build_source_manifest,
     sha256_path,
 )
-from .storage import StorageError, StorageNotFound
+from .storage import (
+    StorageAlreadyExists,
+    StorageError,
+    StorageNotFound,
+    StorageVersionConflict,
+)
 
 
 CANONICAL_REPOSITORY = "https://github.com/tim8es/book-translator"
@@ -82,6 +95,18 @@ class MigrationPlan:
             if write.path == path:
                 return write
         return None
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    """Stable outcome returned by explicit workflow upgrade execution/recovery."""
+
+    book_slug: str
+    from_revision: str | None
+    to_revision: str
+    outcome: str
+    migrated_paths: tuple[str, ...]
+    lifecycle_downgrades: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -656,8 +681,6 @@ class MigrationPlanner:
         except SchemaError as exc:
             raise MigrationCompatibilityError(f"candidate workflow state is invalid: {exc}") from exc
 
-        # Rebuild non-metadata writes after strict final normalization so target_data/bytes
-        # exactly match the validated candidate state.
         writes: list[PlannedWrite] = []
         for raw, path, kind, target, absent in (
             (manifest_raw, "source-manifest.json", SchemaKind.SOURCE_MANIFEST, manifest, 0),
@@ -706,3 +729,458 @@ class MigrationPlanner:
             lifecycle_downgrades=downgrades,
             changed=bool(writes),
         )
+
+
+class MigrationExecutor:
+    """Apply and recover one journaled multi-document workflow upgrade."""
+
+    def __init__(
+        self,
+        repository: WorkflowStateRepository,
+        planner: MigrationPlanner,
+        *,
+        coordination: Any,
+    ):
+        self.repository = repository
+        self.planner = planner
+        self.coordination = coordination
+
+    @staticmethod
+    def _unchanged(plan: MigrationPlan) -> MigrationResult:
+        return MigrationResult(
+            book_slug=plan.book_slug,
+            from_revision=plan.from_revision,
+            to_revision=plan.to_revision,
+            outcome="unchanged",
+            migrated_paths=(),
+            lifecycle_downgrades=plan.lifecycle_downgrades,
+        )
+
+    @staticmethod
+    def _installed_from_plan(plan: MigrationPlan) -> dict[str, Any]:
+        metadata = plan.write_for("metadata.json")
+        if metadata is None:
+            raise MigrationCompatibilityError(
+                "changed workflow upgrade plan must include metadata provenance last"
+            )
+        workflow = metadata.target_data.get("workflow")
+        if not isinstance(workflow, Mapping):
+            raise MigrationCompatibilityError("migration target metadata workflow is unavailable")
+        repository = workflow.get("repository")
+        resolved = workflow.get("resolved_revision")
+        if repository != CANONICAL_REPOSITORY or resolved != plan.to_revision:
+            raise MigrationCompatibilityError("migration target metadata provenance is inconsistent")
+        return {
+            "canonical_repository": repository,
+            "requested_ref": workflow.get("requested_ref"),
+            "resolved_revision": resolved,
+        }
+
+    @staticmethod
+    def _journal_for(plan: MigrationPlan) -> dict[str, Any]:
+        documents: list[dict[str, Any]] = []
+        for write in plan.writes:
+            original = write.original_bytes
+            documents.append(
+                {
+                    "path": write.path,
+                    "kind": write.kind.value,
+                    "original_exists": write.original_exists,
+                    "original_revision": write.original_version if write.original_exists else None,
+                    "original_sha256": (
+                        hashlib.sha256(original).hexdigest()
+                        if write.original_exists and original is not None
+                        else None
+                    ),
+                    "original_bytes_base64": (
+                        base64.b64encode(original).decode("ascii")
+                        if write.original_exists and original is not None
+                        else None
+                    ),
+                    "target_sha256": hashlib.sha256(write.target_bytes).hexdigest(),
+                    "resulting_revision": None,
+                }
+            )
+        return {
+            "schema_version": 1,
+            "operation": "workflow_upgrade",
+            "book_slug": plan.book_slug,
+            "from_revision": plan.from_revision,
+            "to_revision": plan.to_revision,
+            "phase": "prepared",
+            "documents": documents,
+        }
+
+    def _load_journal(self) -> tuple[dict[str, Any], str]:
+        try:
+            return load_migration_journal(self.repository.storage)
+        except MigrationJournalError as exc:
+            raise MigrationConflict(f"migration journal is invalid; recovery is blocked: {exc}") from exc
+        except StorageError:
+            raise
+
+    def _acquire(self, session_id: str):
+        try:
+            return self.coordination.acquire(
+                operation="workflow_upgrade",
+                session_id=session_id,
+            )
+        except CoordinationError as exc:
+            raise MigrationConflict(f"cannot acquire workflow upgrade coordination: {exc}") from exc
+
+    def _release(self, lease) -> None:
+        try:
+            self.coordination.release(lease)
+        except CoordinationError as exc:
+            raise MigrationConflict(f"cannot release workflow upgrade coordination: {exc}") from exc
+
+    def _preflight_plan(self, plan: MigrationPlan) -> Mapping[str, Any]:
+        installed = self._installed_from_plan(plan)
+        fresh = self.planner.plan(
+            slug=plan.book_slug,
+            to_revision=plan.to_revision,
+            installed=installed,
+        )
+        if fresh != plan:
+            raise MigrationConflict("workflow upgrade plan changed before commit; re-plan required")
+        return installed
+
+    @staticmethod
+    def _hash(content: bytes) -> str:
+        return hashlib.sha256(content).hexdigest()
+
+    def _classify(self, entry: Mapping[str, Any]) -> str:
+        path = entry["path"]
+        try:
+            current = self.repository.storage.read(path)
+        except StorageNotFound:
+            return "original" if not entry["original_exists"] else "unknown"
+        except StorageError as exc:
+            raise MigrationConflict(f"cannot inspect migration recovery path {path}: {exc}") from exc
+
+        current_hash = self._hash(current.content)
+        if current_hash == entry["target_sha256"]:
+            return "target"
+        if entry["original_exists"] and current_hash == entry["original_sha256"]:
+            return "original"
+        return "unknown"
+
+    def _classifications(self, journal: Mapping[str, Any]) -> list[str]:
+        return [self._classify(entry) for entry in journal["documents"]]
+
+    @staticmethod
+    def _decode_original(entry: Mapping[str, Any]) -> bytes:
+        encoded = entry.get("original_bytes_base64")
+        if not isinstance(encoded, str):
+            raise MigrationConflict(f"journal original bytes are unavailable for {entry.get('path')}")
+        return base64.b64decode(encoded.encode("ascii"), validate=True)
+
+    def _delete_journal(self, version: str) -> None:
+        try:
+            self.repository.storage.delete_if_version(MIGRATION_PATH, version)
+        except (StorageNotFound, StorageVersionConflict) as exc:
+            raise MigrationConflict("migration journal changed before deletion") from exc
+        except StorageError as exc:
+            raise MigrationConflict(f"cannot delete migration journal: {exc}") from exc
+
+    def _rollback_loaded(
+        self,
+        journal: Mapping[str, Any],
+        journal_version: str,
+    ) -> None:
+        states = self._classifications(journal)
+        unknown = [
+            entry["path"]
+            for entry, state in zip(journal["documents"], states)
+            if state == "unknown"
+        ]
+        if unknown:
+            raise MigrationConflict(
+                "migration recovery found unknown concurrent state at "
+                + ", ".join(unknown)
+                + "; journal preserved"
+            )
+
+        for entry, state in reversed(list(zip(journal["documents"], states))):
+            if state != "target":
+                continue
+            path = entry["path"]
+            try:
+                current = self.repository.storage.read(path)
+            except StorageError as exc:
+                raise MigrationConflict(
+                    f"migration recovery path {path} changed before rollback"
+                ) from exc
+            if self._hash(current.content) != entry["target_sha256"]:
+                raise MigrationConflict(
+                    f"migration recovery path {path} changed before rollback; journal preserved"
+                )
+            try:
+                if entry["original_exists"]:
+                    self.repository.storage.write_if_version(
+                        path,
+                        self._decode_original(entry),
+                        current.version,
+                    )
+                else:
+                    self.repository.storage.delete_if_version(path, current.version)
+            except (StorageNotFound, StorageVersionConflict) as exc:
+                raise MigrationConflict(
+                    f"migration recovery path {path} changed during rollback; journal preserved"
+                ) from exc
+            except StorageError as exc:
+                raise MigrationConflict(
+                    f"cannot restore migration recovery path {path}; journal preserved: {exc}"
+                ) from exc
+
+        after = self._classifications(journal)
+        not_original = [
+            entry["path"]
+            for entry, state in zip(journal["documents"], after)
+            if state != "original"
+        ]
+        if not_original:
+            raise MigrationConflict(
+                "migration rollback could not prove original state at "
+                + ", ".join(not_original)
+                + "; journal preserved"
+            )
+        self._delete_journal(journal_version)
+
+    def _rollback_durable_journal(self) -> None:
+        try:
+            journal, version = self._load_journal()
+        except StorageNotFound:
+            raise MigrationConflict("migration failed but recovery journal is missing")
+        except StorageError as exc:
+            raise MigrationConflict(f"cannot read migration journal for rollback: {exc}") from exc
+        self._rollback_loaded(journal, version)
+
+    def _post_validate(self, plan: MigrationPlan, installed: Mapping[str, Any]) -> None:
+        fresh = self.planner.plan(
+            slug=plan.book_slug,
+            to_revision=plan.to_revision,
+            installed=installed,
+        )
+        if fresh.changed:
+            raise MigrationConflict(
+                "workflow upgrade target did not converge to a strict compatible no-op"
+            )
+
+    def _execute_locked(self, plan: MigrationPlan, *, session_id: str) -> MigrationResult:
+        if not plan.changed:
+            return self._unchanged(plan)
+
+        try:
+            self.repository.storage.read(MIGRATION_PATH)
+        except StorageNotFound:
+            pass
+        except StorageError as exc:
+            raise MigrationConflict(f"cannot inspect migration journal: {exc}") from exc
+        else:
+            raise MigrationConflict("an unfinished migration journal already exists; recover it first")
+
+        installed = self._preflight_plan(plan)
+        journal = self._journal_for(plan)
+        try:
+            journal_version = self.repository.storage.create_if_absent(
+                MIGRATION_PATH,
+                serialize_migration_journal(journal),
+            )
+        except StorageAlreadyExists as exc:
+            raise MigrationConflict("migration journal appeared before commit") from exc
+        except (StorageError, MigrationJournalError) as exc:
+            raise MigrationConflict(f"cannot create migration journal: {exc}") from exc
+
+        try:
+            for index, write in enumerate(plan.writes):
+                if write.original_exists:
+                    if write.original_version is None:
+                        raise MigrationCompatibilityError(
+                            f"migration plan lacks original revision for {write.path}"
+                        )
+                    resulting = self.repository.storage.write_if_version(
+                        write.path,
+                        write.target_bytes,
+                        write.original_version,
+                    )
+                else:
+                    resulting = self.repository.storage.create_if_absent(
+                        write.path,
+                        write.target_bytes,
+                    )
+
+                journal["documents"][index]["resulting_revision"] = resulting
+                journal_version = self.repository.storage.write_if_version(
+                    MIGRATION_PATH,
+                    serialize_migration_journal(journal),
+                    journal_version,
+                )
+
+            journal["phase"] = "applied"
+            journal_version = self.repository.storage.write_if_version(
+                MIGRATION_PATH,
+                serialize_migration_journal(journal),
+                journal_version,
+            )
+            self._post_validate(plan, installed)
+            self._delete_journal(journal_version)
+        except Exception as exc:
+            try:
+                self._rollback_durable_journal()
+            except MigrationError as recovery_exc:
+                raise recovery_exc from exc
+            if isinstance(exc, MigrationError):
+                raise exc
+            raise MigrationConflict(
+                f"workflow upgrade failed and exact original state was restored: {exc}"
+            ) from exc
+
+        return MigrationResult(
+            book_slug=plan.book_slug,
+            from_revision=plan.from_revision,
+            to_revision=plan.to_revision,
+            outcome="changed",
+            migrated_paths=tuple(write.path for write in plan.writes),
+            lifecycle_downgrades=plan.lifecycle_downgrades,
+        )
+
+    def execute(self, plan: MigrationPlan, *, session_id: str) -> MigrationResult:
+        if not isinstance(plan, MigrationPlan):
+            raise MigrationCompatibilityError("execute requires a MigrationPlan")
+        if not plan.changed:
+            return self._unchanged(plan)
+        lease = self._acquire(session_id)
+        try:
+            result = self._execute_locked(plan, session_id=session_id)
+        except Exception:
+            try:
+                self._release(lease)
+            except MigrationError:
+                pass
+            raise
+        self._release(lease)
+        return result
+
+    def _journal_downgrades(self, journal: Mapping[str, Any]) -> tuple[int, ...]:
+        progress_entry = next(
+            (entry for entry in journal["documents"] if entry["kind"] == SchemaKind.PROGRESS.value),
+            None,
+        )
+        if progress_entry is None or not progress_entry["original_exists"]:
+            return ()
+        try:
+            original = json.loads(self._decode_original(progress_entry).decode("utf-8"))
+            current = json.loads(self.repository.storage.read(progress_entry["path"]).content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, StorageError):
+            return ()
+        if not isinstance(original, Mapping) or not isinstance(current, Mapping):
+            return ()
+        old_chapters = original.get("chapters")
+        new_chapters = current.get("chapters")
+        if not isinstance(old_chapters, list) or not isinstance(new_chapters, list):
+            return ()
+        new_by_number = {
+            chapter.get("number"): chapter
+            for chapter in new_chapters
+            if isinstance(chapter, Mapping) and type(chapter.get("number")) is int
+        }
+        downgrades = [
+            chapter["number"]
+            for chapter in old_chapters
+            if isinstance(chapter, Mapping)
+            and type(chapter.get("number")) is int
+            and chapter.get("status") == "reviewed"
+            and isinstance(new_by_number.get(chapter["number"]), Mapping)
+            and new_by_number[chapter["number"]].get("status") == "translated"
+        ]
+        return tuple(sorted(downgrades))
+
+    def _recover_locked(
+        self,
+        journal: Mapping[str, Any],
+        journal_version: str,
+        *,
+        session_id: str,
+        installed: Mapping[str, Any],
+    ) -> MigrationResult:
+        MigrationPlanner._installed_target(installed, journal["to_revision"])
+        states = self._classifications(journal)
+        unknown = [
+            entry["path"]
+            for entry, state in zip(journal["documents"], states)
+            if state == "unknown"
+        ]
+        if unknown:
+            raise MigrationConflict(
+                "migration recovery found unknown concurrent state at "
+                + ", ".join(unknown)
+                + "; journal preserved"
+            )
+
+        if states and all(state == "target" for state in states):
+            post = self.planner.plan(
+                slug=journal["book_slug"],
+                to_revision=journal["to_revision"],
+                installed=installed,
+            )
+            if post.changed:
+                raise MigrationConflict(
+                    "all journaled targets exist but full workflow state is not a strict no-op; journal preserved"
+                )
+            downgrades = self._journal_downgrades(journal)
+            self._delete_journal(journal_version)
+            return MigrationResult(
+                book_slug=journal["book_slug"],
+                from_revision=journal["from_revision"],
+                to_revision=journal["to_revision"],
+                outcome="recovered",
+                migrated_paths=tuple(entry["path"] for entry in journal["documents"]),
+                lifecycle_downgrades=downgrades,
+            )
+
+        self._rollback_loaded(journal, journal_version)
+        fresh = self.planner.plan(
+            slug=journal["book_slug"],
+            to_revision=journal["to_revision"],
+            installed=installed,
+        )
+        return self._execute_locked(fresh, session_id=session_id)
+
+    def recover(
+        self,
+        *,
+        session_id: str,
+        installed: Mapping[str, Any],
+    ) -> MigrationResult | None:
+        try:
+            initial, initial_version = self._load_journal()
+        except StorageNotFound:
+            return None
+        except StorageError as exc:
+            raise MigrationConflict(f"cannot read migration journal: {exc}") from exc
+
+        lease = self._acquire(session_id)
+        try:
+            try:
+                journal, version = self._load_journal()
+            except StorageNotFound as exc:
+                raise MigrationConflict("migration journal disappeared during recovery admission") from exc
+            except StorageError as exc:
+                raise MigrationConflict(f"cannot re-read migration journal: {exc}") from exc
+            if version != initial_version or journal != initial:
+                raise MigrationConflict("migration journal changed during recovery admission")
+            result = self._recover_locked(
+                journal,
+                version,
+                session_id=session_id,
+                installed=installed,
+            )
+        except Exception:
+            try:
+                self._release(lease)
+            except MigrationError:
+                pass
+            raise
+        self._release(lease)
+        return result
