@@ -254,6 +254,7 @@ def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None
     record_ids: set[str] = set()
     sequences: set[int] = set()
     last_by_unit: dict[str, str] = {}
+    correction_round_by_unit: dict[str, int] = {}
 
     for index, record in enumerate(records):
         prefix = f"records[{index}]"
@@ -313,7 +314,22 @@ def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None
         if review_commit is not None and (not isinstance(review_commit, str) or not review_commit.strip()):
             raise _field(schema, f"{prefix}.review_commit", "must be null or a non-empty string")
 
-        _require_int(record, "correction_round", schema, minimum=0, path=f"{prefix}.correction_round")
+        correction_round = _require_int(
+            record,
+            "correction_round",
+            schema,
+            minimum=0,
+            path=f"{prefix}.correction_round",
+        )
+        previous_round = correction_round_by_unit.get(unit_id, 0)
+        expected_round = previous_round + 1 if outcome == "CORRECTIONS_REQUIRED" else previous_round
+        if correction_round != expected_round:
+            raise _field(
+                schema,
+                f"{prefix}.correction_round",
+                f"must equal {expected_round} for this unit history",
+            )
+        correction_round_by_unit[unit_id] = expected_round
 
         if "supersedes_record_id" not in record:
             raise _field(schema, f"{prefix}.supersedes_record_id", "is required")
