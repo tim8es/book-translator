@@ -68,10 +68,13 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
         )
         return result
 
-    def initialize_book(self):
+    def initialize_book(self, *, private=False):
         source = self.repo / "sample.md"
         source.write_text("# One\n\nAlpha.\n", encoding="utf-8")
-        self.run_book("extract", str(source), "--slug", "sample", "--target-language", "ru")
+        args = ["extract", str(source), "--slug", "sample", "--target-language", "ru"]
+        if private:
+            args.append("--private-source")
+        self.run_book(*args)
         return self.repo / "books" / "sample"
 
     @staticmethod
@@ -94,13 +97,16 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
             book / "metadata.json",
             book / "progress.json",
             book / "review-ledger.json",
+            book / "source-manifest.json",
         ]
         before = {path.name: self.sha256(path) for path in durable}
 
         status = self.canonical_json(self.run_book("status", "sample", "--json"))
         self.assertEqual(status["lifecycle"], {"extracted": 1, "pending": 0, "reviewed": 0, "translated": 0})
         self.assertEqual(status["reviews"], {"corrections_required": 0, "missing": 0, "pass": 0, "stale": 0, "untranslated": 1})
-        self.assertEqual(status["corpus"]["state"], "unsealed")
+        self.assertEqual(status["corpus"]["state"], "verified")
+        self.assertEqual(status["corpus"]["storage_mode"], "embedded")
+        self.assertTrue(status["corpus"]["source_attached"])
         self.assertEqual(status["claims"], [])
         self.assertTrue(status["valid"])
 
@@ -124,9 +130,46 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertFalse((book / "status.json").exists())
 
+    def test_private_source_status_is_verified_without_binary(self):
+        book = self.initialize_book(private=True)
+        metadata = json.loads((book / "metadata.json").read_text(encoding="utf-8"))
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertTrue(status["valid"])
+        self.assertEqual(status["corpus"]["state"], "verified")
+        self.assertEqual(status["corpus"]["storage_mode"], "private_external")
+        self.assertEqual(status["corpus"]["source_file"], "sample.md")
+        self.assertEqual(status["corpus"]["source_sha256"], metadata["source"]["sha256"])
+        self.assertEqual(status["corpus"]["source_size_bytes"], metadata["source"]["size_bytes"])
+        self.assertFalse(status["corpus"]["source_attached"])
+
+        resume = self.canonical_json(self.run_book("resume", "sample", "--json"))
+        self.assertEqual(resume["operation"], "translate")
+
+    def test_explicit_source_missing_manifest_blocks_resume(self):
+        book = self.initialize_book()
+        (book / "source-manifest.json").unlink()
+
+        result = self.run_book("resume", "sample", "--json", expect=1)
+        payload = self.canonical_json(result)
+        self.assertEqual(payload["operation"], "blocked")
+        self.assertEqual(payload["reason"], "preflight_failed")
+        self.assertTrue(any("source-manifest.json" in error for error in payload["errors"]))
+
+    def test_legacy_book_without_explicit_source_can_remain_unsealed(self):
+        book = self.initialize_book()
+        metadata_path = book / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata.pop("source", None)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (book / "source-manifest.json").unlink()
+
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
+        self.assertTrue(status["valid"])
+        self.assertEqual(status["corpus"]["state"], "unsealed")
+
     def test_resume_blocks_on_real_corpus_hash_mismatch(self):
         book = self.initialize_book()
-        self.run_corpus("seal", "sample")
         extracted = next((book / "extracted").glob("*.md"))
         extracted.write_text(extracted.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
 
@@ -143,7 +186,8 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
         status = self.run_book("status", "sample")
         self.assertIn("sample: valid", status.stdout)
         self.assertIn("lifecycle", status.stdout)
-        self.assertIn("corpus=unsealed", status.stdout)
+        self.assertIn("corpus=verified", status.stdout)
+        self.assertIn("source=embedded", status.stdout)
 
         resume = self.run_book("resume", "sample")
         self.assertIn("next=translate", resume.stdout)
