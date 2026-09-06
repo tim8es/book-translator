@@ -25,7 +25,7 @@ In scope now:
 - recovery when lifecycle state is translated but review has not occurred;
 - recovery when current PASS evidence exists but lifecycle promotion to `reviewed` did not occur;
 - stale-review detection after reviewed translation bytes change;
-- optimistic-concurrency failure for shared mutable repository state without lost update;
+- concurrent glossary CAS failure without lost update;
 - fail-closed resume after an extracted corpus is removed or tampered;
 - successful private-source resume after process restart without the original binary;
 - explicit idempotence checks for read-only and safe retryable operations that already promise idempotent/repeat-safe behavior;
@@ -74,10 +74,11 @@ The harness owns:
 - creation of a one- or two-chapter sealed book through real `book.py extract`;
 - subprocess helpers for `book.py` and `corpus.py`;
 - deterministic JSON parsing/assertion helpers;
-- direct `WorkflowStateRepository` access when a scenario must stop between two durable domain operations;
+- direct `WorkflowStateRepository` / `FilesystemStorage` access when a scenario must stop between two durable domain operations;
+- deterministic claim/review fixtures with explicit timestamps and IDs when real-time CLI behavior would make a crash boundary nondeterministic;
 - SHA snapshots used to prove read-only/idempotent behavior.
 
-The harness does not own alternative business logic. It must use current schemas, repository methods, claim manager, review manager and corpus verifier rather than reimplementing them.
+The harness does not own alternative business logic. It must use current schemas, repository methods, storage primitives, claim manager, review manager and corpus verifier rather than reimplementing them.
 
 ## Reliability invariants
 
@@ -86,15 +87,16 @@ The Phase 1 suite treats these as release-gate invariants:
 1. Repository state, not the previous chat/process, determines recovery.
 2. A live durable claim prevents a second session from dispatching conflicting work for that unit.
 3. Claim expiry alone does not silently erase evidence; cleanup is explicit and auditable.
-4. Translation bytes without a lifecycle transition do not fabricate translated state.
-5. Lifecycle `translated` without current PASS evidence resumes into review, not completion.
-6. Current PASS evidence without lifecycle promotion is recoverable through `accept_review`; duplicate promotion must not corrupt state.
-7. Changing source or translation bytes invalidates the PASS that was bound to the previous bytes.
-8. A stale writer cannot overwrite a newer shared-state revision.
-9. Invalid explicit source corpus state blocks literary work before dispatch.
-10. `private_external` remains reproducible from a verified sealed extracted corpus after the source binary is absent and a new process starts.
-11. Read-only status/resume never mutate durable state.
-12. Retry-safe cleanup/release/promotion behavior must either be idempotent or return a deterministic already-completed/not-owned result without corrupting state; tests assert the actual published contract rather than inventing silent success semantics.
+4. A crashed worker's claim remains the first recovery concern even if it already wrote translation/progress/review state.
+5. Translation bytes without a lifecycle transition do not fabricate translated state.
+6. Lifecycle `translated` without current PASS evidence resumes into review only after the crashed worker's claim is cleared.
+7. Current PASS evidence without lifecycle promotion is recoverable through `accept_review` after the crashed reviewer claim is cleared; duplicate promotion does not corrupt state.
+8. Changing source or translation bytes invalidates the PASS that was bound to the previous bytes.
+9. A stale glossary writer cannot overwrite a newer glossary revision.
+10. Invalid explicit source corpus state blocks literary work before dispatch.
+11. `private_external` remains reproducible from a verified sealed extracted corpus after the source binary is absent and a new process starts.
+12. Read-only status/resume never mutate durable state.
+13. Retry-safe cleanup/release/promotion behavior must either be idempotent or return the current deterministic already-completed/not-owned result without corrupting state.
 
 ## Failure scenarios
 
@@ -113,12 +115,13 @@ Expected:
 - claim identity/session/expiry are reported from durable state;
 - no translation/progress/review files are mutated by the fresh resume.
 
-Recovery continuation:
+Recovery continuation is a separate deterministic fixture:
 
-- create an expired claim deterministically through the domain/repository fixture, or use a deterministic manager clock rather than sleeping;
-- run cleanup;
-- verify cleanup audit request/completion records exist with `lease_expired` reason;
-- a fresh `resume` returns `translate` for chapter 1.
+1. create a schema-valid translator claim for chapter 1 directly through the repository with fixed historical `claimed_at` / `expires_at` timestamps that are unambiguously expired;
+2. run public `cleanup-claims`;
+3. verify exactly one cleanup request and one completion event exist with `reason=lease_expired` and matching request linkage;
+4. call `cleanup-claims` again and assert `results=[]` with no additional audit records;
+5. start a fresh subprocess and verify `resume` returns `translate` for chapter 1.
 
 No wall-clock sleeps are allowed.
 
@@ -127,82 +130,103 @@ No wall-clock sleeps are allowed.
 Setup:
 
 1. initialize chapter 1 as `extracted`;
-2. create non-empty `translated/...md` bytes directly, representing a worker that wrote the artifact and died before the progress CAS transition;
-3. leave `progress.json` unchanged.
+2. create a deterministic active translator claim for chapter 1;
+3. create non-empty `translated/...md` bytes directly, representing the claimed worker writing its artifact;
+4. stop before the progress CAS transition.
 
-Expected:
+Expected immediately after restart:
 
-- status lifecycle remains `extracted` because progress is authoritative for lifecycle;
-- `resume` selects `translate`, not `review`;
-- the existing translation artifact is not silently promoted or accepted as lifecycle state;
-- status/resume are read-only.
+- fresh `resume` is blocked with `reason=unit_claimed`;
+- lifecycle remains `extracted` because progress is authoritative;
+- the translation artifact does not fabricate translated lifecycle state.
 
-This test documents the current recovery contract: orphaned translation bytes require the translator/orchestrator path to reconcile them explicitly; they are not auto-promoted from file presence.
+Recovery:
+
+1. replace the fixture claim with an expired deterministic claim for the same crash boundary and clean it through the normal cleanup path;
+2. fresh `resume` selects `translate`, not `review`, even though orphan translation bytes exist;
+3. status/resume do not rewrite or auto-promote those bytes.
+
+This documents the current recovery contract: orphaned translation bytes require the translator/orchestrator path to reconcile them explicitly; file presence alone is not lifecycle authority.
 
 ### Scenario C — death after translated lifecycle transition, before review
 
 Setup:
 
-1. create valid translation bytes;
-2. update chapter lifecycle to `translated` through versioned repository write;
-3. leave review ledger without a current record.
+1. create valid translation bytes under an active translator claim;
+2. advance chapter lifecycle to `translated` through a versioned repository write;
+3. stop before claim release and before any review evidence is written.
 
-Expected:
+Expected immediately after restart:
 
 - fresh status reports lifecycle translated and review missing;
-- fresh `resume` selects `review` for the chapter;
-- no review evidence is fabricated.
+- fresh `resume` is blocked by the surviving translator claim rather than dispatching a reviewer concurrently.
+
+Recovery:
+
+1. clear an expired equivalent claim through audited cleanup;
+2. fresh `resume` selects `review` for the translated chapter;
+3. no review evidence is fabricated.
 
 ### Scenario D — death after PASS record, before reviewed promotion
 
 Setup:
 
 1. create valid translated state and translation bytes;
-2. acquire matching reviewer claim;
-3. record a current PASS in the ledger;
-4. stop before the separate lifecycle promotion/accept-review operation.
+2. create a matching reviewer claim;
+3. record a current PASS in the ledger through the real review manager/CLI contract;
+4. stop before lifecycle promotion and before claim release.
 
-Expected:
+Expected immediately after restart:
 
-- fresh status reports lifecycle translated + review pass;
-- fresh `resume` selects `accept_review`;
-- executing the existing accept-review operation promotes only the selected unit to reviewed using current PASS evidence;
-- repeating the safe acceptance path returns the documented idempotent/already-reviewed result and does not append duplicate review evidence or rewrite unrelated state.
+- fresh status reports lifecycle translated + review pass + active reviewer claim;
+- fresh `resume` is blocked by the surviving claim, preventing a second session from accepting/promoting while the reviewer still owns the unit.
 
-If current public CLI/API does not expose a repeat-safe accept path matching this invariant, the RED test identifies a production reliability gap owned by the review-promotion layer; the minimal fix belongs there.
+Recovery:
+
+1. clear an expired equivalent reviewer claim through audited cleanup;
+2. fresh `resume` selects `accept_review`;
+3. executing `accept-review` returns `changed=true` and promotes only the selected unit to `reviewed`;
+4. executing `accept-review` again against unchanged current PASS returns `changed=false`, keeps the current progress revision/content stable, and does not append review-ledger records.
+
+If this exact retry contract fails, the RED test identifies a production reliability gap owned by the review-promotion layer.
 
 ### Scenario E — translation changed after PASS
 
 Setup:
 
-1. reach a current PASS for a translated/reviewed artifact;
-2. change exact translation bytes after the PASS without adding new PASS evidence.
+1. reach a current PASS for a translated artifact;
+2. ensure no active claim remains;
+3. change exact translation bytes after PASS without adding new PASS evidence.
 
-Expected:
+Expected recoverable case:
 
-- status reports review stale;
-- a lifecycle already marked `reviewed` makes status invalid because reviewed state lacks current PASS evidence;
-- `resume` is fail-closed rather than reporting complete;
-- if lifecycle remains translated, `resume` selects review for the stale artifact.
+- with lifecycle still `translated`, status reports review stale and remains structurally valid;
+- `resume` selects `review` for the stale artifact.
 
-The test must cover at least one fail-closed reviewed-state case and one recoverable translated-state case, reusing existing review resolution instead of recomputing hashes in the test.
+Expected fail-closed case:
 
-### Scenario F — concurrent shared-state CAS
+1. restore original bytes, accept the PASS so lifecycle becomes `reviewed`, then modify translation bytes again;
+2. status reports review stale and invalid because `reviewed` lacks current PASS evidence;
+3. `resume` returns `blocked/preflight_failed`, never `complete`.
+
+The tests reuse current review resolution; they do not calculate independent replacement review state.
+
+### Scenario F — concurrent glossary changes through CAS
 
 Setup:
 
-1. two independent repository clients read the same mutable document revision (use `progress.json` as the Phase 1 shared-state representative unless a more appropriate existing mutable state document gives a clearer invariant);
-2. writer A commits a valid update with the observed revision;
-3. writer B attempts a different valid update using the stale revision.
+1. initialize a book and read `glossary.md` through two independent `FilesystemStorage` clients, producing the same starting revision;
+2. writer A changes glossary bytes and calls `write_if_version` with that observed revision;
+3. writer B attempts a different glossary change using its stale starting revision.
 
 Expected:
 
-- writer A succeeds;
-- writer B receives the existing version-conflict error;
-- final durable content equals writer A’s complete update, with none of writer B’s changes;
-- a fresh read parses under the normal schema.
+- writer A succeeds and returns a new revision;
+- writer B receives `StorageVersionConflict`;
+- final `glossary.md` bytes equal writer A’s complete content, with no partial/merged writer-B bytes;
+- a third fresh storage client reads exactly the winning revision/content.
 
-This is a cross-session integration proof of the storage/repository CAS contract; it does not replace existing lower-level concurrency tests.
+This directly covers #18's concurrent-glossary failure injection using the same storage CAS primitive intended for shared mutable state. It does not introduce a special glossary schema or automatic merge policy.
 
 ### Scenario G — corpus changes after a previously valid session
 
@@ -214,7 +238,7 @@ Two subcases:
 Expected for both:
 
 - fresh `status` reports invalid corpus/preflight evidence;
-- fresh `resume` returns blocked/preflight_failed;
+- fresh `resume` returns `blocked/preflight_failed`;
 - no claim or workflow state mutation is created by resume.
 
 ### Scenario H — private source survives process restart without binary
@@ -223,7 +247,7 @@ Setup:
 
 1. initialize through `book.py extract --private-source`;
 2. assert canonical source binary is absent;
-3. discard all Python objects from initialization by using a new subprocess for status/resume.
+3. use new subprocesses for status/resume so no initialization Python object is reused.
 
 Expected:
 
@@ -234,15 +258,15 @@ Expected:
 
 ## Idempotence matrix
 
-The Phase 1 suite explicitly checks these operations:
+The Phase 1 suite explicitly checks these current contracts:
 
-- `status`: repeated calls produce deterministic JSON and no writes;
-- `resume`: repeated calls from unchanged state produce deterministic operation/context and no writes;
-- `cleanup-claims`: after expired claims are cleaned, a second call must not delete live state or create false cleanup completions for already absent claims; expected output follows the current manager contract;
-- `release`: successful owner release followed by a second release must fail or report absence deterministically without recreating/deleting unrelated claims; exact assertion follows the existing public error contract;
-- `accept_review`: repeat after successful current-PASS promotion must be non-destructive and must not duplicate ledger evidence.
+- `status`: two calls from unchanged state produce byte-for-byte equivalent canonical JSON and no durable writes;
+- `resume`: two calls from unchanged state produce byte-for-byte equivalent canonical JSON and no durable writes;
+- `cleanup-claims`: first cleanup of one expired claim produces the expected request/completion audit pair; second cleanup returns `results=[]` and creates no audit records;
+- `release`: first owner release succeeds and creates one request/completion pair; second release for the now-absent claim fails deterministically with `ClaimConflict` / “no active claim” and creates no additional audit records;
+- `accept-review`: first promotion with current PASS returns `changed=true`; the second call returns `changed=false`, does not alter progress content, and does not append ledger evidence.
 
-The suite does not redefine all safe commands as “always return 0”. Idempotence means retrying after uncertain client outcome cannot corrupt or duplicate durable state; a deterministic already-done/not-found response is acceptable when that is the existing API contract.
+The suite does not redefine idempotence as “always return exit code 0”. Retrying after an uncertain client outcome is safe when it cannot corrupt or duplicate durable state and reports the already-completed/absent condition deterministically.
 
 ## Production-change policy
 
@@ -250,21 +274,21 @@ Start with tests only.
 
 For each reliability scenario:
 
-1. add the smallest failing test that expresses the durable recovery invariant;
+1. add the smallest test that expresses the durable recovery invariant;
 2. run it against the current integration-derived branch;
 3. if it passes, retain it as missing release-gate coverage and make no production change;
 4. if it fails for the intended reliability reason, identify the owning component and add the minimum production fix;
 5. run the focused test, neighboring component tests and the complete standard suite;
-6. commit the RED evidence and GREEN fix in audit-friendly boundaries.
+6. commit test evidence and any GREEN fix in audit-friendly boundaries.
 
-A failure caused only by a bad fixture/import/test assumption must be fixed in the test and re-run before any production change.
+A failure caused only by a bad fixture/import/test assumption must be fixed in the test and re-run before any production change. A new test that already passes is valid reliability coverage; RED→GREEN is required only for behavior that is currently defective, not for adding tests around already correct behavior.
 
 Potential production owners if genuine gaps are exposed:
 
 - `scripts/workflow_v2/status.py` / `status_cli.py` — wrong resume/preflight composition;
 - `scripts/workflow_v2/claims.py` / `claim_cli.py` — unsafe cleanup/retry semantics;
 - `scripts/workflow_v2/reviews.py` / `review_cli.py` — PASS/promotion/idempotence gaps;
-- `scripts/workflow_v2/repository.py` / storage implementation — CAS/lost-update gaps;
+- `scripts/workflow_v2/repository.py` / filesystem storage implementation — CAS/lost-update gaps;
 - `scripts/corpus.py` / source integrity helpers — fresh-session corpus verification gaps.
 
 No unrelated refactor is permitted.
@@ -272,9 +296,8 @@ No unrelated refactor is permitted.
 ## Test determinism
 
 - Use `tempfile.TemporaryDirectory` and repository-local fixtures.
-- Use explicit timestamps or injected clocks for lease boundaries; no sleeping.
-- Use deterministic IDs where audit records are asserted.
-- Compare structured JSON rather than unstable prose unless the human CLI output itself is the contract under test.
+- Use explicit historical timestamps for expired claims and deterministic IDs for asserted audit records; no sleeping.
+- Compare structured/canonical JSON rather than unstable prose unless the human CLI output itself is the contract under test.
 - When proving read-only behavior, snapshot SHA-256 of authoritative files before and after the operation.
 - Do not depend on network access, GitHub Actions, external services or a real private source.
 - Tests run under the repository’s normal `python -m unittest discover -s tests -v` suite.
@@ -289,7 +312,7 @@ tests/test_workflow_v2_reliability.py
 
 Existing tests may receive only narrowly targeted regression assertions when a discovered defect belongs to an existing component boundary.
 
-Production files are modified only when a RED reliability scenario proves a real missing invariant. No production file is pre-authorized merely because it is listed as a possible owner above.
+Production files are modified only when a failing reliability scenario proves a real missing invariant. No production file is pre-authorized merely because it is listed as a possible owner above.
 
 Documentation:
 
