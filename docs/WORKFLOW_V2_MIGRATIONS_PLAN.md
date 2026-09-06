@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add explicit, crash-recoverable Workflow v2 upgrades from provable legacy v0/v1 book state to the currently installed workflow revision without silent provenance or review/source fabrication.
+**Goal:** Add explicit, crash-recoverable Workflow v2 upgrades from provable legacy v0/v1 state to the currently installed workflow revision without silent provenance or review/source fabrication.
 
-**Architecture:** A backend-neutral `migrations.py` performs raw-state discovery, pure v0→v1 migration, compatibility planning, journaling and CAS recovery. A thin CLI adapter resolves installed provenance and exposes `workflow-upgrade`; the existing coordination/status/claim/finalize/review boundaries are extended only enough to make an active migration journal an authoritative recovery gate.
+**Architecture:** `MigrationPlanner` performs raw discovery and builds a fully validated immutable `MigrationPlan`; `MigrationExecutor` alone owns coordination, journaling, CAS application, rollback and recovery. A thin CLI adapter resolves installed provenance and exposes `workflow-upgrade`; existing claim/finalize/review/status boundaries only learn how to block or route around an active migration journal.
 
 **Tech Stack:** Python 3.10+, stdlib (`json`, `base64`, `hashlib`, `datetime`, `copy`), existing `StorageBackend`, `WorkflowStateRepository`, schema/review/source/coordination primitives, `unittest`.
 
@@ -13,18 +13,18 @@
 ## Global Constraints
 
 - No silent durable migration outside explicit `workflow-upgrade`.
-- Missing `schema_version` is logical v0 only in the migration path.
+- Missing `schema_version` is logical v0 only in migration code.
 - `--to` must exactly equal installed `.book-translator-install.json` `resolved_revision`.
 - Never invent claim/review/source provenance.
 - Metadata workflow pin is written last.
 - `.workflow/migration.json` is authoritative while present.
-- Unknown concurrent mutation during recovery is never overwritten.
-- No third-party dependency, database, queue or GitHub Actions runtime requirement.
-- PR target is `refactor/workflow-engine-v2`; `main` remains unchanged.
+- Unknown concurrent mutation is never overwritten.
+- No new third-party dependency or mandatory GitHub Actions runtime.
+- Merge only into `refactor/workflow-engine-v2`; `main` unchanged.
 
 ---
 
-### Task 1: Pure migration registry and journal schema
+### Task 1: Pure registry + migration journal schema
 
 **Files:**
 - Create: `scripts/workflow_v2/migrations.py`
@@ -33,49 +33,12 @@
 - Test: `tests/test_workflow_v2_migrations.py`
 
 **Interfaces:**
-- Produces: `MigrationError`, `MigrationCompatibilityError`, `MigrationConflict`, `detect_schema_version(data) -> int`, `migrate_document(kind, data) -> MigratedDocument`.
-- Produces schema: `SchemaKind.MIGRATION_JOURNAL` with strict v1 validator.
-- `MigratedDocument` fields: `kind`, `from_version`, `to_version`, `data`, `changed`.
-
-- [ ] **Step 1: Write failing registry tests**
-
-Add tests that require:
 
 ```python
-legacy = valid_metadata()
-legacy.pop("schema_version")
-result = migrate_document(SchemaKind.METADATA, legacy)
-self.assertEqual(result.from_version, 0)
-self.assertEqual(result.to_version, 1)
-self.assertEqual(result.data["schema_version"], 1)
-self.assertTrue(result.changed)
+class MigrationError(RuntimeError): ...
+class MigrationCompatibilityError(MigrationError): ...
+class MigrationConflict(MigrationError): ...
 
-current = migrate_document(SchemaKind.PROGRESS, valid_progress())
-self.assertEqual(current.from_version, 1)
-self.assertFalse(current.changed)
-
-with self.assertRaises(MigrationCompatibilityError):
-    migrate_document(SchemaKind.CLAIM, {"claim_id": "missing-everything"})
-
-future = valid_metadata()
-future["schema_version"] = 2
-with self.assertRaises(MigrationCompatibilityError):
-    migrate_document(SchemaKind.METADATA, future)
-```
-
-Also require `MIGRATION_JOURNAL` to accept a valid prepared journal and reject unsafe paths, invalid SHA-256/base64/original-null combinations, unsupported phases and missing document fields.
-
-- [ ] **Step 2: Run focused tests and verify RED**
-
-Run: `python -m unittest tests.test_workflow_v2_migrations -v`
-
-Expected: assertion-level failures because migration API / journal schema do not exist; existing suite remains importable.
-
-- [ ] **Step 3: Implement minimal pure registry and journal validator**
-
-`migrations.py` must implement:
-
-```python
 @dataclass(frozen=True)
 class MigratedDocument:
     kind: SchemaKind
@@ -84,48 +47,21 @@ class MigratedDocument:
     data: dict[str, Any]
     changed: bool
 
-
-def detect_schema_version(data: Mapping[str, Any]) -> int:
-    if "schema_version" not in data:
-        return 0
-    value = data["schema_version"]
-    if type(value) is not int:
-        raise MigrationCompatibilityError("schema_version must be an integer")
-    return value
-
-
-def migrate_document(kind: SchemaKind, data: Mapping[str, Any]) -> MigratedDocument:
-    version = detect_schema_version(data)
-    if version == 1:
-        parsed = parse_document(kind, data)
-        return MigratedDocument(kind, 1, 1, parsed.data, False)
-    if version != 0:
-        raise MigrationCompatibilityError(...)
-    candidate = copy.deepcopy(dict(data))
-    candidate["schema_version"] = 1
-    try:
-        parsed = parse_document(kind, candidate)
-    except SchemaError as exc:
-        raise MigrationCompatibilityError(f"{kind.value} v0 is not v1-compatible: {exc}") from exc
-    return MigratedDocument(kind, 0, 1, parsed.data, True)
+def detect_schema_version(data: Mapping[str, Any]) -> int: ...
+def migrate_document(kind: SchemaKind, data: Mapping[str, Any]) -> MigratedDocument: ...
 ```
 
-`schemas.py` adds `MIGRATION_JOURNAL`, validates phase `prepared|applied`, safe relative paths, original/target hashes, base64 round-trip shape, and resulting revision null/string.
+Also add `SchemaKind.MIGRATION_JOURNAL`.
 
-- [ ] **Step 4: Run focused + schema regression tests**
-
-Run:
-`python -m unittest tests.test_workflow_v2_migrations tests.test_workflow_v2_schemas -v`
-
-Expected: GREEN.
-
-- [ ] **Step 5: Commit Task 1**
-
-Commit message: `feat: add workflow migration registry and journal schema`
+- [ ] **Step 1 — RED tests:** require v0 metadata/progress/review-ledger/claim/source-manifest to become strict v1 after only adding `schema_version`; strict v1 is unchanged; version 2 and incomplete v0 fail with `MigrationCompatibilityError`. Require valid migration journal acceptance and invalid phase/path/hash/base64/null combinations rejection.
+- [ ] **Step 2 — Run RED:** `python -m unittest tests.test_workflow_v2_migrations -v`; expected assertion-level failures for missing migration API/schema only.
+- [ ] **Step 3 — Minimal implementation:** deep-copy, detect 0/1, call existing `parse_document`; no defaults beyond `schema_version: 1`. Journal validator requires `operation="workflow_upgrade"`, `phase in {prepared,applied}`, book/from/to revisions, ordered document entries, safe relative paths, exact original/target SHA-256 identity, base64 original bytes, and nullable resulting revision.
+- [ ] **Step 4 — GREEN:** `python -m unittest tests.test_workflow_v2_migrations tests.test_workflow_v2_schemas -v`.
+- [ ] **Step 5 — Commit:** `feat: add workflow migration registry and journal schema`.
 
 ---
 
-### Task 2: Compatibility planner for provenance, source, review and claims
+### Task 2: Compatibility planner
 
 **Files:**
 - Modify: `scripts/workflow_v2/migrations.py`
@@ -133,79 +69,67 @@ Commit message: `feat: add workflow migration registry and journal schema`
 - Test: `tests/test_workflow_v2_migration_planner.py`
 
 **Interfaces:**
-- Produces `MigrationPlan` with `book_slug`, `from_revision`, `to_revision`, `documents`, `lifecycle_downgrades`, `changed`.
-- Produces `PlannedWrite` with `path`, `kind`, `original_exists`, `original_version`, `original_bytes`, `target_bytes`, `from_version`, `to_version`.
-- Produces `build_private_source_manifest_from_identity(book_dir, metadata, progress) -> dict[str, Any]` in source integrity module.
-- Consumes installed provenance mapping `{canonical_repository, requested_ref, resolved_revision}` and injected `now`.
 
-- [ ] **Step 1: Write planner RED tests**
+```python
+@dataclass(frozen=True)
+class PlannedWrite:
+    path: str
+    kind: SchemaKind
+    original_exists: bool
+    original_version: str | None
+    original_bytes: bytes | None
+    target_data: dict[str, Any]
+    target_bytes: bytes
+    from_version: int | None
+    to_version: int
 
-Cover:
+@dataclass(frozen=True)
+class MigrationPlan:
+    book_slug: str
+    from_revision: str | None
+    to_revision: str
+    writes: tuple[PlannedWrite, ...]
+    lifecycle_downgrades: tuple[int, ...]
+    changed: bool
+
+    def write_for(self, path: str) -> PlannedWrite | None: ...
+
+class MigrationPlanner:
+    def __init__(self, repository, *, book_dir, artifact_reader, now): ...
+    def plan(self, *, slug: str, to_revision: str, installed: Mapping[str, Any]) -> MigrationPlan: ...
+```
+
+Source helper:
+
+```python
+def build_private_source_manifest_from_identity(
+    book_dir: Path,
+    metadata: Mapping[str, Any],
+    progress: Mapping[str, Any],
+) -> dict[str, Any]: ...
+```
+
+- [ ] **Step 1 — RED tests:** target != installed revision fails before writes; future/malformed schemas fail precisely; absent ledger creates empty candidate; reviewed without current PASS downgrades to translated if translation exists; current PASS preserves reviewed; missing/empty translation fails; absent embedded manifest reconstructs from exact source/extracted bytes; private-external reconstructs from metadata identity + extracted hashes without source binary; unprovable source fails; live claim/finalization block; expired claim allowed without lease changes; true current v1/current revision returns `changed=False`.
+
+Key assertion:
 
 ```python
 plan = planner.plan(slug="legacy", to_revision="new-rev", installed=installed)
-self.assertEqual(plan.from_revision, "old-rev")
-self.assertEqual(plan.to_revision, "new-rev")
-self.assertTrue(plan.changed)
-self.assertEqual(plan.target_metadata["workflow"]["resolved_revision"], "new-rev")
-self.assertEqual(plan.target_metadata["workflow"]["review_evidence"], "review-ledger-v1")
+metadata_write = plan.write_for("metadata.json")
+self.assertIsNotNone(metadata_write)
+self.assertEqual(metadata_write.target_data["workflow"]["resolved_revision"], "new-rev")
+self.assertEqual(metadata_write.target_data["workflow"]["review_evidence"], "review-ledger-v1")
 ```
 
-Required scenarios:
-
-- target differs from installed revision → compatibility error, no writes;
-- malformed/future schema → precise error, no writes;
-- missing ledger → candidate empty v1 ledger;
-- reviewed without current PASS but valid translation → candidate progress `translated` + downgrade record;
-- reviewed with current PASS remains reviewed;
-- missing/empty translation for reviewed → compatibility error;
-- missing embedded manifest reconstructed from exact source/extracted bytes;
-- private-external manifest reconstructed from metadata source identity + extracted hashes while original binary is absent;
-- missing unprovable source identity/artifact → compatibility error;
-- live claim blocks; deterministic expired claim is allowed/migrated without lease extension;
-- active finalization marker blocks;
-- true current v1/current-revision workspace returns `changed=False` and no writes.
-
-- [ ] **Step 2: Verify planner RED**
-
-Run: `python -m unittest tests.test_workflow_v2_migration_planner -v`
-
-Expected: failures only for missing planner/source reconstruction APIs.
-
-- [ ] **Step 3: Implement raw discovery and pure candidate planning**
-
-Use `repository.storage.read/list` for raw legacy JSON. Decode UTF-8/JSON strictly and preserve exact bytes/version. Do not write.
-
-Planner algorithm:
-
-```python
-raw = discover_state()
-verify_installed_target(installed, to_revision)
-migrated = migrate_supported_documents(raw)
-ledger = existing_or_empty_v1_ledger(...)
-progress = reconcile_reviewed_lifecycle(...)
-manifest = existing_or_reconstructed_manifest(...)
-validate_cross_document_candidate(...)
-metadata = with_target_workflow_and_history_last(...)
-return build_plan(raw, candidates)
-```
-
-For private source reconstruction, add a helper that uses metadata's already-proven `source.sha256/size_bytes/storage_mode` and exact extracted file hashes; it must not require source binary bytes.
-
-- [ ] **Step 4: Run focused planner/source tests**
-
-Run:
-`python -m unittest tests.test_workflow_v2_migration_planner tests.test_workflow_v2_private_source tests.test_workflow_v2_corpus_manifest -v`
-
-Expected: GREEN.
-
-- [ ] **Step 5: Commit Task 2**
-
-Commit message: `feat: plan explicit workflow upgrades`
+- [ ] **Step 2 — Run RED:** `python -m unittest tests.test_workflow_v2_migration_planner -v`.
+- [ ] **Step 3 — Implement raw discovery:** use `repository.storage.read/list`; strict UTF-8/JSON; preserve exact bytes/version. Discover metadata/progress, optional ledger/manifest, sorted claims.
+- [ ] **Step 4 — Implement candidate planning:** verify installed target, migrate document shapes, build/reconstruct ledger+manifest, resolve reviewed units with `ReviewLedgerManager`, build metadata target with deterministic `upgrade_history`, validate all target data, serialize each target through `WorkflowStateRepository.serialize()`. Planner never writes.
+- [ ] **Step 5 — GREEN:** `python -m unittest tests.test_workflow_v2_migration_planner tests.test_workflow_v2_private_source tests.test_workflow_v2_corpus_manifest -v`.
+- [ ] **Step 6 — Commit:** `feat: plan explicit workflow upgrades`.
 
 ---
 
-### Task 3: Coordination and transaction executor
+### Task 3: Coordination + transaction executor
 
 **Files:**
 - Modify: `scripts/workflow_v2/migrations.py`
@@ -215,67 +139,35 @@ Commit message: `feat: plan explicit workflow upgrades`
 - Test: `tests/test_workflow_v2_coordination.py`
 
 **Interfaces:**
-- `BookCoordinationManager.acquire(operation="workflow_upgrade", ...)` becomes valid.
-- Produces `MigrationExecutor.execute(plan, *, session_id) -> MigrationResult`.
-- Produces `MigrationExecutor.recover(*, session_id) -> MigrationResult | None`.
-- `MigrationResult`: `book_slug`, `from_revision`, `to_revision`, `outcome` (`changed|unchanged|recovered`), `migrated_paths`, `lifecycle_downgrades`.
-
-- [ ] **Step 1: Write transaction RED tests**
-
-Use an instrumented storage backend to verify:
-
-- journal is created before target writes;
-- write order source manifest → review ledger → sorted claims → progress → metadata;
-- metadata target is last;
-- every existing write uses captured CAS revision;
-- journal revision is CAS-updated after each successful target write;
-- successful final validation deletes journal;
-- stale target CAS triggers exact rollback and leaves original bytes byte-identical;
-- path originally absent is deleted during rollback;
-- coordination operation `workflow_upgrade` is accepted and released.
-
-- [ ] **Step 2: Verify RED**
-
-Run:
-`python -m unittest tests.test_workflow_v2_migration_transaction tests.test_workflow_v2_coordination -v`
-
-Expected: transaction/operation failures only.
-
-- [ ] **Step 3: Implement deterministic executor**
-
-Journal entry creation must store exact original bytes as base64 and hashes. Apply target bytes through raw storage CAS/create operations so canonical bytes from `WorkflowStateRepository.serialize()` are preserved.
-
-On apply exception:
 
 ```python
-try:
-    apply_targets(plan, journal)
-    validate_durable_target(plan)
-except Exception as exc:
-    rollback_known_states(journal)
-    raise MigrationConflict(...) from exc
+@dataclass(frozen=True)
+class MigrationResult:
+    book_slug: str
+    from_revision: str | None
+    to_revision: str
+    outcome: str  # changed | unchanged | recovered
+    migrated_paths: tuple[str, ...]
+    lifecycle_downgrades: tuple[int, ...]
+
+class MigrationExecutor:
+    def __init__(self, repository, planner: MigrationPlanner, *, coordination): ...
+    def execute(self, plan: MigrationPlan, *, session_id: str) -> MigrationResult: ...
+    def recover(self, *, session_id: str, installed: Mapping[str, Any]) -> MigrationResult | None: ...
 ```
 
-Rollback writes exact decoded original bytes, not reparsed documents.
+`BookCoordinationManager.acquire(operation="workflow_upgrade", ...)` becomes valid.
 
-- [ ] **Step 4: Implement recovery classifier**
-
-For each journal entry classify current path as `original`, `target`, or `unknown` by SHA-256/absence. Unknown must raise `MigrationConflict` without mutation. Mixed original/target rolls back, deletes journal, replans and executes. All target validates and removes journal as `recovered`.
-
-- [ ] **Step 5: Run focused transaction tests**
-
-Run:
-`python -m unittest tests.test_workflow_v2_migration_transaction tests.test_workflow_v2_coordination -v`
-
-Expected: GREEN.
-
-- [ ] **Step 6: Commit Task 3**
-
-Commit message: `feat: add crash-recoverable workflow upgrade transaction`
+- [ ] **Step 1 — RED tests:** journal created before target writes; deterministic write order manifest → ledger → sorted claims → progress → metadata; metadata last; captured CAS revisions used; journal CAS-updated after writes; success validates and deletes journal; stale write restores exact original bytes; originally absent paths deleted on rollback; coordination operation accepted/released.
+- [ ] **Step 2 — Run RED:** `python -m unittest tests.test_workflow_v2_migration_transaction tests.test_workflow_v2_coordination -v`.
+- [ ] **Step 3 — Implement executor:** create canonical journal first; use raw storage writes for target bytes; update journal with resulting versions. On error classify current bytes and rollback exact originals before returning `MigrationConflict`.
+- [ ] **Step 4 — Implement recovery:** classify every path by hash as `original|target|unknown`. Unknown → fail closed/no mutation. Mixed known state → rollback, delete journal, re-plan from fresh original state, execute. All target → strict final validation, delete journal, return `recovered` without duplicate history.
+- [ ] **Step 5 — GREEN:** same focused test command.
+- [ ] **Step 6 — Commit:** `feat: add crash-recoverable workflow upgrade transaction`.
 
 ---
 
-### Task 4: Active migration admission and fresh-session recovery visibility
+### Task 4: Active migration admission + status/resume visibility
 
 **Files:**
 - Modify: `scripts/workflow_v2/coordination.py`
@@ -286,164 +178,73 @@ Commit message: `feat: add crash-recoverable workflow upgrade transaction`
 - Test: `tests/test_workflow_v2_migration_visibility.py`
 
 **Interfaces:**
-- `BookCoordinationManager.migration_active() -> bool` reads `.workflow/migration.json` strictly.
-- Status snapshot adds `migration` section with active/phase/from/to.
-- Resume returns `operation="workflow_upgrade"` before normal claim/lifecycle dispatch when journal exists.
-
-- [ ] **Step 1: Write visibility/admission RED tests**
-
-Require:
 
 ```python
-self.assertRaises(ClaimError, claim_manager.acquire, ...)
-self.assertRaises(FinalizationError, finalizer.finalize, ...)
-self.assertRaises(ReviewEvidenceError, review_manager.accept_review, ...)
-status = resolver.status(...)
-self.assertTrue(status["migration"]["active"])
-resume = resolver.resume(...)
-self.assertEqual(resume["operation"], "workflow_upgrade")
+def BookCoordinationManager.migration_active(self) -> bool: ...
 ```
 
-Also malformed migration journal must invalidate status/fail closed rather than be ignored.
+Status adds:
 
-- [ ] **Step 2: Verify RED**
+```python
+"migration": {"active": False}
+# or
+"migration": {
+  "active": True,
+  "phase": "prepared",
+  "from_revision": "old",
+  "to_revision": "new"
+}
+```
 
-Run: `python -m unittest tests.test_workflow_v2_migration_visibility -v`
+Resume returns `operation="workflow_upgrade"` before normal lifecycle dispatch when journal is valid/present.
 
-Expected: failures because existing admission/status paths do not know migration journal.
-
-- [ ] **Step 3: Add minimal guards/status routing**
-
-Do not duplicate migration logic. All guards call `coordination.migration_active()`. Status reads the journal through repository/schema API and emits bounded recovery context only.
-
-- [ ] **Step 4: Run visibility plus existing claim/finalize/review/status tests**
-
-Run:
-`python -m unittest tests.test_workflow_v2_migration_visibility tests.test_workflow_v2_claims tests.test_workflow_v2_finalize tests.test_workflow_v2_reviews tests.test_workflow_v2_status -v`
-
-Expected: GREEN.
-
-- [ ] **Step 5: Commit Task 4**
-
-Commit message: `feat: gate workflow operations during migration recovery`
+- [ ] **Step 1 — RED tests:** active journal makes `ClaimManager.acquire()` raise `ClaimError`, finalizer raise `FinalizationError`, `ReviewLedgerManager.accept_review()` raise `ReviewEvidenceError`; status exposes migration; resume selects workflow-upgrade; malformed journal invalidates status instead of being ignored.
+- [ ] **Step 2 — Run RED:** `python -m unittest tests.test_workflow_v2_migration_visibility -v`.
+- [ ] **Step 3 — Minimal guards:** all mutation guards call `BookCoordinationManager.migration_active()`. Status directly reads journal using `SchemaKind.MIGRATION_JOURNAL`; no migration execution logic is duplicated.
+- [ ] **Step 4 — GREEN regressions:** `python -m unittest tests.test_workflow_v2_migration_visibility tests.test_workflow_v2_claims tests.test_workflow_v2_finalize tests.test_workflow_v2_reviews tests.test_workflow_v2_status -v`.
+- [ ] **Step 5 — Commit:** `feat: gate workflow operations during migration recovery`.
 
 ---
 
-### Task 5: CLI workflow-upgrade
+### Task 5: CLI `workflow-upgrade`
 
 **Files:**
 - Create: `scripts/workflow_v2/migrations_cli.py`
-- Modify: `scripts/workflow_v2/review_cli.py` (registration chain only, following existing finalize/EPUB adapter pattern)
+- Modify: `scripts/workflow_v2/review_cli.py` only to extend the existing root registration chain
 - Test: `tests/test_workflow_v2_migrations_cli.py`
 
 **Interfaces:**
-- Register `book.py workflow-upgrade <slug> --to <revision> [--json]`.
-- Resolve installed provenance from root `.book-translator-install.json`.
-- Convert expected migration/storage/schema/coordination failures to `ReviewCliError` boundary or a migration adapter error already caught by the registration chain.
-
-- [ ] **Step 1: Write CLI RED tests**
-
-Create temp workspaces with copied scripts and explicit install provenance. Cover:
-
-- explicit legacy metadata/progress source migrates and records old/new revision;
-- no command invocation means byte-identical legacy files;
-- `--to` mismatch fails before writes;
-- malformed legacy fixture fails with concise error/no traceback/no mutation;
-- reviewed-without-ledger downgrades to translated;
-- private-external upgrade succeeds without source binary;
-- second identical upgrade is `changed=false` / byte-idempotent;
-- `--json` output is canonical/deterministic apart from no wall-clock data.
-
-- [ ] **Step 2: Verify CLI RED**
-
-Run: `python -m unittest tests.test_workflow_v2_migrations_cli -v`
-
-Expected: parser reports no `workflow-upgrade` command.
-
-- [ ] **Step 3: Implement thin CLI adapter and registration**
-
-Adapter flow:
 
 ```python
-installed = load_install_provenance(root)
-executor = build_filesystem_migration_executor(book_dir, installed=installed)
-result = executor.recover(session_id=...) or executor.execute(
-    executor.plan(slug, args.to, installed),
-    session_id=...,
-)
-print_result(result, json_mode=args.json)
+def load_install_provenance(root: Path) -> dict[str, str | None]: ...
+def register_migration_command(subparsers, root: Path, *, error_factory) -> None: ...
 ```
 
-Use a deterministic CLI session identifier; migration correctness must not depend on random CLI output fields.
+CLI: `book.py workflow-upgrade <slug> --to <revision> [--json]`.
 
-- [ ] **Step 4: Run CLI + parser regression tests**
-
-Run:
-`python -m unittest tests.test_workflow_v2_migrations_cli tests.test_book_cli tests.test_workflow_v2_finalize_cli tests.test_workflow_v2_epub_cli -v`
-
-Expected: GREEN.
-
-- [ ] **Step 5: Commit Task 5**
-
-Commit message: `feat: add explicit workflow upgrade command`
+- [ ] **Step 1 — RED tests:** representative v0 metadata/progress migrates and records old/new revision; merely running status/validate does not rewrite legacy bytes; target mismatch no-write; malformed fixture concise/no traceback/no-write; reviewed without ledger downgrades; private-external works without binary; second identical upgrade byte-idempotent and reports unchanged; JSON deterministic/no wall-clock fields.
+- [ ] **Step 2 — Run RED:** `python -m unittest tests.test_workflow_v2_migrations_cli -v`; expected parser missing command.
+- [ ] **Step 3 — Implement adapter:** construct `FilesystemStorage` repository, artifact reader, `MigrationPlanner`, `BookCoordinationManager`, `MigrationExecutor`; call `executor.recover(...)` first, otherwise `planner.plan(...)` then `executor.execute(...)`. Adapt `MigrationError`/storage/schema/coordination errors into existing `ReviewCliError` factory. Register lazily at end of `register_review_commands()` after existing status/EPUB registration, avoiding `book.py` changes.
+- [ ] **Step 4 — GREEN regressions:** `python -m unittest tests.test_workflow_v2_migrations_cli tests.test_book_cli tests.test_workflow_v2_finalize_cli tests.test_workflow_v2_epub_cli -v`.
+- [ ] **Step 5 — Commit:** `feat: add explicit workflow upgrade command`.
 
 ---
 
-### Task 6: #18 migration reliability and idempotence
+### Task 6: #18 migration reliability
 
 **Files:**
 - Create: `tests/test_workflow_v2_migration_reliability.py`
-- Modify production only if a test demonstrates a real invariant defect.
+- Production files only if a new reliability test proves a real defect.
 
-**Interfaces:** uses public migration/executor/CLI APIs from Tasks 1–5.
-
-- [ ] **Step 1: Add failure-injection scenarios without production fault hooks**
-
-Construct exact durable boundaries directly with real filesystem storage/journal:
-
-- crash after journal creation before target write → fresh CLI recovery completes safely;
-- crash after review-ledger/source write before progress/metadata → fresh recovery restores/retries and succeeds;
-- crash after metadata target before journal deletion → fresh recovery returns recovered and does not duplicate history;
-- stale CAS/concurrent known winner → original valid state preserved;
-- unknown mutation while journal active → fresh recovery fails closed and preserves unknown bytes/journal;
-- identical completed rerun causes no durable byte changes.
-
-- [ ] **Step 2: Run reliability tests**
-
-Run: `python -m unittest tests.test_workflow_v2_migration_reliability -v`
-
-Expected: GREEN if implementation already satisfies invariants. If a genuine defect is exposed, preserve RED evidence, make the smallest owning-component fix, and rerun to GREEN.
-
-- [ ] **Step 3: Commit reliability coverage/fixes**
-
-Commit test-only coverage separately from any real production defect fix.
+- [ ] **Step 1 — Add durable failure boundaries without production fault hooks:** prepared journal/no target; crash after manifest/ledger but before progress; crash after metadata target before journal delete; stale CAS with exact rollback; unknown concurrent mutation fails closed and preserves unknown bytes/journal; completed rerun changes no durable bytes.
+- [ ] **Step 2 — Run:** `python -m unittest tests.test_workflow_v2_migration_reliability -v`. Existing-correct behavior may start GREEN. For a genuine defect preserve RED evidence, make the smallest owning fix, then GREEN.
+- [ ] **Step 3 — Commit:** test-only coverage separately from any production defect fix.
 
 ---
 
 ### Task 7: Full verification and integration audit
 
-**Files:** no planned production changes.
-
-- [ ] **Step 1: Run full suite**
-
-Run: `python -m unittest discover -s tests -v`
-
-Required CI matrix: Python 3.10 and Python 3.12, both success on exact final head.
-
-- [ ] **Step 2: Audit acceptance requirements**
-
-Verify every spec acceptance criterion has a named passing test, especially no-silent-write, target provenance, review downgrade, private source, migration visibility, rollback and unknown mutation.
-
-- [ ] **Step 3: Audit diff/ancestry/reviews**
-
-Require:
-
-- PR base `refactor/workflow-engine-v2`;
-- feature `behind_by=0` and merge-base equals branch creation integration SHA;
-- only #16 design/plan/migration/admission/test files changed;
-- no unresolved review threads/comments/request-changes;
-- `main` still at its pre-task SHA.
-
-- [ ] **Step 4: Ready and guarded merge**
-
-Update PR body with exact RED/GREEN/final CI evidence. Mark Ready only after all guards are clean. Merge only into `refactor/workflow-engine-v2` with expected-head SHA. Preserve feature branch. Do not merge to `main`.
+- [ ] **Step 1 — Full suite:** `python -m unittest discover -s tests -v`; require exact-final-head success on Python 3.10 and 3.12.
+- [ ] **Step 2 — Acceptance audit:** map passing tests to no-silent-upgrade, installed-target check, v0 migration, review downgrade, source reconstruction/private source, admission visibility, metadata-last, rollback, unknown mutation and idempotence.
+- [ ] **Step 3 — Diff/ancestry/review audit:** PR base `refactor/workflow-engine-v2`; `behind_by=0`; merge-base equals integration SHA at branch creation; only #16 docs/migration/admission/tests changed; no unresolved review threads/comments/request-changes; `main` unchanged.
+- [ ] **Step 4 — Ready/merge:** update PR with exact RED/GREEN/final CI evidence; Ready only after clean guards; guarded merge with expected-head SHA only to integration; preserve feature branch; never merge to `main`.
