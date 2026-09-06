@@ -52,7 +52,15 @@ class WorkflowV2MigrationPlannerTests(unittest.TestCase):
             "resolved_revision": revision,
         }
 
-    def metadata(self, *, revision=OLD, version=True, review_marker=False, private=False):
+    def metadata(
+        self,
+        *,
+        revision=OLD,
+        version=True,
+        review_marker=False,
+        private=False,
+        requested_ref="legacy-ref",
+    ):
         data = {
             "schema_version": 1,
             "title": "Legacy",
@@ -65,7 +73,7 @@ class WorkflowV2MigrationPlannerTests(unittest.TestCase):
             "imported_at": "2026-09-01T10:00:00+00:00",
             "workflow": {
                 "repository": CANONICAL,
-                "requested_ref": "legacy-ref",
+                "requested_ref": requested_ref,
                 "resolved_revision": revision,
             },
         }
@@ -292,8 +300,33 @@ class WorkflowV2MigrationPlannerTests(unittest.TestCase):
             self.planner().plan(slug="legacy", to_revision=NEW, installed=self.installed())
         self.assertIn("final", str(finalizing.exception).lower())
 
+    def test_requested_ref_drift_requires_provenance_write(self):
+        self.write_json(
+            "metadata.json",
+            self.metadata(revision=NEW, review_marker=True, requested_ref="legacy-ref"),
+        )
+        self.write_json("progress.json", self.progress(status="translated"))
+        self.write_json("review-ledger.json", self.ledger(revision=NEW))
+        self.write_json("source-manifest.json", self.manifest())
+
+        plan = self.planner().plan(slug="legacy", to_revision=NEW, installed=self.installed())
+        self.assertTrue(plan.changed)
+        metadata = plan.write_for("metadata.json")
+        self.assertIsNotNone(metadata)
+        self.assertEqual(
+            metadata.target_data["workflow"]["requested_ref"],
+            "refactor/workflow-engine-v2",
+        )
+
     def test_fully_current_workspace_is_true_noop(self):
-        self.write_json("metadata.json", self.metadata(revision=NEW, review_marker=True))
+        self.write_json(
+            "metadata.json",
+            self.metadata(
+                revision=NEW,
+                review_marker=True,
+                requested_ref="refactor/workflow-engine-v2",
+            ),
+        )
         self.write_json("progress.json", self.progress(status="translated"))
         self.write_json("review-ledger.json", self.ledger(revision=NEW))
         self.write_json("source-manifest.json", self.manifest())
