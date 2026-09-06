@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,11 @@ try:
     from workflow_v2.review_report import build_review_report_snapshot
 except (ImportError, ModuleNotFoundError):
     build_review_report_snapshot = None
+
+try:
+    from workflow_v2.review_report import render_review_report_markdown
+except (ImportError, ModuleNotFoundError):
+    render_review_report_markdown = None
 
 
 WORKFLOW_REVISION = "0123456789abcdef"
@@ -179,6 +185,13 @@ class WorkflowV2ReviewReportTests(unittest.TestCase):
         )
         return build_review_report_snapshot(self.manager, self.progress, self.metadata)
 
+    def render(self, snapshot=None):
+        self.assertIsNotNone(
+            render_review_report_markdown,
+            "workflow_v2.review_report render_review_report_markdown is not implemented",
+        )
+        return render_review_report_markdown(snapshot or self.snapshot())
+
     def test_snapshot_counts_current_states_and_pass_coverage(self):
         snapshot = self.snapshot()
         self.assertEqual(snapshot["schema"], "review-report-v1")
@@ -240,6 +253,44 @@ class WorkflowV2ReviewReportTests(unittest.TestCase):
         self.assertEqual(untranslated["state"], "untranslated")
         self.assertIsNone(untranslated["translation_sha256"])
         self.assertEqual(untranslated["history"], [])
+
+    def test_markdown_is_deterministic_and_shows_current_states_and_history(self):
+        first = self.render()
+        second = self.render()
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("# Review Report — report-example\n"))
+        self.assertIn("PASS coverage: **1/5 (20.0%)**", first)
+        for state in ("pass", "corrections_required", "missing", "stale", "untranslated"):
+            self.assertIn(f"`{state}`", first)
+        self.assertIn("commit-pass-2", first)
+        self.assertIn(WORKFLOW_REVISION, first)
+        self.assertIn("classification=`superseded`", first)
+        self.assertIn("classification=`stale`", first)
+        self.assertIn(f"duplicate_of=`{'1' * 32}`", first)
+        self.assertIn("CORRECTIONS_REQUIRED", first)
+        self.assertNotIn("generated_at", first)
+
+    def test_snapshot_and_markdown_ignore_handwritten_range_audit_files(self):
+        before_snapshot = self.snapshot()
+        before_markdown = self.render(before_snapshot)
+        self.storage.create_if_absent(
+            "REVIEW_AUDIT_001-999.md",
+            b"THIS HANDWRITTEN FILE MUST NOT AFFECT COVERAGE\n",
+        )
+        after_snapshot = self.snapshot()
+        after_markdown = self.render(after_snapshot)
+        self.assertEqual(after_snapshot, before_snapshot)
+        self.assertEqual(after_markdown, before_markdown)
+        self.assertNotIn("REVIEW_AUDIT", after_markdown)
+
+    def test_snapshot_is_deterministic_json_serializable_data(self):
+        first = self.snapshot()
+        second = self.snapshot()
+        self.assertEqual(first, second)
+        first_json = json.dumps(first, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        second_json = json.dumps(second, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(first_json, second_json)
+        self.assertNotIn("generated_at", first_json)
 
 
 if __name__ == "__main__":
