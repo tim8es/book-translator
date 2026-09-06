@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from .migration_journal import MigrationJournalError, load_migration_journal
 from .repository import RepositoryError, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind
 from .storage import (
@@ -81,6 +82,19 @@ class BookCoordinationManager:
         loaded = self.repository.read(COORDINATION_PATH, SchemaKind.COORDINATION_LOCK)
         return CoordinationLease(COORDINATION_PATH, loaded.data, loaded.version)
 
+    def migration_active(self) -> bool:
+        """Return whether a strict durable migration journal requires recovery."""
+
+        try:
+            load_migration_journal(self.repository.storage)
+        except StorageNotFound:
+            return False
+        except MigrationJournalError as exc:
+            raise CoordinationError(f"migration journal is invalid: {exc}") from exc
+        except StorageError as exc:
+            raise CoordinationError(f"migration journal is unavailable: {exc}") from exc
+        return True
+
     def acquire(
         self,
         *,
@@ -97,6 +111,11 @@ class BookCoordinationManager:
             raise CoordinationError("session_id must be a non-empty string")
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise CoordinationError("lease_seconds must be a positive integer")
+        if operation in {"claim_admission", "finalize_admission"}:
+            if self.migration_active():
+                raise CoordinationConflict(
+                    "admission is blocked while workflow migration recovery is active"
+                )
 
         now = self._now()
         document = {
