@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -20,6 +21,7 @@ class StatusCliError(RuntimeError):
 
 
 Preflight = Callable[[str], tuple[Sequence[str], Mapping[str, Any]]]
+ErrorFactory = Callable[[str], Exception]
 
 
 def _book_directory(root: Path, slug: str) -> Path:
@@ -58,7 +60,46 @@ def _resolver(root: Path, slug: str) -> StatusResolver:
     return StatusResolver(repository, artifact_reader=_artifact_reader(book_dir))
 
 
-def _snapshot(args: argparse.Namespace, root: Path, preflight: Preflight) -> dict[str, Any]:
+def _default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str, Any]]:
+    """Reuse the existing structural and corpus validators without copying their logic."""
+
+    try:
+        book_module = importlib.import_module("book")
+        structural_errors, _ = book_module.validate_book(slug)
+        book_dir, metadata, progress = book_module.load_book(slug)
+    except Exception as exc:
+        raise StatusCliError(f"cannot run structural preflight: {exc}") from exc
+
+    manifest_path = book_dir / "source-manifest.json"
+    if not manifest_path.is_file():
+        return structural_errors, {"state": "unsealed"}
+
+    try:
+        corpus_module = importlib.import_module("corpus")
+        manifest = corpus_module.load_source_manifest(book_dir)
+        if manifest is None:
+            return structural_errors, {"state": "unsealed"}
+        source_sha256, chapter_count = corpus_module.verify_manifest(
+            book_dir,
+            metadata,
+            progress,
+            manifest,
+        )
+    except Exception as exc:
+        return structural_errors, {"state": "invalid", "error": str(exc)}
+
+    return structural_errors, {
+        "state": "verified",
+        "source_sha256": source_sha256,
+        "chapter_count": chapter_count,
+    }
+
+
+def _snapshot(
+    args: argparse.Namespace,
+    root: Path,
+    preflight: Preflight,
+) -> dict[str, Any]:
     resolver = _resolver(root, args.slug)
     structural_errors, corpus = preflight(args.slug)
     try:
@@ -118,20 +159,43 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
     return 1 if payload["operation"] == "blocked" else 0
 
 
+def _adapt_errors(command: Callable[[argparse.Namespace], int], error_factory: ErrorFactory):
+    def run(args: argparse.Namespace) -> int:
+        try:
+            return command(args)
+        except StatusCliError as exc:
+            raise error_factory(str(exc)) from exc
+
+    return run
+
+
 def register_status_commands(
     subparsers: argparse._SubParsersAction,
     root: Path,
     *,
-    preflight: Preflight,
+    preflight: Preflight | None = None,
+    error_factory: ErrorFactory = StatusCliError,
 ) -> None:
     """Register read-only status/resume commands on the main book.py parser."""
+
+    resolved_preflight = preflight or (lambda slug: _default_preflight(root, slug))
 
     status = subparsers.add_parser("status", help="Report repository-authoritative workflow status.")
     status.add_argument("slug", help="Book slug under books/.")
     status.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
-    status.set_defaults(func=lambda args: status_command(args, root, preflight))
+    status.set_defaults(
+        func=_adapt_errors(
+            lambda args: status_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
 
     resume = subparsers.add_parser("resume", help="Select the next valid operation without mutating state.")
     resume.add_argument("slug", help="Book slug under books/.")
     resume.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
-    resume.set_defaults(func=lambda args: resume_command(args, root, preflight))
+    resume.set_defaults(
+        func=_adapt_errors(
+            lambda args: resume_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
