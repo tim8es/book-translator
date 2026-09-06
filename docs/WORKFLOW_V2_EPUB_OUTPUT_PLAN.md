@@ -4,30 +4,29 @@
 
 **Goal:** Add deterministic first-class EPUB build/validation, output manifest and stale-output detection while preserving Markdown build behavior.
 
-**Architecture:** A new stdlib-only `workflow_v2.epub_output` domain module owns input fingerprints, EPUB assembly/validation and manifest status. A thin `workflow_v2.epub_cli` adapter integrates with the existing `book.py build` command and adds read-only `build-status`; authoritative workflow state remains metadata/progress/review ledger and exact artifacts.
+**Architecture:** `workflow_v2.epub_output` owns input fingerprints, EPUB assembly/validation and strict generated-manifest validation. `workflow_v2.epub_cli` integrates with the existing `book.py build` command and adds read-only `build-status`; authoritative workflow state remains metadata/progress/review ledger and exact artifact bytes.
 
-**Tech Stack:** Python 3.10+, stdlib `zipfile`, `xml.etree.ElementTree`, `html`, `hashlib`, `json`, `io`, existing Workflow v2 repository/storage/review APIs.
+**Tech Stack:** Python 3.10+, stdlib only (`zipfile`, `xml.etree.ElementTree`, `html`, `hashlib`, `json`, `io`), existing Workflow v2 repository/storage/review APIs.
 
 **Spec:** `docs/WORKFLOW_V2_EPUB_OUTPUT_DESIGN.md`
 
 ## Global Constraints
 
-- Target branch is `refactor/workflow-engine-v2`; never modify `main`.
-- Branch is `feature/workflow-v2-epub-output`.
+- Target branch: `refactor/workflow-engine-v2`; never modify `main`.
+- Feature branch: `feature/workflow-v2-epub-output`.
 - No third-party runtime dependency.
 - Existing Markdown build remains default/backward-compatible.
-- Generated EPUB/manifest are projections, not authoritative state.
-- `private_external` builds must work without source binary persistence.
+- EPUB and `output/manifest.json` are generated projections, not `SchemaKind` authoritative documents.
+- `private_external` final builds work without persisted source binary.
 - Final build requires current PASS evidence; preview mode is explicit.
-- Every task follows RED -> minimal GREEN -> full matrix checkpoint.
+- Every behavior slice follows RED -> minimal GREEN -> full matrix checkpoint.
 
 ---
 
-### Task 1: Build-input identity and output-manifest status
+### Task 1: Build-input identity and generated-manifest status
 
 **Files:**
 - Create: `scripts/workflow_v2/epub_output.py`
-- Modify: `scripts/workflow_v2/schemas.py`
 - Test: `tests/test_workflow_v2_epub_output.py`
 
 **Interfaces:**
@@ -36,50 +35,16 @@
 - `OUTPUT_MANIFEST_PATH = "output/manifest.json"`
 - `build_input_snapshot(metadata, progress, resolutions, artifact_reader, *, preview, cover_reader=None) -> dict[str, Any]`
 - `input_fingerprint(snapshot) -> str`
+- `validate_output_manifest(manifest) -> dict[str, Any]`
 - `build_output_manifest(*, book_slug, preview, artifact_path, artifact_sha256, unit_count, input_fingerprint, repository_commit, state_revisions) -> dict[str, Any]`
 - `resolve_output_status(manifest, *, artifact_bytes, current_fingerprint, expected_unit_count) -> dict[str, Any]`
-- Add `SchemaKind.OUTPUT_MANIFEST` with strict v1 validation for the manifest contract.
 
-- [ ] **Step 1: Write RED tests for input identity.**
-
-Tests must prove:
-
-```python
-snapshot_a = build_input_snapshot(metadata, progress, pass_resolutions, read_artifact, preview=False)
-snapshot_b = build_input_snapshot(metadata, progress, duplicate_pass_resolutions, read_artifact, preview=False)
-self.assertEqual(input_fingerprint(snapshot_a), input_fingerprint(snapshot_b))
-
-translation_bytes["translated/001-a.md"] = b"changed"
-self.assertNotEqual(input_fingerprint(snapshot_a), input_fingerprint(build_input_snapshot(...)))
-```
-
-Also assert metadata title/language/order/cover/review-state changes alter the fingerprint, while raw ledger revision and repository commit are not inputs.
-
-- [ ] **Step 2: Write RED tests for manifest validation/status.**
-
-Assert `current`, `stale`, `invalid` and `missing` boundaries using an exact artifact SHA and input fingerprint. Unsafe artifact paths and malformed SHA/fingerprint must fail schema/domain validation.
-
-- [ ] **Step 3: Run full suite for RED witness.**
-
-Run: `python -m unittest discover -s tests -v`
-
-Expected: only the new Task 1 tests fail because `epub_output`/`OUTPUT_MANIFEST` are missing.
-
-- [ ] **Step 4: Implement minimal Task 1 domain/schema.**
-
-Canonical fingerprint serialization:
-
-```python
-def input_fingerprint(snapshot):
-    content = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(content).hexdigest()
-```
-
-Final review identity must use normalized resolution fields only (`state`, source/translation hashes, workflow/review-contract revision), never raw record IDs or ledger revision.
-
-- [ ] **Step 5: Run full suite GREEN and commit.**
-
-Commit boundary: `feat: add EPUB build input identity and manifest status`.
+- [ ] Write RED tests proving relevant translation/metadata/order/cover/current-review changes alter the fingerprint, while review record IDs/commits, raw ledger revision and repository commit do not.
+- [ ] Write RED tests proving preview snapshots omit review identity.
+- [ ] Write RED tests proving strict generated-manifest validation rejects unsafe paths and malformed hashes, and status distinguishes `missing/current/stale/invalid`.
+- [ ] Run `python -m unittest discover -s tests -v`; accept RED only if failures are the missing Task 1 APIs and baseline remains green.
+- [ ] Implement only the Task 1 APIs. Fingerprints use SHA-256 of compact, sorted canonical JSON. Final review identity includes only resolved state, exact hashes, workflow revision and review-contract revision.
+- [ ] Run full suite GREEN and commit `feat: add EPUB build input identity and manifest status`.
 
 ---
 
@@ -94,154 +59,50 @@ Commit boundary: `feat: add EPUB build input identity and manifest status`.
 - `build_epub_bytes(*, book_slug, title, author, language, units, fingerprint, cover=None) -> bytes`
 - `validate_epub_bytes(content: bytes, *, expected_unit_count: int) -> dict[str, Any]`
 
-`units` is ordered data containing `number`, `title`, `slug` and exact Markdown text. `cover` is `None` or `{name, media_type, content}`.
-
-- [ ] **Step 1: Write RED deterministic-package tests.**
-
-Assert two calls with identical inputs produce identical bytes and ZIP invariants:
-
-```python
-first = build_epub_bytes(...)
-second = build_epub_bytes(...)
-self.assertEqual(first, second)
-with zipfile.ZipFile(io.BytesIO(first)) as zf:
-    self.assertEqual(zf.namelist()[0], "mimetype")
-    self.assertEqual(zf.getinfo("mimetype").compress_type, zipfile.ZIP_STORED)
-```
-
-Assert OPF/nav/spine order matches input units, metadata target language is emitted and cover is optional.
-
-- [ ] **Step 2: Write RED validator corruption tests.**
-
-Corrupt/remove each critical contract independently: mimetype, container, OPF, nav, spine count, missing chapter, malformed XHTML, empty chapter, bad cover reference. Each must raise `EpubOutputError`.
-
-- [ ] **Step 3: Run full suite for RED witness.**
-
-Expected: only assembly/validator tests fail on missing APIs.
-
-- [ ] **Step 4: Implement stdlib EPUB writer/validator.**
-
-Use fixed ZIP timestamps `(1980, 1, 1, 0, 0, 0)` and explicit `ZipInfo` objects. Escape translation text; support headings, paragraphs, ordered/unordered lists and fenced code only. Do not execute raw HTML.
-
-- [ ] **Step 5: Run full suite GREEN and commit.**
-
-Commit boundary: `feat: build and validate deterministic EPUB bytes`.
+- [ ] Write RED deterministic-package tests: identical inputs -> identical bytes; first ZIP member is stored `mimetype`; OPF/nav/spine order matches units; metadata/language/CSS and optional cover are present.
+- [ ] Write RED corruption tests for mimetype/container/OPF/nav/spine/missing or malformed/empty chapters/bad cover reference.
+- [ ] Run full suite and verify failures are only missing Task 2 APIs.
+- [ ] Implement stdlib writer/validator with fixed ZIP timestamps `(1980, 1, 1, 0, 0, 0)` and escaped Markdown subset (headings, paragraphs, lists, fenced code; raw HTML escaped).
+- [ ] Run full suite GREEN and commit `feat: build and validate deterministic EPUB bytes`.
 
 ---
 
-### Task 3: CLI build, manifest persistence and build-status
+### Task 3: CLI build, persistence and build-status
 
 **Files:**
 - Create: `scripts/workflow_v2/epub_cli.py`
 - Modify: `scripts/book.py`
 - Test: `tests/test_workflow_v2_epub_cli.py`
-- Test regression: `tests/test_book_cli.py`
+- Regression: `tests/test_book_cli.py`
 
 **Interfaces:**
 - `epub_build_command(args, root: Path) -> int`
 - `build_status_command(args, root: Path) -> int`
 - `register_build_status_command(subparsers, root) -> None`
 
-- [ ] **Step 1: Write RED end-to-end CLI tests.**
-
-Create a fully reviewed/PASS book using existing claim/review/finalize commands, then assert:
-
-```text
-book.py build sample --format epub
-book.py build-status sample --format epub --json
-```
-
-produces a validated `output/sample.epub`, canonical `output/manifest.json`, and JSON state `current`.
-
-Also cover:
-- default `build sample` still creates Markdown;
-- final EPUB rejects translated/unreviewed state;
-- `--allow-unreviewed` creates `preview: true` manifest;
-- `private_external` final build succeeds with no source binary;
-- `.epub`/`.md` output extension mismatch fails without writes.
-
-- [ ] **Step 2: Run full suite for RED witness.**
-
-Expected: new CLI tests fail because `--format epub`/`build-status` are not registered.
-
-- [ ] **Step 3: Implement thin CLI adapter and `book.py` wiring.**
-
-`book.py` changes:
-
-```python
-build.add_argument("--format", choices=("markdown", "epub"), default="markdown")
-```
-
-At the start of `build_command`, dispatch EPUB to `epub_build_command`; preserve the existing Markdown path byte-for-byte except for output-extension validation where needed. Register `build-status` once and add `EpubCliError` to the expected CLI error boundary.
-
-EPUB preflight reuses normalized structural/corpus preflight from `status_cli.default_preflight`. Final builds additionally resolve all review evidence and require current PASS for every unit; preview builds require translated/reviewed lifecycle and non-empty translations.
-
-- [ ] **Step 4: Persist artifact/manifest safely.**
-
-Candidate bytes must be assembled and validated before any final write. If existing manifest+artifact are already `current`, return unchanged without rewriting either. Otherwise use existing filesystem CAS/atomic replace operations; write manifest only after final artifact hash/validation succeeds.
-
-Best-effort repository commit:
-
-```python
-subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, ...)
-```
-
-Failure/no Git repository -> `None`.
-
-- [ ] **Step 5: Run full suite GREEN and commit.**
-
-Commit boundary: `feat: add first-class EPUB build CLI and output status`.
+- [ ] Write RED end-to-end tests for `build --format epub`, `build-status --format epub --json`, Markdown default compatibility, final reviewed/PASS gate, explicit preview, private-source build, output extension safety and deterministic rerun.
+- [ ] Run full suite and verify RED is only absent CLI behavior.
+- [ ] Add `--format markdown|epub` (default `markdown`), EPUB dispatch, `build-status`, and expected `EpubCliError` handling without changing existing Markdown semantics.
+- [ ] Reuse normalized structural/corpus preflight from status/finalize. Final builds require all current PASS; preview requires translated/reviewed non-empty units.
+- [ ] Assemble+validate before writes. If current output already matches, do not rewrite. Otherwise write artifact via existing filesystem CAS/atomic replace, revalidate/hash, then write canonical generated manifest. Repository HEAD is nullable provenance only.
+- [ ] Run full suite GREEN and commit `feat: add first-class EPUB build CLI and output status`.
 
 ---
 
-### Task 4: #18 build reliability and idempotence extension
+### Task 4: #18 EPUB reliability and idempotence extension
 
 **Files:**
 - Create: `tests/test_workflow_v2_epub_reliability.py`
 
-- [ ] **Step 1: Add failure-boundary tests.**
-
-Cover:
-
-1. incomplete final build fails and leaves prior artifact/manifest unchanged;
-2. artifact replaced but old manifest retained (simulated process death) resolves non-current and clean rerun repairs it;
-3. translation/metadata/order/cover/current-review changes resolve `stale`;
-4. semantically duplicate PASS evidence with unchanged current identity remains `current`;
-5. unrelated Git commit remains `current`;
-6. identical successful rebuild keeps exact EPUB bytes, manifest bytes and storage revisions/inodes where filesystem semantics allow.
-
-- [ ] **Step 2: Run full suite.**
-
-If a new test reveals a real defect, retain the failing witness, fix only the owning implementation, and rerun the complete matrix.
-
-- [ ] **Step 3: Commit reliability coverage.**
-
-Commit boundary: `test: cover EPUB build recovery and staleness`.
+- [ ] Add scenarios: incomplete final build preserves prior output; simulated artifact-before-manifest crash is non-current and recoverable; translation/metadata/order/cover/current-review mutation is stale; semantically duplicate PASS remains current; unrelated Git commit remains current; identical successful rebuild preserves exact EPUB/manifest bytes and filesystem revision/inode where applicable.
+- [ ] Run full suite. If a test exposes a real defect, retain RED evidence and fix only the owning implementation.
+- [ ] Commit `test: cover EPUB build recovery and staleness`.
 
 ---
 
 ### Task 5: Final verification and integration audit
 
-**Files:** no planned production changes.
-
-- [ ] **Step 1: Fresh exact-head Python matrix.**
-
-Require Python 3.10 and 3.12 GitHub CI success and capture exact test count from one full job log.
-
-- [ ] **Step 2: Requirement audit.**
-
-Verify every #14 acceptance item against tests/code: reviewed default, preview escape hatch, metadata/nav/spine/CSS/cover, validation, manifest provenance/hash, stale relevant inputs, private source, idempotence.
-
-- [ ] **Step 3: PR audit.**
-
-Require:
-- base exactly current `refactor/workflow-engine-v2`;
-- `behind_by=0` and merge-base equals integration head used for the branch;
-- only #14 design/plan/domain/CLI/tests changed;
-- no unresolved comments/reviews/threads;
-- PR mergeable;
-- `main` SHA unchanged.
-
-- [ ] **Step 4: Ready and guarded merge.**
-
-Only after all guards are clean, mark PR Ready and merge with expected head SHA into `refactor/workflow-engine-v2`. Preserve feature branch. Do not merge to `main`.
+- [ ] Fresh exact-head GitHub matrix: Python 3.10 and 3.12 success; capture exact full-suite count from a job log.
+- [ ] Requirement audit against #14: reviewed default, preview escape hatch, metadata/nav/spine/CSS/cover, validation, manifest provenance/hash, relevant staleness, private source, idempotence.
+- [ ] PR audit: target integration; `behind_by=0`; merge-base matches integration base; only #14 docs/domain/CLI/tests changed; no unresolved comments/reviews/threads; PR mergeable; `main` unchanged.
+- [ ] Only after clean guards, mark PR Ready and merge with expected head SHA into `refactor/workflow-engine-v2`. Preserve feature branch. Never merge to `main`.
