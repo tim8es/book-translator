@@ -109,6 +109,7 @@ books/<book-slug>/
 ├── output/
 ├── metadata.json
 ├── progress.json
+├── review-ledger.json
 ├── source-manifest.json
 ├── glossary.md
 └── style-guide.md
@@ -121,6 +122,7 @@ Initialization requirements:
 - use stable, unique chapter numbering/slugs and aligned source/translation paths;
 - create per-book metadata and progress state;
 - copy the selected workflow repository/requested ref/resolved revision into `metadata.json.workflow`;
+- for a ledger-enabled workflow, record `metadata.json.workflow.review_evidence` and initialize the matching empty `review-ledger.json` rather than fabricating historical review evidence;
 - initialize glossary and style-guide durable memory;
 - perform structural validation before sustained translation;
 - seal the verified source corpus after successful extraction.
@@ -306,21 +308,54 @@ Do not pass the Translator's hidden reasoning or justification.
 
 For the v3 literary contract, the Reviewer returns either `PASS` or `CORRECTIONS_REQUIRED` under `docs/TRANSLATION.md`. A legacy workflow follows the equivalent review/state semantics defined by that recorded revision.
 
-```text
-translated artifact
-  -> Reviewer under the active book workflow revision
-  -> CORRECTIONS_REQUIRED: remain translated
-       -> apply/obtain corrections
-       -> review corrected artifact again
-  -> PASS: Orchestrator accepts valid proposals
-       -> structural/integrity validation while still translated
-       -> persist reviewed
-       -> validate the resulting state
+For a ledger-enabled book, a Reviewer result in chat or worker output is not durable review evidence by itself. The Orchestrator must record the outcome while the matching reviewer claim is still live:
+
+```bash
+python scripts/book.py review-record <book-slug> <chapter> \
+  --outcome PASS|CORRECTIONS_REQUIRED \
+  --session-id <reviewer-session>
 ```
 
-If the outcome is `CORRECTIONS_REQUIRED`, do not mark the chapter reviewed. Apply or obtain the corrections through the appropriate role boundary and re-run independent review on the corrected artifact until a Reviewer returns `PASS`.
+The command hashes the current canonical source and translation bytes and binds the record to the book's immutable workflow/review-contract revision. Handwritten Markdown audit or review files may be useful notes, but they are not authoritative review coverage.
 
-A `PASS` is necessary but not sufficient for the durable state transition. Before persisting `reviewed`, the Orchestrator must also ensure the reviewed artifact is the canonical artifact, required files exist, accepted global decisions have been applied consistently, and structural/integrity state validates.
+Inspect machine-resolved review state when needed with:
+
+```bash
+python scripts/book.py reviews <book-slug>
+```
+
+A ledger-enabled chapter has current PASS coverage only when the highest-sequence exact record matches the current source hash, translation hash, workflow revision, and review-contract revision and has outcome `PASS`. If either artifact changes, the old record remains audit history but current review resolution becomes `stale`; no chat statement or Markdown note restores coverage.
+
+The normal ledger-enabled state boundary is:
+
+```text
+translated artifact
+  -> acquire reviewer claim
+  -> Reviewer under the active book workflow revision
+  -> record Reviewer outcome with review-record while claim is live
+  -> CORRECTIONS_REQUIRED: remain translated
+       -> release reviewer claim
+       -> apply/obtain corrections through the translator boundary
+       -> acquire a fresh reviewer claim
+       -> review corrected artifact again
+  -> PASS: verify current PASS with machine review state
+       -> structural/integrity validation while still translated
+       -> promote through accept-review
+       -> validate the resulting reviewed state
+       -> release reviewer claim
+```
+
+For a current PASS, promote lifecycle state only through:
+
+```bash
+python scripts/book.py accept-review <book-slug> <chapter>
+```
+
+`accept-review` re-resolves current evidence and uses compare-and-swap on `progress.json`; a missing, stale, mismatched, or current `CORRECTIONS_REQUIRED` record cannot promote the chapter. If a concurrent state change occurs, re-read repository state rather than treating the old PASS result as reusable authority.
+
+If the outcome is `CORRECTIONS_REQUIRED`, do not mark the chapter reviewed. Apply or obtain the corrections through the appropriate role boundary and re-run independent review on the corrected artifact until a Reviewer returns `PASS`, record each outcome, and only then attempt `accept-review`.
+
+A `PASS` is necessary but not sufficient for the durable state transition. Before promotion, the Orchestrator must also ensure the reviewed artifact is the canonical artifact, required files exist, accepted global decisions have been applied consistently, and structural/integrity state validates. For ledger-enabled books, `progress.json.status=reviewed` is valid only while the current exact review resolution remains `pass`; if later artifact changes make that evidence stale, validation must fail until lifecycle state and review evidence are reconciled explicitly.
 
 ## Context freshness
 
@@ -398,7 +433,8 @@ At minimum, structural validation must protect these invariants:
 - glossary and style guide exist for active books;
 - workflow provenance is present for new books;
 - source identity/integrity state is retained when `source-manifest.json` exists;
-- no translation artifact replaced the preserved source.
+- no translation artifact replaced the preserved source;
+- for ledger-enabled books, `review-ledger.json` exists, validates, and every chapter marked `reviewed` resolves to current exact PASS evidence.
 
 When `source-manifest.json` exists, structural validation is not enough: `python scripts/corpus.py verify <book-slug>` must also confirm the preserved source and extracted SHA-256 values before literary work resumes.
 
@@ -407,7 +443,8 @@ Neither structural nor integrity validation can substitute for a Reviewer `PASS`
 ## Failure handling
 
 - If translation fails or is incomplete, do not advance the chapter to `translated`.
-- If review fails to run, errors, or returns `CORRECTIONS_REQUIRED`, keep the chapter `translated`.
+- If review fails to run, errors, returns `CORRECTIONS_REQUIRED`, or cannot be durably recorded, keep the chapter `translated`.
+- If review evidence is missing, malformed, mismatched, or stale, do not promote or continue treating the lifecycle state as validly reviewed.
 - If corpus preflight, hash verification, or structural validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.
 - If the exact source is unavailable, do not silently use a same-title/same-name replacement.
 - If the required workflow revision cannot be loaded or its routing mechanism cannot be interpreted, do not silently substitute another revision and claim exact reproducibility.
@@ -433,13 +470,14 @@ Before declaring a book complete, the Orchestrator verifies that:
 
 1. every intended chapter is present and in real reading order;
 2. every intended chapter is `reviewed` through the review/state boundary above;
-3. structural validation succeeds;
-4. when `source-manifest.json` exists, sealed-corpus SHA-256 verification succeeds;
-5. glossary and style-guide decisions are consistent across the book;
-6. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under the active literary contract when a book-level consistency check warrants it;
-7. requested output artifacts are ordered/checked if output was requested;
-8. the preserved source remains unchanged;
-9. workflow provenance remains intact;
-10. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
+3. for ledger-enabled books, every intended chapter resolves to current exact PASS review evidence from `review-ledger.json`;
+4. structural validation succeeds;
+5. when `source-manifest.json` exists, sealed-corpus SHA-256 verification succeeds;
+6. glossary and style-guide decisions are consistent across the book;
+7. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under the active literary contract when a book-level consistency check warrants it;
+8. requested output artifacts are ordered/checked if output was requested;
+9. the preserved source remains unchanged;
+10. workflow provenance remains intact;
+11. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
 
 A built output file alone is not evidence that the book is complete.
