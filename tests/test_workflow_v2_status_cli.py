@@ -88,6 +88,8 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
 
     def test_status_and_resume_json_are_deterministic_bounded_and_read_only(self):
         book = self.initialize_book()
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        source_path = progress["chapters"][0]["source_path"]
         durable = [
             book / "metadata.json",
             book / "progress.json",
@@ -114,7 +116,7 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
                 "progress.json",
                 "glossary.md",
                 "style-guide.md",
-                "extracted/chapter-0001-one.md",
+                source_path,
             ],
         )
 
