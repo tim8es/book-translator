@@ -42,6 +42,7 @@ from .storage import (
     StorageVersionConflict,
     StoredValue,
 )
+from .text_patch import TextPatchError, TextPatchResult, patch_text
 
 install_source_schema_extensions()
 
@@ -76,9 +77,12 @@ __all__ = [
     "StorageNotFound",
     "StorageVersionConflict",
     "StoredValue",
+    "TextPatchError",
+    "TextPatchResult",
     "UnsupportedSchemaVersion",
     "WorkflowStateRepository",
     "canonical_unit_id",
     "parse_document",
+    "patch_text",
     "resolve_selector",
 ]
