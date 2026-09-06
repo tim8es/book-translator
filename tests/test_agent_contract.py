@@ -208,6 +208,23 @@ class AgentContractTests(unittest.TestCase):
         ):
             self.assertIn(phrase, text)
 
+    def test_orchestration_contract_requires_machine_review_evidence(self):
+        text = (PROJECT_ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
+        lowered = text.lower()
+
+        for phrase in (
+            "python scripts/book.py review-record",
+            "python scripts/book.py reviews",
+            "python scripts/book.py accept-review",
+            "current pass",
+            "stale",
+        ):
+            self.assertIn(phrase.lower(), lowered)
+
+        self.assertIn("markdown", lowered)
+        self.assertIn("not authoritative", lowered)
+        self.assertIn("review coverage", lowered)
+
     def test_translation_contract_preserves_literary_guarantees(self):
         text = (PROJECT_ROOT / "docs" / "TRANSLATION.md").read_text(encoding="utf-8")
         lowered = text.lower()
