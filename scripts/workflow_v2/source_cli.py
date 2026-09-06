@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import importlib
 import io
 import shutil
@@ -16,6 +15,7 @@ from typing import Any
 from . import schemas
 from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
+from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
 from .storage import StorageError
 
 
@@ -24,14 +24,6 @@ class SourceCliError(RuntimeError):
 
 
 ErrorFactory = Callable[[str], Exception]
-
-
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _explicit_source(metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -191,7 +183,7 @@ def _source_identity(source: Path, *, private: bool) -> dict[str, Any]:
         "storage_mode": "private_external" if private else "embedded",
         "filename": source.name,
         "size_bytes": source.stat().st_size,
-        "sha256": _sha256_path(source),
+        "sha256": sha256_path(source),
     }
 
 
@@ -227,10 +219,9 @@ def source_extract_command(
             metadata_doc.version,
         )
 
-        corpus_module = importlib.import_module("corpus")
         stored_source = book_dir / "source" / identity["filename"]
-        manifest = corpus_module.build_manifest(book_dir, metadata, progress_doc.data, stored_source)
-        corpus_module.write_source_manifest(book_dir, manifest, create_only=True)
+        manifest = build_source_manifest(book_dir, metadata, progress_doc.data, stored_source)
+        repository.create("source-manifest.json", SchemaKind.SOURCE_MANIFEST, manifest)
 
         if identity["storage_mode"] == "private_external" and stored_source.is_file():
             stored_source.unlink()
@@ -242,6 +233,10 @@ def source_extract_command(
             raise SourceCliError(
                 "Explicit-source initialization failed validation:\n- " + "\n- ".join(errors)
             )
+    except (SourceIntegrityError, SchemaError, RepositoryError, StorageError) as exc:
+        if not existed_before and book_dir.exists():
+            shutil.rmtree(book_dir, ignore_errors=True)
+        raise SourceCliError(str(exc)) from exc
     except Exception as exc:
         if not existed_before and book_dir.exists():
             shutil.rmtree(book_dir, ignore_errors=True)
