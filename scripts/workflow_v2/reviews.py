@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .claims import canonical_unit_id
+from .coordination import FINALIZATION_PATH
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .storage import StorageError, StorageNotFound, StorageVersionConflict
@@ -414,6 +415,19 @@ class ReviewLedgerManager:
         if not isinstance(progress_revision, str) or not progress_revision.strip():
             raise ReviewEvidenceError("progress revision must be a non-empty string")
 
+        try:
+            self.repository.read(FINALIZATION_PATH, SchemaKind.FINALIZATION_LOCK)
+        except StorageNotFound:
+            pass
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise ReviewEvidenceError(
+                f"cannot verify finalization admission state: {exc}"
+            ) from exc
+        else:
+            raise ReviewEvidenceError(
+                "review promotion is blocked while finalization is active"
+            )
+
         chapter = self._chapter(progress, chapter_number)
         status = chapter.get("status")
         if status not in {"translated", "reviewed"}:
@@ -446,9 +460,6 @@ class ReviewLedgerManager:
         target = self._chapter(updated, chapter_number)
         target["status"] = "reviewed"
 
-        # Re-resolve immediately before the lifecycle CAS. Workflow-coordinated
-        # writers remain excluded by the unit claim; this second read also catches
-        # ordinary out-of-band artifact changes that occurred during acceptance.
         latest_resolution = self.resolve_unit(updated, metadata, chapter_number)
         if latest_resolution.state != "pass":
             raise ReviewEvidenceError(
