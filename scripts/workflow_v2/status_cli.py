@@ -170,6 +170,8 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
             print(f"ERROR: {error}")
     elif payload["operation"] == "complete":
         print("next=complete")
+    elif payload["operation"] == "finalize":
+        print(f"next=finalize role={payload['context']['role']}")
     else:
         print(
             f"next={payload['operation']} unit={payload['unit_id']} "
