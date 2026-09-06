@@ -54,7 +54,9 @@ scripts/workflow_v2/patch_cli.py
 
 `text_patch.py` owns matching, scoping, UTF-8 decoding/encoding, count validation, diff generation and the optimistic write. It accepts the existing `StorageBackend` protocol, so filesystem execution uses the already-tested `FilesystemStorage` CAS semantics rather than introducing a second atomic-write implementation.
 
-`patch_cli.py` owns argparse registration, repository-root path selection, user-visible errors and diff/summary printing. `book.py` only imports/registers the command.
+`patch_cli.py` owns argparse registration, repository-root path selection, user-visible errors and diff/summary printing. It defines `PatchCliError` in the same style as the existing claim/review adapters and does not import `book.py`, avoiding a CLI import cycle. `book.py` imports/registers the command and adds `PatchCliError` to its existing top-level expected-error catch.
+
+`workflow_v2.__init__` exports only the reusable domain API (`TextPatchError`, `TextPatchResult`, `patch_text`) alongside the other Workflow v2 domain/storage primitives. The argparse adapter is not part of that package-level API.
 
 This split keeps the patch behavior independently testable and leaves GitHub/backend-specific transport outside the literary/text logic.
 
@@ -88,7 +90,7 @@ python scripts/book.py patch books/demo/glossary.md \
 
 Rules:
 
-- `<path>` is repository-relative and must resolve through the storage backend path-safety rules; absolute paths, `..`, `./`, backslash escapes and other unsafe forms are rejected before file mutation.
+- `<path>` is relative to the repository root and is resolved by `FilesystemStorage(repo_root())`; absolute paths, `..`, `./`, backslash escapes, empty segments and other unsafe forms are rejected by the existing storage path-safety rules before mutation.
 - `--old`, `--new` and `--expected-count` are required.
 - `--expected-count` is an integer `>= 0`.
 - literal matching is the default.
@@ -137,6 +139,8 @@ def patch_text(
 The domain function reads exactly once for the baseline revision, computes the full replacement in memory, validates the observed count, prepares the diff, and writes only with `storage.write_if_version(path, updated_bytes, original.version)`.
 
 A stale concurrent writer therefore causes the existing `StorageVersionConflict`; the patch layer converts it into a `TextPatchError` that explicitly says the target changed before the patch could commit. It does not re-read and silently retry because that would invalidate the caller's observed-count assumption.
+
+`expected_count`, `line_start` and `line_end` use strict integer validation (`type(value) is int`) so booleans are not accepted accidentally through Python's `bool`/`int` relationship.
 
 ## UTF-8 and line endings
 
@@ -221,7 +225,7 @@ Labels are deterministic:
 +++ b/<path>
 ```
 
-The domain result stores the complete concise diff string. For unchanged content, `diff` is the empty string.
+The domain result stores the complete diff string. For unchanged content, `diff` is the empty string. The operation remains small by intent; callers are responsible for choosing a narrow pattern/scope and exact expected count rather than relying on output truncation.
 
 CLI behavior:
 
@@ -252,7 +256,7 @@ A test storage can inject a concurrent update after the patch read but before it
 
 `TextPatchError` wraps expected patch-domain failures:
 
-- non-integer/negative expected count at API validation;
+- invalid expected-count API value;
 - empty literal old text;
 - invalid regex or replacement syntax;
 - invalid UTF-8;
@@ -261,9 +265,9 @@ A test storage can inject a concurrent update after the patch read but before it
 - target missing/path unsafe/storage failure;
 - stale write conflict.
 
-The CLI adapter converts these into the existing `BookError` surface so `book.py` prints a single `ERROR: ...` message and exits 1.
+`patch_cli.py` catches `TextPatchError` and expected storage errors and raises `PatchCliError` with a concise message. `book.py` includes `PatchCliError` in its existing top-level expected-error tuple, so expected patch failures print one `ERROR: ...` line and exit 1 without a traceback.
 
-No expected failure prints a Python traceback.
+No CLI adapter imports `book.py`; repository root is injected into `register_patch_command(subparsers, root)` just as existing Workflow v2 CLI registration receives its root explicitly.
 
 ## Interaction with workflow state
 
@@ -288,7 +292,7 @@ Tests-first coverage:
 7. multi-line literal replacement can cross a paragraph boundary;
 8. CRLF/mixed line endings outside replaced spans remain byte-identical;
 9. inclusive line scope changes only selected lines and counts only inside them;
-10. invalid/out-of-range scopes fail without writing;
+10. invalid/out-of-range scopes and boolean numeric inputs fail without writing;
 11. regex substitution supports capture-group replacement and exact expected count;
 12. invalid regex/replacement fails without writing;
 13. invalid UTF-8 fails without writing;
@@ -302,7 +306,8 @@ Cover:
 - mismatch exit 1/no mutation;
 - dry-run prints diff but does not write;
 - regex and line scope flags reach the domain behavior;
-- unsafe path is rejected;
+- unsafe repository-relative path is rejected;
+- negative expected count is rejected by argparse/domain validation;
 - output summary/diff is deterministic and traceback-free.
 
 ### Regression suite
@@ -315,7 +320,7 @@ After focused GREEN, run the complete standard suite on Python 3.10 and 3.12. No
 scripts/book.py
 scripts/workflow_v2/text_patch.py
 scripts/workflow_v2/patch_cli.py
-scripts/workflow_v2/__init__.py   # export domain API only if consistent with existing package surface
+scripts/workflow_v2/__init__.py
 
 tests/test_workflow_v2_text_patch.py
 tests/test_workflow_v2_patch_cli.py
@@ -332,7 +337,8 @@ No other production file should change unless a test proves an existing shared p
 - every acceptance criterion has deterministic automated coverage;
 - count mismatch/dry-run/conflict paths are proven no-write;
 - Unicode, paragraph-boundary and line-ending tests pass;
-- CLI can safely patch translation/glossary/generated repository text by relative path;
+- CLI can safely patch translation/glossary/generated repository text by repository-relative path;
+- domain helper is callable through the package-level Workflow v2 API without importing argparse;
 - full Python 3.10/3.12 matrix is green;
 - diff/PR/review-thread audit is clean;
 - branch is not behind integration;
