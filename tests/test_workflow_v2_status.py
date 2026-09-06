@@ -193,6 +193,38 @@ class WorkflowStatusTests(unittest.TestCase):
             {"metadata", "progress", "review_ledger"},
         )
 
+    def test_accept_review_uses_bounded_orchestrator_context(self):
+        status = self.resolver.status(
+            structural_errors=(),
+            corpus={"state": "verified", "source_sha256": "a" * 64},
+        )
+        unit = next(item for item in status["units"] if item["chapter_number"] == 2)
+        unit["review"] = "pass"
+        status["units"] = [
+            item for item in status["units"] if item["chapter_number"] != 2
+        ]
+        status["units"].insert(1, unit)
+
+        resume = self.resolver.resume(status)
+
+        self.assertEqual(resume["operation"], "accept_review")
+        self.assertEqual(resume["context"]["role"], "orchestrator")
+        self.assertEqual(resume["context"]["profile"], "orchestrator")
+        self.assertEqual(
+            resume["context"]["contracts"],
+            ["AGENTS.md", "docs/ORCHESTRATION.md"],
+        )
+        self.assertEqual(
+            resume["context"]["files"],
+            [
+                "metadata.json",
+                "progress.json",
+                "extracted/chapter-0002.md",
+                "translated/chapter-0002.md",
+                "review-ledger.json",
+            ],
+        )
+
     def test_resume_blocks_when_corpus_integrity_is_invalid(self):
         status = self.resolver.status(
             structural_errors=(),
