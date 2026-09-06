@@ -709,9 +709,15 @@ def validate_epub_bytes(content: bytes, *, expected_unit_count: int) -> dict[str
             raise EpubOutputError("EPUB OPF contains multiple cover-image items")
         if cover_items:
             cover_item = cover_items[0]
-            if cover_item.attrib.get("media-type") not in set(_COVER_MEDIA_TYPES.values()):
-                raise EpubOutputError("EPUB cover-image media type is unsupported")
             cover_path = _zip_member_path(opf_path, cover_item.attrib["href"], label="EPUB cover href")
+            suffix = PurePosixPath(cover_path).suffix.lower()
+            expected_media = _COVER_MEDIA_TYPES.get(suffix)
+            if expected_media is None:
+                raise EpubOutputError("EPUB cover-image extension is unsupported")
+            if cover_item.attrib.get("media-type") != expected_media:
+                raise EpubOutputError(
+                    f"EPUB cover-image media type must be {expected_media} for {suffix}"
+                )
             if cover_path not in names or not archive.read(cover_path):
                 raise EpubOutputError("EPUB cover-image resource is missing or empty")
 
