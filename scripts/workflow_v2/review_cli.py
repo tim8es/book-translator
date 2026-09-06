@@ -19,6 +19,7 @@ from .reviews import (
     ReviewResolution,
 )
 from .schemas import SchemaError, SchemaKind
+from .status_cli import register_status_commands
 from .storage import StorageError
 
 
@@ -210,7 +211,7 @@ def _positive_chapter(value: str) -> int:
 
 
 def register_review_commands(subparsers: argparse._SubParsersAction, root: Path) -> None:
-    """Register review evidence commands on the main book.py parser."""
+    """Register review evidence and read-only status/resume commands."""
 
     record = subparsers.add_parser("review-record", help="Record hash-bound Reviewer evidence.")
     record.add_argument("slug", help="Book slug under books/.")
@@ -231,3 +232,5 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
     accept.add_argument("chapter", type=_positive_chapter, help="Positive chapter number.")
     accept.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
     accept.set_defaults(func=lambda args: accept_review_command(args, root))
+
+    register_status_commands(subparsers, root, error_factory=ReviewCliError)
