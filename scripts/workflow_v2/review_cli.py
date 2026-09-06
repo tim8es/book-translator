@@ -11,6 +11,7 @@ from typing import Any
 
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
+from .review_report import build_review_report_snapshot, render_review_report_markdown
 from .reviews import (
     AcceptReviewResult,
     ReviewError,
@@ -20,7 +21,15 @@ from .reviews import (
 )
 from .schemas import SchemaError, SchemaKind
 from .status_cli import register_status_commands
-from .storage import StorageError
+from .storage import (
+    StorageAlreadyExists,
+    StorageError,
+    StorageNotFound,
+    StorageVersionConflict,
+)
+
+
+REVIEW_REPORT_PATH = "REVIEW_REPORT.md"
 
 
 class ReviewCliError(RuntimeError):
@@ -129,6 +138,32 @@ def _accept_json(result: AcceptReviewResult) -> dict[str, Any]:
     }
 
 
+def _write_review_report(book_dir: Path, markdown: str) -> str:
+    storage = FilesystemStorage(book_dir)
+    content = markdown.encode("utf-8")
+    try:
+        current = storage.read(REVIEW_REPORT_PATH)
+    except StorageNotFound:
+        try:
+            storage.create_if_absent(REVIEW_REPORT_PATH, content)
+        except StorageAlreadyExists as exc:
+            raise ReviewCliError("review report changed concurrently; rerun generation") from exc
+        except StorageError as exc:
+            raise ReviewCliError(f"cannot create {REVIEW_REPORT_PATH}: {exc}") from exc
+        return "generated"
+
+    if current.content == content:
+        return "unchanged"
+
+    try:
+        storage.write_if_version(REVIEW_REPORT_PATH, content, current.version)
+    except StorageVersionConflict as exc:
+        raise ReviewCliError("review report changed concurrently; rerun generation") from exc
+    except StorageError as exc:
+        raise ReviewCliError(f"cannot update {REVIEW_REPORT_PATH}: {exc}") from exc
+    return "updated"
+
+
 def review_record_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
@@ -182,6 +217,31 @@ def reviews_command(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def review_report_command(args: argparse.Namespace, root: Path) -> int:
+    book_dir, repository = _repository(root, args.slug)
+    progress, _ = _load_progress(repository)
+    metadata = _load_metadata(repository)
+    manager = _manager(book_dir, repository)
+    try:
+        snapshot = build_review_report_snapshot(manager, progress, metadata)
+        if not args.json:
+            markdown = render_review_report_markdown(snapshot)
+    except (ReviewError, SchemaError, RepositoryError, StorageError, ValueError) as exc:
+        raise ReviewCliError(str(exc)) from exc
+
+    if args.json:
+        _print_json(snapshot)
+        return 0
+
+    disposition = _write_review_report(book_dir, markdown)
+    coverage = snapshot["summary"]["pass_coverage"]
+    print(
+        f"{disposition} books/{args.slug}/{REVIEW_REPORT_PATH} "
+        f"pass={coverage['passed']}/{coverage['total']}"
+    )
+    return 0
+
+
 def accept_review_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
@@ -226,6 +286,18 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
     reviews.add_argument("slug", help="Book slug under books/.")
     reviews.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
     reviews.set_defaults(func=lambda args: reviews_command(args, root))
+
+    report = subparsers.add_parser(
+        "review-report",
+        help="Generate deterministic review coverage evidence from the review ledger.",
+    )
+    report.add_argument("slug", help="Book slug under books/.")
+    report.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit deterministic machine-readable JSON without writing REVIEW_REPORT.md.",
+    )
+    report.set_defaults(func=lambda args: review_report_command(args, root))
 
     accept = subparsers.add_parser("accept-review", help="Promote one chapter using current PASS evidence.")
     accept.add_argument("slug", help="Book slug under books/.")
