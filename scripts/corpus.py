@@ -17,6 +17,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 import book
@@ -29,6 +30,7 @@ from workflow_v2 import (
     WorkflowStateRepository,
 )
 from workflow_v2.schemas import SCHEMA_VERSION, parse_document
+from workflow_v2.source_cli import normalize_structural_errors, source_storage_mode
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -87,9 +89,6 @@ def write_source_manifest(
                 data,
             )
 
-        # `seal` intentionally replaces an existing manifest. Obtain the current
-        # raw revision without requiring the old manifest to be schema-valid, so
-        # resealing can repair a malformed prior manifest while still using CAS.
         if manifest_path(book_dir).is_file():
             current = repository.storage.read("source-manifest.json")
             return repository.write_if_version(
@@ -138,11 +137,43 @@ def normalized_expected_sha(value: str | None, label: str) -> str | None:
     return normalized
 
 
+def _explicit_source(metadata: Mapping[str, object]) -> Mapping[str, object] | None:
+    source = metadata.get("source")
+    return source if isinstance(source, Mapping) else None
+
+
+def _assert_source_matches_metadata(source: Path, metadata: dict) -> tuple[str, int | None, str | None]:
+    actual_sha = sha256_path(source)
+    explicit = _explicit_source(metadata)
+    if explicit is None:
+        return actual_sha, None, None
+
+    expected_filename = explicit.get("filename")
+    if source.name != expected_filename:
+        raise book.BookError(
+            f"Source filename mismatch: expected {expected_filename!r}, got {source.name!r}"
+        )
+    expected_size = explicit.get("size_bytes")
+    actual_size = source.stat().st_size
+    if actual_size != expected_size:
+        raise book.BookError(f"Source size mismatch: expected {expected_size}, got {actual_size}")
+    expected_sha = normalized_expected_sha(
+        explicit.get("sha256") if isinstance(explicit.get("sha256"), str) else None,
+        "metadata source sha256",
+    )
+    if actual_sha != expected_sha:
+        raise book.BookError(f"Source SHA-256 mismatch: expected {expected_sha}, got {actual_sha}")
+    return actual_sha, int(expected_size), str(explicit.get("storage_mode"))
+
+
 def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path) -> dict:
     chapters = progress.get("chapters")
     if not isinstance(chapters, list):
         raise book.BookError("progress.json must contain a chapters array")
+    if not source.is_file():
+        raise book.BookError(f"Source file does not exist: {source}")
 
+    source_sha, source_size, storage_mode = _assert_source_matches_metadata(source, metadata)
     extracted: list[dict] = []
     for record in chapters:
         if not isinstance(record, dict):
@@ -160,17 +191,21 @@ def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path)
             }
         )
 
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "source_file": metadata.get("source_file"),
         "source_format": metadata.get("source_format"),
-        "source_sha256": sha256_path(source),
+        "source_sha256": source_sha,
         "chapter_count": len(extracted),
         "extracted": extracted,
     }
+    if storage_mode is not None:
+        result["source_storage_mode"] = storage_mode
+        result["source_size_bytes"] = source_size
+    return result
 
 
-def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) -> tuple[str, int]:
+def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) -> dict:
     try:
         data = parse_document(SchemaKind.SOURCE_MANIFEST, data).data
     except SchemaError as exc:
@@ -180,6 +215,23 @@ def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) 
         raise book.BookError("source-manifest.json source_file disagrees with metadata.json")
     if data.get("source_format") != metadata.get("source_format"):
         raise book.BookError("source-manifest.json source_format disagrees with metadata.json")
+
+    explicit = _explicit_source(metadata)
+    if explicit is not None:
+        expected_mode = explicit.get("storage_mode")
+        expected_size = explicit.get("size_bytes")
+        expected_metadata_sha = normalized_expected_sha(
+            explicit.get("sha256") if isinstance(explicit.get("sha256"), str) else None,
+            "metadata source sha256",
+        )
+        if data.get("source_storage_mode") != expected_mode:
+            raise book.BookError("source-manifest.json source_storage_mode disagrees with metadata.json")
+        if data.get("source_size_bytes") != expected_size:
+            raise book.BookError("source-manifest.json source_size_bytes disagrees with metadata.json")
+    else:
+        expected_mode = "legacy_embedded"
+        expected_size = None
+        expected_metadata_sha = None
 
     chapters = progress.get("chapters")
     if not isinstance(chapters, list):
@@ -198,15 +250,25 @@ def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) 
     )
     if not expected_source_sha:
         raise book.BookError("source-manifest.json source_sha256 is missing")
+    if expected_metadata_sha is not None and expected_source_sha != expected_metadata_sha:
+        raise book.BookError("source-manifest.json source_sha256 disagrees with metadata.json")
 
     source = source_file_path(book_dir, metadata)
-    if not source.is_file():
+    source_attached = source.is_file()
+    if expected_mode in {"embedded", "legacy_embedded"} and not source_attached:
         raise book.BookError(f"Preserved source is missing: {source.relative_to(book_dir).as_posix()}")
-    actual_source_sha = sha256_path(source)
-    if actual_source_sha != expected_source_sha:
-        raise book.BookError(
-            f"Preserved source hash mismatch: expected {expected_source_sha}, got {actual_source_sha}"
-        )
+    if source_attached:
+        if expected_size is not None:
+            actual_size = source.stat().st_size
+            if actual_size != expected_size:
+                raise book.BookError(
+                    f"Preserved source size mismatch: expected {expected_size}, got {actual_size}"
+                )
+        actual_source_sha = sha256_path(source)
+        if actual_source_sha != expected_source_sha:
+            raise book.BookError(
+                f"Preserved source hash mismatch: expected {expected_source_sha}, got {actual_source_sha}"
+            )
 
     for record, item in zip(chapters, items):
         if not isinstance(record, dict):
@@ -241,16 +303,29 @@ def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) 
                 f"Extracted artifact hash mismatch for {rel_text}: expected {expected_sha}, got {actual_sha}"
             )
 
-    return expected_source_sha, len(items)
+    return {
+        "state": "verified",
+        "storage_mode": expected_mode,
+        "source_file": metadata.get("source_file"),
+        "source_sha256": expected_source_sha,
+        "source_size_bytes": expected_size,
+        "source_attached": source_attached,
+        "chapter_count": len(items),
+    }
 
 
 def seal_command(args: argparse.Namespace) -> int:
+    book_dir, metadata, progress = book.load_book(args.slug)
     errors, _ = book.validate_book(args.slug)
+    errors = normalize_structural_errors(book_dir, metadata, errors)
     if errors:
         raise book.BookError("Cannot seal invalid book structure:\n- " + "\n- ".join(errors))
 
-    book_dir, metadata, progress = book.load_book(args.slug)
     source = source_file_path(book_dir, metadata)
+    if not source.is_file():
+        raise book.BookError(
+            f"Cannot seal without the exact source binary: {source.relative_to(book_dir).as_posix()}"
+        )
     data = build_manifest(book_dir, metadata, progress, source)
     write_source_manifest(book_dir, data)
     print(
@@ -261,19 +336,20 @@ def seal_command(args: argparse.Namespace) -> int:
 
 
 def verify_command(args: argparse.Namespace) -> int:
+    book_dir, metadata, progress = book.load_book(args.slug)
     errors, _ = book.validate_book(args.slug)
+    errors = normalize_structural_errors(book_dir, metadata, errors)
     if errors:
         raise book.BookError("Cannot verify invalid book structure:\n- " + "\n- ".join(errors))
 
-    book_dir, metadata, progress = book.load_book(args.slug)
     data = load_source_manifest(book_dir)
     if data is None:
         raise book.BookError("source-manifest.json is missing; seal the corpus before verification")
 
-    source_sha, chapter_count = verify_manifest(book_dir, metadata, progress, data)
+    verified = verify_manifest(book_dir, metadata, progress, data)
     print(
         f"Verified source corpus for books/{args.slug}: "
-        f"{chapter_count} extracted artifact(s), SHA-256 {source_sha}"
+        f"{verified['chapter_count']} extracted artifact(s), SHA-256 {verified['source_sha256']}"
     )
     return 0
 
@@ -372,6 +448,10 @@ def restore_command(args: argparse.Namespace) -> int:
             "chapter_count": len(manifest_items),
             "extracted": manifest_items,
         }
+        explicit = _explicit_source(metadata)
+        if explicit is not None:
+            new_manifest["source_storage_mode"] = explicit.get("storage_mode")
+            new_manifest["source_size_bytes"] = explicit.get("size_bytes")
         try:
             new_manifest = parse_document(SchemaKind.SOURCE_MANIFEST, new_manifest).data
         except SchemaError as exc:
@@ -409,6 +489,7 @@ def restore_command(args: argparse.Namespace) -> int:
                 shutil.rmtree(backup_dir)
 
     errors, _ = book.validate_book(args.slug)
+    errors = normalize_structural_errors(book_dir, metadata, errors)
     if errors:
         raise book.BookError("Restored corpus but book validation still fails:\n- " + "\n- ".join(errors))
     verify_manifest(book_dir, metadata, progress, new_manifest)
