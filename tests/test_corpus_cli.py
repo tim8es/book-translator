@@ -109,7 +109,7 @@ class CorpusCliTests(unittest.TestCase):
             handle.write(b"tampered")
 
         result = self.run_cli("corpus.py", "verify", "sample", expect=1)
-        self.assertIn("Preserved source hash mismatch", result.stderr)
+        self.assertIn("Preserved source size mismatch", result.stderr)
 
     def test_restore_rebuilds_complete_corpus_without_mutating_translation_state(self):
         source = self.repo / "sample.epub"
