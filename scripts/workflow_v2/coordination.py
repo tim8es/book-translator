@@ -50,7 +50,7 @@ def _format_utc(value: datetime) -> str:
 
 
 class BookCoordinationManager:
-    """Serialize short claim/finalize admission transitions."""
+    """Serialize short claim/finalize/upgrade admission transitions."""
 
     def __init__(
         self,
@@ -88,8 +88,11 @@ class BookCoordinationManager:
         session_id: str,
         lease_seconds: int = 60,
     ) -> CoordinationLease:
-        if operation not in {"claim_admission", "finalize_admission"}:
-            raise CoordinationError("operation must be claim_admission or finalize_admission")
+        allowed = {"claim_admission", "finalize_admission", "workflow_upgrade"}
+        if operation not in allowed:
+            raise CoordinationError(
+                "operation must be claim_admission, finalize_admission, or workflow_upgrade"
+            )
         if not isinstance(session_id, str) or not session_id.strip():
             raise CoordinationError("session_id must be a non-empty string")
         if type(lease_seconds) is not int or lease_seconds <= 0:
