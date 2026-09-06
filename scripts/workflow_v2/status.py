@@ -6,9 +6,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from .claims import ClaimManager, canonical_unit_id
-from .repository import WorkflowStateRepository
+from .coordination import FINALIZATION_PATH
+from .repository import RepositoryError, WorkflowStateRepository
 from .reviews import REVIEW_EVIDENCE_VERSION, ReviewEvidenceError, ReviewLedgerManager
-from .schemas import SchemaKind
+from .schemas import SchemaError, SchemaKind
 from .storage import StorageError, StorageNotFound
 
 
@@ -79,6 +80,25 @@ class StatusResolver:
         elif corpus_state == "invalid":
             detail = corpus_data.get("error")
             errors.append(str(detail) if detail else "source corpus integrity is invalid")
+
+        finalization: dict[str, Any] = {"active": False}
+        try:
+            marker = self.repository.read(FINALIZATION_PATH, SchemaKind.FINALIZATION_LOCK).data
+        except StorageNotFound:
+            pass
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            errors.append(f"finalization state is unavailable or invalid: {exc}")
+        else:
+            finalization = {
+                "active": True,
+                "phase": marker["phase"],
+                "workflow_revision": marker["workflow_revision"],
+                "started_at": marker["started_at"],
+            }
+            if marker.get("book_slug") != progress.get("book_slug"):
+                errors.append("finalization marker book_slug does not match progress")
+            if workflow_revision is None or marker.get("workflow_revision") != workflow_revision:
+                errors.append("finalization marker workflow revision does not match metadata")
 
         lifecycle = {state: 0 for state in _LIFECYCLE_STATES}
         chapters = progress.get("chapters")
@@ -185,6 +205,7 @@ class StatusResolver:
             "reviews": reviews,
             "claims": claims,
             "corpus": corpus_data,
+            "finalization": finalization,
             "units": units,
             "state_revisions": revisions,
         }
@@ -201,6 +222,14 @@ class StatusResolver:
                 "reason": "preflight_failed",
                 "errors": list(status.get("errors") or ()),
                 "context": self._context("blocked", None, status),
+            }
+
+        finalization = status.get("finalization")
+        if isinstance(finalization, Mapping) and finalization.get("active") is True:
+            return {
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "operation": "finalize",
+                "context": self._context("finalize", None, status),
             }
 
         claims_by_unit = {
@@ -305,8 +334,10 @@ class StatusResolver:
             if operation in {"review", "correct_translation", "accept_review"}:
                 if isinstance(translation_path, str) and translation_path:
                     files.append(translation_path)
-        if operation in {"accept_review", "complete"}:
+        if operation in {"accept_review", "complete", "finalize"}:
             files.append("review-ledger.json")
+        if operation == "finalize":
+            files.append(FINALIZATION_PATH)
 
         return {
             "role": role,
