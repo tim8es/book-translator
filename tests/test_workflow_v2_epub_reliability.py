@@ -15,7 +15,6 @@ SCRIPTS = PROJECT_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from workflow_v2.epub_cli import _build_identity, _cover_payload, _unit_payloads
 from workflow_v2.epub_output import build_epub_bytes, validate_epub_bytes
 
 
@@ -134,6 +133,31 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
         book = self.repo / "books" / slug
         return book / "output" / f"{slug}.epub", book / "output" / "manifest.json"
 
+    def replacement_epub(self, book, slug="sample"):
+        metadata = json.loads((book / "metadata.json").read_text(encoding="utf-8"))
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        units = []
+        for chapter in progress["chapters"]:
+            units.append(
+                {
+                    "number": chapter["number"],
+                    "title": chapter["title"],
+                    "slug": chapter["slug"],
+                    "markdown": (book / chapter["translation_path"]).read_text(encoding="utf-8"),
+                }
+            )
+        content = build_epub_bytes(
+            book_slug=slug,
+            title="Interrupted replacement artifact",
+            author=metadata.get("author"),
+            language=metadata["target_language"],
+            units=units,
+            fingerprint="f" * 64,
+            cover=None,
+        )
+        validate_epub_bytes(content, expected_unit_count=len(units))
+        return content
+
     def test_incomplete_final_build_preserves_existing_artifact_and_manifest(self):
         book = self.initialize_final_book()
         artifact, manifest = self.build()
@@ -150,29 +174,16 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
         self.assertEqual(artifact.read_bytes(), before_artifact)
         self.assertEqual(manifest.read_bytes(), before_manifest)
 
-    def test_crash_after_artifact_replace_is_detected_and_clean_rerun_repairs_manifest(self):
+    def test_crash_after_artifact_replace_is_detected_and_clean_rerun_repairs_output(self):
         book = self.initialize_final_book()
         artifact, manifest = self.build()
-        old_manifest = manifest.read_bytes()
+        original_artifact = artifact.read_bytes()
+        original_manifest = manifest.read_bytes()
 
-        metadata_path = book / "metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["title"] = "Changed after first build"
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-        context = _build_identity(self.repo, "sample", preview=False, strict=True)
-        new_bytes = build_epub_bytes(
-            book_slug="sample",
-            title=context["metadata"].data["title"],
-            author=context["metadata"].data.get("author"),
-            language=context["metadata"].data["target_language"],
-            units=_unit_payloads(context),
-            fingerprint=context["fingerprint"],
-            cover=_cover_payload(context),
-        )
-        validate_epub_bytes(new_bytes, expected_unit_count=1)
-        artifact.write_bytes(new_bytes)
-        self.assertEqual(manifest.read_bytes(), old_manifest)
+        replacement = self.replacement_epub(book)
+        self.assertNotEqual(replacement, original_artifact)
+        artifact.write_bytes(replacement)
+        self.assertEqual(manifest.read_bytes(), original_manifest)
 
         interrupted = self.status(expect=1)
         self.assertEqual(interrupted["state"], "invalid")
@@ -180,9 +191,10 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
         self.run_cli("build", "sample", "--format", "epub")
         repaired = self.status()
         self.assertEqual(repaired["state"], "current")
-        self.assertNotEqual(manifest.read_bytes(), old_manifest)
+        self.assertEqual(artifact.read_bytes(), original_artifact)
+        self.assertEqual(manifest.read_bytes(), original_manifest)
 
-    def test_relevant_metadata_order_cover_translation_and_review_changes_are_non_current(self):
+    def test_relevant_metadata_cover_translation_and_review_changes_are_stale_but_order_tamper_is_invalid(self):
         cases = ("metadata", "order", "cover", "translation", "review")
         for case in cases:
             with self.subTest(case=case):
@@ -239,8 +251,13 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
                     )
                     self.run_cli("release", slug, "1", "--session-id", "reviewer-change", "--json")
 
-                changed = self.status(slug)
-                self.assertEqual(changed["state"], "stale", changed)
+                if case == "order":
+                    changed = self.status(slug, expect=1)
+                    self.assertEqual(changed["state"], "invalid", changed)
+                    self.assertIn("source corpus must be verified", changed["reason"])
+                else:
+                    changed = self.status(slug)
+                    self.assertEqual(changed["state"], "stale", changed)
 
     def test_semantically_duplicate_pass_evidence_does_not_make_output_stale(self):
         self.initialize_final_book()
