@@ -99,6 +99,33 @@ class WorkflowV2ReviewLedgerSchemaTests(unittest.TestCase):
         with self.assertRaises(SchemaError):
             parse_document(SchemaKind.REVIEW_LEDGER, ledger)
 
+    def test_rejects_inconsistent_correction_round_history(self):
+        first_pass = self.ledger()
+        first_pass["records"][0]["correction_round"] = 1
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.REVIEW_LEDGER, first_pass)
+
+        first_correction = self.ledger()
+        first_correction["records"][0]["outcome"] = "CORRECTIONS_REQUIRED"
+        first_correction["records"][0]["correction_round"] = 0
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.REVIEW_LEDGER, first_correction)
+
+        history = self.ledger()
+        history["records"][0]["outcome"] = "CORRECTIONS_REQUIRED"
+        history["records"][0]["correction_round"] = 1
+        second = self.record(
+            record_id="0" * 31 + "2",
+            sequence=2,
+            outcome="PASS",
+            supersedes=history["records"][0]["record_id"],
+        )
+        second["correction_round"] = 0
+        history["records"].append(second)
+        history["next_sequence"] = 3
+        with self.assertRaises(SchemaError):
+            parse_document(SchemaKind.REVIEW_LEDGER, history)
+
     def test_rejects_non_monotonic_history_and_invalid_record_fields(self):
         ledger = self.ledger()
         first = ledger["records"][0]
