@@ -231,7 +231,7 @@ class WorkflowV2FinalizeCliTests(unittest.TestCase):
     def test_finalize_failure_is_clean_and_does_not_partially_promote(self):
         for scenario in ("malformed-ledger", "invalid-corpus"):
             with self.subTest(scenario=scenario):
-                slug = scenario.replace("-", "_")
+                slug = scenario
                 book = self.initialize_ready_book(slug)
                 progress_path = book / "progress.json"
                 before = progress_path.read_bytes()
