@@ -13,6 +13,7 @@ Allow an existing book workspace to adopt the currently installed Workflow v2 re
 - Validate legacy state before mutation, construct the complete target state in memory, validate target state, then apply through backend-neutral CAS.
 - Add durable crash recovery/rollback for multi-document migration.
 - Record previous/new workflow revisions in metadata only after all other target documents are durably migrated.
+- Make unfinished migration visible to fresh status/resume and block competing workflow transitions while recovery is required.
 - Extend #18 with migration failure-injection/idempotence coverage.
 
 Out of scope:
@@ -43,8 +44,10 @@ Alternatives rejected:
 
 - `workflow_v2/migrations.py`: version detection, pure migration steps, compatibility planning, journal model and transaction executor. No argparse and no filesystem-specific logic.
 - `workflow_v2/migrations_cli.py`: resolve book/runtime provenance, register `workflow-upgrade`, render deterministic JSON/human result.
-- `schemas.py`: add only the transient migration-journal schema kind/validator required for authoritative crash recovery. Existing v1 validators remain authoritative for migrated documents.
-- Existing `StorageBackend` / `WorkflowStateRepository`: all writes use `create_if_absent`, `write_if_version` or `delete_if_version`.
+- `schemas.py`: add the transient `MIGRATION_JOURNAL` schema kind/validator and extend the existing coordination-lock operation enum with `workflow_upgrade`; existing v1 document validators remain authoritative.
+- `coordination.py`: admit `workflow_upgrade` and expose whether a migration journal is active.
+- claims/finalize/review promotion/status: reject or route around active migration journal so an interrupted migration cannot be bypassed after the short coordination lease expires.
+- Existing `StorageBackend` / `WorkflowStateRepository`: all durable writes use `create_if_absent`, `write_if_version` or `delete_if_version`.
 
 ## Version model
 
@@ -71,7 +74,7 @@ If validation fails, return a precise compatibility error identifying document/p
 
 ### Explicit v1
 
-Already-v1 documents are validated and retained byte-semantically; upgrade planning may still update metadata workflow provenance/history at the end.
+Already-v1 documents are strictly validated. They are not rewritten merely to normalize formatting; they participate in the transaction only when cross-document compatibility requires an actual target change (for example metadata provenance/history or lifecycle downgrade).
 
 Explicit schema versions other than 1 are unsupported by this release and fail before any write.
 
@@ -79,7 +82,7 @@ Explicit schema versions other than 1 are unsupported by this release and fail b
 
 `workflow-upgrade --to <revision>` never treats user text as proof that migration code for that revision is installed.
 
-The CLI resolves the current installed workflow provenance from `.book-translator-install.json` using the same canonical fields as extraction:
+The CLI resolves current installed workflow provenance from `.book-translator-install.json` using the same canonical fields as extraction:
 
 - canonical repository;
 - requested ref;
@@ -94,9 +97,9 @@ Requirements:
 
 A target that differs from the installed revision fails before writes. This prevents false provenance claims.
 
-## Upgrade history
+## Upgrade history and no-op semantics
 
-On successful upgrade, `metadata.workflow` is updated last and contains the installed repository/requested-ref/resolved-revision plus append-only `upgrade_history`.
+On successful changed upgrade, `metadata.workflow` is updated last and contains the installed repository/requested-ref/resolved-revision, `review_evidence: "review-ledger-v1"`, and append-only `upgrade_history`.
 
 Each new history entry is deterministic data:
 
@@ -114,13 +117,22 @@ Each new history entry is deterministic data:
 }
 ```
 
-Only families actually present/migrated are included. No wall-clock timestamp is required; Git/state revisions remain secondary audit evidence. Re-running an already completed upgrade to the same installed revision is a deterministic no-op and does not append another history entry.
+Only families actually present/migrated are included. No wall-clock timestamp is required.
+
+A command is a true no-op only when:
+
+- no migration journal exists;
+- every targeted durable document is already strict v1 and cross-document valid;
+- no source/review compatibility repair is required; and
+- metadata already resolves to the requested installed revision with the v1 review-evidence marker.
+
+That no-op does not rewrite bytes or append history. If schema migration/repair is still required even when the workflow revision string already equals the target, the command performs a changed upgrade and records an entry (the from/to revision strings may therefore be equal while schema versions change).
 
 ## Document discovery and raw reads
 
 Upgrade planning cannot use only schema-aware repository reads because legacy review ledgers/claims/source manifests intentionally fail current parsing.
 
-The migration planner reads exact bytes through `StorageBackend`, decodes strict UTF-8 JSON and records the storage revision for every candidate document. It discovers:
+The planner reads exact bytes through `StorageBackend`, decodes strict UTF-8 JSON and records the storage revision for every candidate document. It discovers:
 
 - `metadata.json` (required);
 - `progress.json` (required);
@@ -136,9 +148,9 @@ Machine review evidence must never be fabricated.
 
 Rules:
 
-- If a review ledger exists, it must be explicit/v0-compatible and every migrated record must validate as v1.
+- If a review ledger exists, it must be v0-compatible or strict v1 and every migrated record must validate as v1.
 - If the legacy book has no review ledger, create an empty v1 ledger for the same book slug.
-- For every chapter whose progress status is `reviewed`, resolve current review evidence against exact source/translation bytes using the migrated v1 ledger.
+- For every chapter whose progress status is `reviewed`, resolve current review evidence against exact source/translation bytes using the candidate migrated v1 ledger.
 - If current PASS exists, `reviewed` may remain.
 - If current PASS is missing/stale/unprovable, migrate that chapter to `translated` when a non-empty translation artifact exists.
 - If a supposedly reviewed unit has no valid translation artifact, compatibility fails instead of inventing lifecycle state.
@@ -147,17 +159,17 @@ Thus legacy human-reviewed work can be retained as translation content, but it m
 
 ## Source/corpus compatibility
 
-Source integrity is also never fabricated.
+Source integrity is never fabricated.
 
-If `source-manifest.json` exists, its v0/v1 form must validate after migration and its hashes must match current source/extracted bytes under the normal corpus verifier.
+If `source-manifest.json` exists, its v0/v1 form must validate after migration and its hashes must match current source/extracted bytes under normal corpus verification.
 
 If the manifest is absent:
 
-- embedded source: build a v1 source manifest only from the actual declared source file and all referenced extracted artifacts using `build_source_manifest`; exact bytes/hashes become the authority;
-- explicit `private_external`: an absent source binary can be accepted only if metadata already contains complete explicit source identity (`filename`, `size_bytes`, `sha256`) and the extracted corpus can be sealed without inventing source bytes. The migration builds the manifest identity from that explicit metadata plus exact extracted hashes;
+- embedded source: build a v1 source manifest only from the actual declared source file and all referenced extracted artifacts; exact bytes/hashes become authority;
+- explicit `private_external`: an absent source binary is accepted only if metadata already contains complete explicit source identity (`filename`, `size_bytes`, `sha256`) and every referenced extracted artifact is present. Candidate manifest source identity comes directly from metadata, while extracted hashes come from exact files; no source bytes/hash are synthesized;
 - if source identity or any extracted artifact cannot be proven, compatibility fails before writes.
 
-The planner then runs the standard corpus verification against the candidate migrated manifest.
+The planner validates the candidate manifest against metadata and exact extracted/source availability using the same source-integrity policy as normal status/finalize.
 
 ## Claims compatibility and admission gate
 
@@ -167,12 +179,28 @@ Before mutation:
 
 - active finalization marker blocks upgrade;
 - active/live claims block upgrade;
-- expired claims may be migrated as durable audit-relevant state, but are not revived or extended;
+- expired claims may be schema-migrated as durable state but are not revived or extended;
 - malformed/unprovable legacy claims fail compatibility.
 
-Upgrade obtains the existing book coordination mutex with operation `workflow_upgrade` before creating the migration journal. Claim admission therefore cannot race into the transition.
+The planner classifies claim expiry from the existing lease timestamps using an injected UTC clock; no sleep-based tests are required.
+
+Upgrade obtains the existing coordination mutex with operation `workflow_upgrade` before creating the migration journal. #16 extends both the coordination schema validator and `BookCoordinationManager.acquire()` allowed-operation set accordingly.
 
 After acquiring the mutex, the planner re-reads all candidate document revisions and admission state. Any mismatch aborts before target writes.
+
+## Active migration visibility
+
+`.workflow/migration.json` is authoritative while present, including after the short coordination lease expires.
+
+Therefore:
+
+- claim acquisition rejects while a migration journal exists;
+- finalize rejects while a migration journal exists;
+- `accept_review` rejects while a migration journal exists;
+- fresh `status` exposes migration recovery state;
+- fresh `resume` prioritizes `operation: "workflow_upgrade"` with bounded recovery context rather than suggesting translate/review/finalize work.
+
+Read-only status/resume do not mutate the journal. Other out-of-band file edits cannot be physically prevented by the filesystem backend; recovery hash classification detects them and fails closed rather than overwriting unknown bytes.
 
 ## Durable migration journal
 
@@ -198,9 +226,9 @@ Each document entry contains:
 - SHA-256 of canonical target bytes;
 - resulting storage revision once written, or null.
 
-The journal contains enough information to restore exact original JSON bytes without reparsing/re-serializing them.
+The journal contains enough information to restore exact original JSON bytes through raw storage primitives without reparsing/re-serializing them.
 
-Generated reports/EPUB outputs are not journaled because #16 does not rewrite them; after a successful upgrade they may naturally resolve stale through existing status/build logic.
+Generated reports/EPUB outputs are not journaled because #16 does not rewrite them; after a successful upgrade they may naturally resolve stale through existing output status logic.
 
 ## Transaction order
 
@@ -216,27 +244,29 @@ Write order is deterministic:
 
 For every existing document, write with the exact version captured during planning. New documents use create-if-absent.
 
-After each write, update the journal entry with the resulting revision using journal CAS.
+After each write, update the journal entry with the resulting revision using journal CAS. A crash after a document write but before its journal update is still recoverable because exact current bytes are classified by original/target hash.
 
 Metadata is last because it is the externally visible workflow pin. A book is not considered upgraded until metadata points at the new revision and the journal verifies every target hash.
 
 ## Crash and conflict recovery
 
-When `workflow-upgrade` starts and `.workflow/migration.json` exists, it recovers before planning a new transaction.
+When `workflow-upgrade` starts and `.workflow/migration.json` exists, it recovers before planning a new transaction. Recovery first acquires the `workflow_upgrade` coordination mutex; an unexpired mutex from a crashed process produces a deterministic conflict, while its normal expiry permits a later fresh process to recover.
 
 For every journal entry, read current exact bytes and classify:
 
 - equal target hash: target write completed;
 - equal original hash / originally absent: write not yet applied;
-- anything else: unknown concurrent mutation → fail closed, preserve journal for manual inspection.
+- anything else: unknown concurrent mutation → fail closed, preserve journal for inspection.
 
 Recovery behavior:
 
-- all documents target + metadata target: validate full migrated state, mark journal `applied`, then delete journal with CAS; return success/no-op;
+- all documents target + metadata target: validate full migrated state, mark journal `applied`, then delete journal with CAS; return success/recovered;
 - mixture only of known original/target states: restore every target-written path to its exact original bytes (or delete paths originally absent), metadata first during rollback, then other documents in reverse application order; verify original hashes; delete journal; then restart migration from fresh state;
 - unknown mutation: do not overwrite it and do not delete the journal.
 
-A normal CAS/write failure follows the same rollback path before returning an error. Failed migration therefore leaves the previous valid state usable whenever no unrelated concurrent mutation occurred.
+A normal CAS/write failure follows the same rollback path before returning an error. Failed migration therefore leaves the previous exact durable state usable whenever no unrelated concurrent mutation occurred.
+
+Rollback itself is crash-safe: if it stops midway, the same journal still classifies every path as original or target on the next recovery attempt.
 
 ## Final validation
 
@@ -258,7 +288,7 @@ Success JSON/human result includes:
 - book slug;
 - `from_revision`;
 - `to_revision`;
-- changed/no-op;
+- changed/no-op/recovered outcome;
 - migrated document paths/families;
 - lifecycle downgrades (`reviewed` → `translated`) when review evidence could not be proven.
 
@@ -271,9 +301,10 @@ The command never rewrites a book unless explicitly invoked.
 1. Pure version detection/migration registry and precise compatibility errors.
 2. Compatibility planner: installed target provenance, source reconstruction, review downgrade, claims/finalization gates.
 3. Durable transaction/journal: deterministic order, metadata-last, CAS rollback, crash recovery/idempotence.
-4. CLI `workflow-upgrade` end-to-end with representative legacy fixtures and no-op rerun.
-5. #18 migration reliability: crash after intermediate write, CAS conflict, unknown concurrent mutation fail-closed, successful recovery.
-6. Full Python 3.10/3.12 matrix and final diff/review/ancestry audit.
+4. Recovery visibility/admission: claims/finalize/accept-review/status/resume while migration journal exists.
+5. CLI `workflow-upgrade` end-to-end with representative legacy fixtures and no-op rerun.
+6. #18 migration reliability: crash after intermediate write, CAS conflict, unknown concurrent mutation fail-closed, successful fresh-session recovery.
+7. Full Python 3.10/3.12 matrix and final diff/review/ancestry audit.
 
 ## Acceptance criteria
 
@@ -284,8 +315,9 @@ The command never rewrites a book unless explicitly invoked.
 - Unknown/malformed legacy shapes fail precisely before mutation.
 - Legacy reviewed state without current machine PASS becomes translated, never fabricated reviewed/PASS.
 - Missing source manifest is reconstructed only from provable source identity and exact corpus bytes; otherwise upgrade fails.
-- Live claims/finalization prevent upgrade admission.
-- Successful upgrade records previous/new workflow revisions and does not duplicate history on rerun.
+- Live claims/finalization prevent upgrade admission; expired claims are not revived.
+- Active migration blocks competing claim/finalize/review promotion and is visible to fresh resume.
+- Successful upgrade records previous/new workflow revisions and does not duplicate history on true no-op rerun.
 - Failed/interrupted migration restores the previous exact durable state when changes are known; unknown concurrent mutation is never overwritten.
 - Recovery is deterministic from a fresh process using only repository state.
 - Standard Python suite covers migration behavior without GitHub Actions being required for execution.
