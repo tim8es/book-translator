@@ -44,6 +44,8 @@ class SchemaKind(str, Enum):
     REVIEW_LEDGER = "review_ledger"
     SOURCE_MANIFEST = "source_manifest"
     GENERATED_STATE = "generated_state"
+    COORDINATION_LOCK = "coordination_lock"
+    FINALIZATION_LOCK = "finalization_lock"
 
 
 LEGACY_COMPATIBLE_KINDS = {SchemaKind.METADATA, SchemaKind.PROGRESS}
@@ -383,6 +385,45 @@ def _validate_generated_state(data: Mapping[str, Any], schema: SchemaKind) -> No
     _require_mapping(data, "data", schema)
 
 
+def _validate_coordination_lock(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    lock_id = _require_nonempty_string(data, "lock_id", schema)
+    _validate_hex_id(lock_id, schema, "lock_id")
+    operation = _require_nonempty_string(data, "operation", schema)
+    if operation not in {"claim_admission", "finalize_admission"}:
+        raise _field(schema, "operation", "must be claim_admission or finalize_admission")
+    _require_nonempty_string(data, "session_id", schema)
+    acquired_at = _require_nonempty_string(data, "acquired_at", schema)
+    expires_at = _require_nonempty_string(data, "expires_at", schema)
+    acquired = _parse_utc_timestamp(acquired_at, schema, "acquired_at")
+    expires = _parse_utc_timestamp(expires_at, schema, "expires_at")
+    if expires <= acquired:
+        raise _field(schema, "expires_at", "must be later than acquired_at")
+
+
+def _validate_finalization_lock(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    lock_id = _require_nonempty_string(data, "lock_id", schema)
+    _validate_hex_id(lock_id, schema, "lock_id")
+    _require_nonempty_string(data, "book_slug", schema)
+    _require_nonempty_string(data, "workflow_revision", schema)
+    _require_nonempty_string(data, "base_progress_revision", schema)
+    candidate = _require_nonempty_string(data, "candidate_progress_sha256", schema)
+    _validate_sha256(candidate, schema, "candidate_progress_sha256")
+    phase = _require_nonempty_string(data, "phase", schema)
+    if phase not in {"preparing", "promoted"}:
+        raise _field(schema, "phase", "must be preparing or promoted")
+    if "promoted_progress_revision" not in data:
+        raise _field(schema, "promoted_progress_revision", "is required")
+    promoted_revision = data["promoted_progress_revision"]
+    if phase == "preparing":
+        if promoted_revision is not None:
+            raise _field(schema, "promoted_progress_revision", "must be null while phase is preparing")
+    elif not isinstance(promoted_revision, str) or not promoted_revision.strip():
+        raise _field(schema, "promoted_progress_revision", "must be a non-empty string while phase is promoted")
+    _require_nonempty_string(data, "session_id", schema)
+    started_at = _require_nonempty_string(data, "started_at", schema)
+    _parse_utc_timestamp(started_at, schema, "started_at")
+
+
 _VALIDATORS = {
     SchemaKind.METADATA: _validate_metadata,
     SchemaKind.PROGRESS: _validate_progress,
@@ -391,6 +432,8 @@ _VALIDATORS = {
     SchemaKind.REVIEW_LEDGER: _validate_review_ledger,
     SchemaKind.SOURCE_MANIFEST: _validate_source_manifest,
     SchemaKind.GENERATED_STATE: _validate_generated_state,
+    SchemaKind.COORDINATION_LOCK: _validate_coordination_lock,
+    SchemaKind.FINALIZATION_LOCK: _validate_finalization_lock,
 }
 
 

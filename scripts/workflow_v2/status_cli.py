@@ -61,8 +61,8 @@ def _resolver(root: Path, slug: str) -> StatusResolver:
     return StatusResolver(repository, artifact_reader=_artifact_reader(book_dir))
 
 
-def _default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str, Any]]:
-    """Reuse the existing structural and corpus validators without copying hash logic."""
+def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str, Any]]:
+    """Reuse existing structural and corpus validators without copying hash logic."""
 
     try:
         book_module = importlib.import_module("book")
@@ -102,6 +102,10 @@ def _default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[st
         return structural_errors, payload
 
     return structural_errors, dict(verified)
+
+
+# Private alias retained for callers that imported the pre-#12 helper directly.
+_default_preflight = default_preflight
 
 
 def _snapshot(
@@ -166,6 +170,8 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
             print(f"ERROR: {error}")
     elif payload["operation"] == "complete":
         print("next=complete")
+    elif payload["operation"] == "finalize":
+        print(f"next=finalize role={payload['context']['role']}")
     else:
         print(
             f"next={payload['operation']} unit={payload['unit_id']} "
@@ -192,10 +198,10 @@ def register_status_commands(
     preflight: Preflight | None = None,
     error_factory: ErrorFactory = StatusCliError,
 ) -> None:
-    """Register explicit-source overrides plus read-only status/resume commands."""
+    """Register explicit-source overrides, status/resume, and finalize orchestration."""
 
     register_source_overrides(subparsers, root, error_factory=error_factory)
-    resolved_preflight = preflight or (lambda slug: _default_preflight(root, slug))
+    resolved_preflight = preflight or (lambda slug: default_preflight(root, slug))
 
     status = subparsers.add_parser("status", help="Report repository-authoritative workflow status.")
     status.add_argument("slug", help="Book slug under books/.")
@@ -215,4 +221,14 @@ def register_status_commands(
             lambda args: resume_command(args, root, resolved_preflight),
             error_factory,
         )
+    )
+
+    # Imported lazily to keep finalize CLI independent of status CLI internals.
+    from .finalize_cli import register_finalize_command
+
+    register_finalize_command(
+        subparsers,
+        root,
+        preflight=resolved_preflight,
+        error_factory=error_factory,
     )
