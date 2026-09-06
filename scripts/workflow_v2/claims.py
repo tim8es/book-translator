@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from .coordination import BookCoordinationManager, CoordinationError
 from .repository import LoadedDocument, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaKind, parse_document
 from .storage import StorageAlreadyExists, StorageError, StorageNotFound, StorageVersionConflict
@@ -154,10 +155,15 @@ class ClaimManager:
         *,
         now: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
+        coordination: BookCoordinationManager | None = None,
     ):
         self.repository = repository
         self._now_factory = now or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: uuid4().hex)
+        self._coordination = coordination or BookCoordinationManager(
+            repository,
+            now=self._now_factory,
+        )
 
     def _now(self) -> datetime:
         value = self._now_factory()
@@ -214,44 +220,71 @@ class ClaimManager:
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise ClaimError("lease_seconds must be a positive integer")
 
-        for unit_id in unit_ids:
-            try:
-                self._read_claim(unit_id)
-            except StorageNotFound:
-                continue
-            raise ClaimConflict(unit_id)
-
-        claimed_at = self._now()
-        expires_at = claimed_at + timedelta(seconds=lease_seconds)
-        documents: list[tuple[str, dict[str, Any]]] = []
-        for unit_id in unit_ids:
-            document = {
-                "schema_version": SCHEMA_VERSION,
-                "claim_id": self._new_id(),
-                "unit_id": unit_id,
-                "role": role,
-                "session_id": session_id,
-                "base_revision": base_revision,
-                "base_commit": base_commit,
-                "workflow_revision": workflow_revision,
-                "claimed_at": _format_utc(claimed_at),
-                "expires_at": _format_utc(expires_at),
-            }
-            parse_document(SchemaKind.CLAIM, document)
-            documents.append((_claim_path(unit_id), document))
+        try:
+            admission = self._coordination.acquire(
+                operation="claim_admission",
+                session_id=session_id,
+            )
+        except CoordinationError as exc:
+            raise ClaimError(f"claim admission blocked: {exc}") from exc
 
         created: list[ActiveClaim] = []
-        for path, document in documents:
-            unit_id = document["unit_id"]
+        try:
             try:
-                version = self.repository.create(path, SchemaKind.CLAIM, document)
-            except StorageAlreadyExists as exc:
-                self._rollback_created(created, exc)
-                raise ClaimConflict(unit_id) from exc
-            except StorageError as exc:
-                self._rollback_created(created, exc)
-                raise
-            created.append(ActiveClaim(path=path, data=document, version=version))
+                if self._coordination.finalization_active():
+                    raise ClaimError("claim admission blocked while finalization is active")
+            except CoordinationError as exc:
+                raise ClaimError(f"claim admission blocked: {exc}") from exc
+
+            for unit_id in unit_ids:
+                try:
+                    self._read_claim(unit_id)
+                except StorageNotFound:
+                    continue
+                raise ClaimConflict(unit_id)
+
+            claimed_at = self._now()
+            expires_at = claimed_at + timedelta(seconds=lease_seconds)
+            documents: list[tuple[str, dict[str, Any]]] = []
+            for unit_id in unit_ids:
+                document = {
+                    "schema_version": SCHEMA_VERSION,
+                    "claim_id": self._new_id(),
+                    "unit_id": unit_id,
+                    "role": role,
+                    "session_id": session_id,
+                    "base_revision": base_revision,
+                    "base_commit": base_commit,
+                    "workflow_revision": workflow_revision,
+                    "claimed_at": _format_utc(claimed_at),
+                    "expires_at": _format_utc(expires_at),
+                }
+                parse_document(SchemaKind.CLAIM, document)
+                documents.append((_claim_path(unit_id), document))
+
+            for path, document in documents:
+                unit_id = document["unit_id"]
+                try:
+                    version = self.repository.create(path, SchemaKind.CLAIM, document)
+                except StorageAlreadyExists as exc:
+                    self._rollback_created(created, exc)
+                    raise ClaimConflict(unit_id) from exc
+                except StorageError as exc:
+                    self._rollback_created(created, exc)
+                    raise
+                created.append(ActiveClaim(path=path, data=document, version=version))
+        except Exception:
+            try:
+                self._coordination.release(admission)
+            except CoordinationError:
+                pass
+            raise
+
+        try:
+            self._coordination.release(admission)
+        except CoordinationError as exc:
+            self._rollback_created(created, exc)
+            raise ClaimError(f"claim admission could not release coordination mutex: {exc}") from exc
         return created
 
     def _rollback_created(self, created: list[ActiveClaim], cause: Exception) -> None:
