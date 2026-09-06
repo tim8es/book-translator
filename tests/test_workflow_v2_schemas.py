@@ -1,4 +1,5 @@
 import copy
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -228,6 +229,60 @@ class WorkflowV2SchemaTests(unittest.TestCase):
         with self.assertRaises(SchemaError) as ctx:
             parse_document(SchemaKind.SOURCE_MANIFEST, data)
         self.assertIn("source_sha256", str(ctx.exception))
+
+    def test_explicit_source_contract_is_enforced_by_schema_api(self):
+        self.require_api()
+        invalid_metadata = self.valid_metadata()
+        invalid_metadata["source"] = {
+            "storage_mode": "private_external",
+            "filename": "wrong.md",
+            "size_bytes": 10,
+            "sha256": "a" * 64,
+        }
+        invalid_manifest = {
+            "schema_version": 1,
+            "source_file": "example.md",
+            "source_format": "markdown",
+            "source_sha256": "a" * 64,
+            "source_storage_mode": "private_external",
+            "chapter_count": 0,
+            "extracted": [],
+        }
+        code = f"""
+import sys
+sys.path.insert(0, {str(SCRIPTS)!r})
+from workflow_v2.schemas import SchemaError, SchemaKind, parse_document
+
+metadata = {invalid_metadata!r}
+manifest = {invalid_manifest!r}
+
+try:
+    parse_document(SchemaKind.METADATA, metadata)
+except SchemaError as exc:
+    if "source.filename" not in str(exc):
+        raise SystemExit(f"unexpected metadata error: {{exc}}")
+else:
+    raise SystemExit("clean schema API accepted invalid explicit-source metadata")
+
+try:
+    parse_document(SchemaKind.SOURCE_MANIFEST, manifest)
+except SchemaError as exc:
+    if "source_size_bytes" not in str(exc):
+        raise SystemExit(f"unexpected manifest error: {{exc}}")
+else:
+    raise SystemExit("clean schema API accepted invalid explicit-source manifest")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
 
     def test_legacy_metadata_and_progress_are_normalized_in_memory_only(self):
         self.require_api()
