@@ -29,7 +29,9 @@ class WorkflowStateRepository:
         self.storage = storage
 
     @staticmethod
-    def _serialize(path: str, schema: SchemaKind, data: Mapping[str, object]) -> bytes:
+    def serialize(path: str, schema: SchemaKind, data: Mapping[str, object]) -> bytes:
+        """Return the exact canonical UTF-8 bytes used by repository writes."""
+
         parsed = parse_document(schema, data)
         try:
             text = json.dumps(
@@ -72,7 +74,7 @@ class WorkflowStateRepository:
         schema: SchemaKind,
         data: Mapping[str, object],
     ) -> str:
-        content = self._serialize(path, schema, data)
+        content = self.serialize(path, schema, data)
         return self.storage.create_if_absent(path, content)
 
     def write_if_version(
@@ -82,7 +84,7 @@ class WorkflowStateRepository:
         data: Mapping[str, object],
         expected_version: str,
     ) -> str:
-        content = self._serialize(path, schema, data)
+        content = self.serialize(path, schema, data)
         return self.storage.write_if_version(path, content, expected_version)
 
     def delete_if_version(
