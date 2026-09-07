@@ -194,8 +194,9 @@ class WorkflowV2MigrationsCliTests(unittest.TestCase):
         self.make_legacy(book)
         before = self.snapshot(book)
 
-        self.run_book("validate", "sample")
+        result = self.run_book("validate", "sample", expect=1)
 
+        self.assertIn("source-manifest.json", result.stderr)
         self.assertEqual(self.snapshot(book), before)
         metadata = json.loads((book / "metadata.json").read_text(encoding="utf-8"))
         progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
