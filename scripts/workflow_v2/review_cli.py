@@ -307,8 +307,9 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
 
     register_status_commands(subparsers, root, error_factory=ReviewCliError)
 
-    # Lazy import avoids a status/review registration cycle while extending the
-    # already-created legacy Markdown build parser in one place.
+    # Lazy imports avoid registration cycles while extending the existing top-level parser.
     from .epub_cli import register_epub_commands
+    from .migrations_cli import register_migration_command
 
     register_epub_commands(subparsers, root, error_factory=ReviewCliError)
+    register_migration_command(subparsers, root, error_factory=ReviewCliError)
