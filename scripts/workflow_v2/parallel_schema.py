@@ -36,6 +36,14 @@ def _validate_claim_shared_state(data: Mapping[str, Any], schema: SchemaKind) ->
             path=f"shared_state_revisions.{key}",
         )
 
+    base_commit = data.get("base_commit")
+    if not isinstance(base_commit, str) or not base_commit.strip():
+        raise schemas._field(
+            schema,
+            "base_commit",
+            "must be a non-empty string when shared_state_revisions is present",
+        )
+
 
 def install_parallel_schema_extensions() -> None:
     """Install explicit-parallel claim validation exactly once."""
