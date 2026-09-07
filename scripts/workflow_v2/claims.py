@@ -207,6 +207,7 @@ class ClaimManager:
         base_revision: str,
         base_commit: str | None,
         workflow_revision: str,
+        shared_state_revisions: Mapping[str, str] | None = None,
         lease_seconds: int = 3600,
     ) -> list[ActiveClaim]:
         unit_ids = resolve_selector(progress, selector)
@@ -217,6 +218,11 @@ class ClaimManager:
         workflow_revision = self._require_nonempty(workflow_revision, "workflow_revision")
         if base_commit is not None and (not isinstance(base_commit, str) or not base_commit.strip()):
             raise ClaimError("base_commit must be null or a non-empty string")
+        if shared_state_revisions is not None and not isinstance(shared_state_revisions, Mapping):
+            raise ClaimError("shared_state_revisions must be an object when present")
+        frozen_shared_state = (
+            dict(shared_state_revisions) if shared_state_revisions is not None else None
+        )
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise ClaimError("lease_seconds must be a positive integer")
 
@@ -259,6 +265,8 @@ class ClaimManager:
                     "claimed_at": _format_utc(claimed_at),
                     "expires_at": _format_utc(expires_at),
                 }
+                if frozen_shared_state is not None:
+                    document["shared_state_revisions"] = dict(frozen_shared_state)
                 parse_document(SchemaKind.CLAIM, document)
                 documents.append((_claim_path(unit_id), document))
 
