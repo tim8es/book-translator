@@ -156,7 +156,7 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
     status = _snapshot(args, root, preflight)
     resolver = _resolver(root, args.slug)
     try:
-        payload = resolver.resume(status)
+        payload = resolver.resume(status, parallel=getattr(args, "parallel", None))
     except StatusError as exc:
         raise StatusCliError(str(exc)) from exc
 
@@ -172,6 +172,14 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
         print("next=complete")
     elif payload["operation"] == "finalize":
         print(f"next=finalize role={payload['context']['role']}")
+    elif payload["operation"] == "parallel":
+        assignments = payload["assignments"]
+        print(f"next=parallel requested={payload['parallel']} assignments={len(assignments)}")
+        for assignment in assignments:
+            print(
+                f"unit={assignment['unit_id']} chapter={assignment['chapter_number']} "
+                f"operation={assignment['operation']} role={assignment['context']['role']}"
+            )
     else:
         print(
             f"next={payload['operation']} unit={payload['unit_id']} "
@@ -216,6 +224,12 @@ def register_status_commands(
     resume = subparsers.add_parser("resume", help="Select the next valid operation without mutating state.")
     resume.add_argument("slug", help="Book slug under books/.")
     resume.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
+    resume.add_argument(
+        "--parallel",
+        type=int,
+        metavar="N",
+        help="Plan up to N disjoint worker assignments for this invocation only (N > 1).",
+    )
     resume.set_defaults(
         func=_adapt_errors(
             lambda args: resume_command(args, root, resolved_preflight),
