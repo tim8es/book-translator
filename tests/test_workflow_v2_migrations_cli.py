@@ -89,7 +89,11 @@ class WorkflowV2MigrationsCliTests(unittest.TestCase):
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
         progress.pop("schema_version", None)
         if reviewed:
-            progress["chapters"][0]["status"] = "reviewed"
+            chapter = progress["chapters"][0]
+            translation_path = book / chapter["translation_path"]
+            translation_path.parent.mkdir(parents=True, exist_ok=True)
+            translation_path.write_text("Перевод.\n", encoding="utf-8")
+            chapter["status"] = "reviewed"
         self._write_json(progress_path, progress)
 
         for name in ("review-ledger.json", "source-manifest.json"):
