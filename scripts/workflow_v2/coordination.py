@@ -51,7 +51,7 @@ def _format_utc(value: datetime) -> str:
 
 
 class BookCoordinationManager:
-    """Serialize short claim/finalize/upgrade admission transitions."""
+    """Serialize short claim/finalize/upgrade/reconciliation transitions."""
 
     def __init__(
         self,
@@ -102,16 +102,21 @@ class BookCoordinationManager:
         session_id: str,
         lease_seconds: int = 60,
     ) -> CoordinationLease:
-        allowed = {"claim_admission", "finalize_admission", "workflow_upgrade"}
+        allowed = {
+            "claim_admission",
+            "finalize_admission",
+            "workflow_upgrade",
+            "proposal_reconcile",
+        }
         if operation not in allowed:
             raise CoordinationError(
-                "operation must be claim_admission, finalize_admission, or workflow_upgrade"
+                "operation must be claim_admission, finalize_admission, workflow_upgrade, or proposal_reconcile"
             )
         if not isinstance(session_id, str) or not session_id.strip():
             raise CoordinationError("session_id must be a non-empty string")
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise CoordinationError("lease_seconds must be a positive integer")
-        if operation in {"claim_admission", "finalize_admission"}:
+        if operation in {"claim_admission", "finalize_admission", "proposal_reconcile"}:
             if self.migration_active():
                 raise CoordinationConflict(
                     "admission is blocked while workflow migration recovery is active"
