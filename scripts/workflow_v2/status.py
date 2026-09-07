@@ -213,6 +213,17 @@ class StatusResolver:
             "progress": progress_doc.version,
             "review_ledger": review_ledger_revision,
         }
+        for key, path in (
+            ("glossary", "glossary.md"),
+            ("style_guide", "style-guide.md"),
+        ):
+            try:
+                revisions[key] = self.repository.storage.read(path).version
+            except StorageNotFound:
+                pass
+            except StorageError as exc:
+                errors.append(f"{path} revision is unavailable: {exc}")
+
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
             "book_slug": progress.get("book_slug"),
@@ -230,11 +241,18 @@ class StatusResolver:
             "state_revisions": revisions,
         }
 
-    def resume(self, status: Mapping[str, Any]) -> dict[str, Any]:
+    def resume(
+        self,
+        status: Mapping[str, Any],
+        *,
+        parallel: int | None = None,
+    ) -> dict[str, Any]:
         """Select the next read-only orchestration operation from a status snapshot."""
 
         if not isinstance(status, Mapping):
             raise StatusError("status snapshot must be an object")
+        if parallel is not None and (type(parallel) is not int or parallel <= 1):
+            raise StatusError("parallel must be an integer greater than 1")
         if not status.get("valid"):
             return {
                 "schema_version": STATUS_SCHEMA_VERSION,
@@ -268,6 +286,50 @@ class StatusResolver:
         units = status.get("units")
         if not isinstance(units, list):
             raise StatusError("status snapshot must contain units")
+
+        if parallel is not None:
+            assignments: list[dict[str, Any]] = []
+            seen_units: set[str] = set()
+            for unit in units:
+                if len(assignments) >= parallel:
+                    break
+                if not isinstance(unit, Mapping):
+                    raise StatusError("status unit must be an object")
+                lifecycle = unit.get("lifecycle")
+                review = unit.get("review")
+                if lifecycle == "reviewed":
+                    continue
+
+                unit_id = unit.get("unit_id")
+                if not isinstance(unit_id, str) or not unit_id:
+                    raise StatusError("status unit must contain unit_id")
+                if unit_id in seen_units:
+                    raise StatusError(f"status snapshot contains duplicate unit {unit_id}")
+                seen_units.add(unit_id)
+                if unit_id in claims_by_unit:
+                    continue
+
+                operation = self._parallel_worker_operation(lifecycle, review)
+                if operation is None:
+                    break
+                assignments.append(
+                    {
+                        "schema_version": STATUS_SCHEMA_VERSION,
+                        "operation": operation,
+                        "unit_id": unit_id,
+                        "chapter_number": unit.get("chapter_number"),
+                        "context": self._context(operation, unit, status),
+                    }
+                )
+
+            if assignments:
+                return {
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "operation": "parallel",
+                    "parallel": parallel,
+                    "assignments": assignments,
+                    "context": self._context("parallel", None, status),
+                }
 
         for unit in units:
             if not isinstance(unit, Mapping):
@@ -334,6 +396,16 @@ class StatusResolver:
             "operation": "complete",
             "context": self._context("complete", None, status),
         }
+
+    @staticmethod
+    def _parallel_worker_operation(lifecycle: Any, review: Any) -> str | None:
+        if lifecycle == "extracted":
+            return "translate"
+        if lifecycle == "translated" and review == "corrections_required":
+            return "correct_translation"
+        if lifecycle == "translated" and review in {"missing", "stale"}:
+            return "review"
+        return None
 
     @staticmethod
     def _context(
