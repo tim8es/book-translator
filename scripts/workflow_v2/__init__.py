@@ -19,6 +19,7 @@ from .github_api import (
     GitHubApiError,
     GitHubFile,
     GitHubMutation,
+    GitHubRestClient,
     GitHubTree,
     GitHubTreeEntry,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "GitHubApiError",
     "GitHubFile",
     "GitHubMutation",
+    "GitHubRestClient",
     "GitHubStorage",
     "GitHubTree",
     "GitHubTreeEntry",
