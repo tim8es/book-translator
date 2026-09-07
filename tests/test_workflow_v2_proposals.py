@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -95,6 +96,9 @@ class WorkflowV2ProposalTests(unittest.TestCase):
             rationale="Keeps terminology stable.",
         )
 
+    def load_json(self, path):
+        return json.loads(self.storage.read(path).content.decode("utf-8"))
+
     def test_submit_persists_immutable_claim_bound_proposal_without_shared_write(self):
         before_glossary = self.storage.read("glossary.md")
         before_style = self.storage.read("style-guide.md")
@@ -109,8 +113,7 @@ class WorkflowV2ProposalTests(unittest.TestCase):
         self.assertEqual(proposal["shared_state_revisions"], self.claim["shared_state_revisions"])
         self.assertEqual(self.storage.read("glossary.md"), before_glossary)
         self.assertEqual(self.storage.read("style-guide.md"), before_style)
-        persisted = self.repository.read(result.path, SchemaKind.PROPOSAL).data
-        self.assertEqual(persisted, proposal)
+        self.assertEqual(self.load_json(result.path), proposal)
 
     def test_reconcile_marks_stale_when_any_frozen_shared_revision_changed(self):
         proposal = self.submit(target="glossary")
@@ -155,8 +158,7 @@ class WorkflowV2ProposalTests(unittest.TestCase):
         self.assertEqual(first.resolution["resulting_revision"], self.storage.read("glossary.md").version)
         self.assertEqual(second.resolution, first.resolution)
         self.assertFalse(second.changed_shared_state)
-        persisted = self.repository.read(first.path, SchemaKind.PROPOSAL_RESOLUTION).data
-        self.assertEqual(persisted, first.resolution)
+        self.assertEqual(self.load_json(first.path), first.resolution)
 
     def test_rejected_proposal_never_mutates_shared_state(self):
         proposal = self.submit(target="style_guide")
