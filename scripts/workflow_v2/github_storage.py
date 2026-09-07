@@ -77,11 +77,7 @@ class GitHubStorage:
         return "/".join(parts)
 
     def _repo_path(self, logical_path: str) -> str:
-        return (
-            f"{self.root_prefix}/{logical_path}"
-            if self.root_prefix
-            else logical_path
-        )
+        return f"{self.root_prefix}/{logical_path}" if self.root_prefix else logical_path
 
     def _logical_path(self, repo_path: str) -> str | None:
         if not self.root_prefix:
@@ -114,6 +110,12 @@ class GitHubStorage:
     def _message(self, action: str, repo_path: str) -> str:
         return f"{self.commit_prefix}: {action} {repo_path}"
 
+    @staticmethod
+    def _capability_error(action: str, path: str, exc: GitHubApiError) -> StorageError:
+        return StorageError(
+            f"GitHub contents capability unavailable for {action} {path}; status={exc.status}"
+        )
+
     def read(self, path: str) -> StoredValue:
         logical = self._validate_path(path)
         repo_path = self._repo_path(logical)
@@ -122,6 +124,8 @@ class GitHubStorage:
         except GitHubApiError as exc:
             if exc.status == 404:
                 raise StorageNotFound(path) from exc
+            if exc.status in {401, 403}:
+                raise self._capability_error("read", path, exc) from exc
             raise StorageError(f"GitHub contents read failed for {path}: {exc}") from exc
         self._validate_file(file, repo_path)
         return StoredValue(content=file.content, version=file.blob_sha)
@@ -131,6 +135,8 @@ class GitHubStorage:
         try:
             tree = self.client.get_tree(self.repository, self.branch)
         except GitHubApiError as exc:
+            if exc.status in {401, 403}:
+                raise self._capability_error("list", prefix or ".", exc) from exc
             raise StorageError(f"GitHub tree read failed: {exc}") from exc
         if not isinstance(tree, GitHubTree):
             raise StorageError("GitHub tree response has an invalid shape")
@@ -150,6 +156,12 @@ class GitHubStorage:
             results.append(logical)
         return sorted(results)
 
+    def _fresh_after_rejection(self, path: str) -> StoredValue | None:
+        try:
+            return self.read(path)
+        except StorageNotFound:
+            return None
+
     def create_if_absent(self, path: str, content: bytes) -> str:
         logical = self._validate_path(path)
         content = self._require_content(content)
@@ -164,7 +176,14 @@ class GitHubStorage:
             )
         except GitHubApiError as exc:
             if exc.status in {409, 422}:
-                raise StorageAlreadyExists(path) from exc
+                current = self._fresh_after_rejection(path)
+                if current is not None:
+                    raise StorageAlreadyExists(path) from exc
+                raise StorageError(
+                    f"GitHub create rejected for {path} but no existing file could be proven"
+                ) from exc
+            if exc.status in {401, 403}:
+                raise self._capability_error("create", path, exc) from exc
             if exc.status == 404:
                 raise StorageError(f"GitHub contents write capability unavailable for {path}") from exc
             raise StorageError(f"GitHub create failed for {path}: {exc}") from exc
@@ -202,12 +221,21 @@ class GitHubStorage:
                 self._message("update", repo_path),
             )
         except GitHubApiError as exc:
+            if exc.status in {409, 422}:
+                fresh = self._fresh_after_rejection(path)
+                if fresh is None:
+                    raise StorageNotFound(path) from exc
+                if fresh.version != expected_version:
+                    raise StorageVersionConflict(
+                        f"{path}: expected revision {expected_version}, current revision {fresh.version}"
+                    ) from exc
+                raise StorageError(
+                    f"GitHub update rejected for {path} while expected revision is still current"
+                ) from exc
+            if exc.status in {401, 403}:
+                raise self._capability_error("update", path, exc) from exc
             if exc.status == 404:
                 raise StorageNotFound(path) from exc
-            if exc.status in {409, 422}:
-                raise StorageVersionConflict(
-                    f"{path}: GitHub rejected expected revision {expected_version}"
-                ) from exc
             raise StorageError(f"GitHub update failed for {path}: {exc}") from exc
 
         try:
@@ -241,12 +269,21 @@ class GitHubStorage:
                 self._message("delete", repo_path),
             )
         except GitHubApiError as exc:
+            if exc.status in {409, 422}:
+                fresh = self._fresh_after_rejection(path)
+                if fresh is None:
+                    raise StorageNotFound(path) from exc
+                if fresh.version != expected_version:
+                    raise StorageVersionConflict(
+                        f"{path}: expected revision {expected_version}, current revision {fresh.version}"
+                    ) from exc
+                raise StorageError(
+                    f"GitHub delete rejected for {path} while expected revision is still current"
+                ) from exc
+            if exc.status in {401, 403}:
+                raise self._capability_error("delete", path, exc) from exc
             if exc.status == 404:
                 raise StorageNotFound(path) from exc
-            if exc.status in {409, 422}:
-                raise StorageVersionConflict(
-                    f"{path}: GitHub rejected expected revision {expected_version}"
-                ) from exc
             raise StorageError(f"GitHub delete failed for {path}: {exc}") from exc
 
         try:
