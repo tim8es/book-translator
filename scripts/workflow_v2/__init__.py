@@ -39,6 +39,7 @@ from .migrations import (
     detect_schema_version,
     migrate_document,
 )
+from .parallel_schema import install_parallel_schema_extensions
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .reviews import (
     AcceptReviewResult,
@@ -70,6 +71,7 @@ from .storage import (
 from .text_patch import TextPatchError, TextPatchResult, patch_text
 
 install_source_schema_extensions()
+install_parallel_schema_extensions()
 
 __all__ = [
     "AcceptReviewResult",
