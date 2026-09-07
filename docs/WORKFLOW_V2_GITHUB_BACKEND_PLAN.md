@@ -4,7 +4,7 @@
 
 **Goal:** Add a GitHub API-backed `StorageBackend` that preserves Workflow v2 filesystem semantics and lets domain operations run against GitHub without a local checkout or mandatory GitHub Actions.
 
-**Architecture:** `github_api.py` owns transport-facing value types, errors, a narrow client protocol, and a standard-library REST client. `github_storage.py` adapts that client to the existing backend-neutral storage protocol using blob SHA revisions, strict path mapping, read-after-write verification, no mutation retries, and fail-closed error classification. Existing domain modules remain unchanged and are exercised through parity tests.
+**Architecture:** `github_api.py` owns transport-facing value types, errors, a narrow client protocol, and a standard-library REST client. `github_storage.py` adapts that client to the existing storage protocol using blob SHA revisions, strict path mapping, read-after-write verification, no mutation retries, and fail-closed error classification. Existing domain modules remain backend-neutral and are exercised by parity tests.
 
 **Tech Stack:** Python 3.10+, standard library (`urllib`, `json`, `base64`), existing `StorageBackend` / `WorkflowStateRepository`, `unittest`, GitHub REST API version `2026-03-10`.
 
@@ -21,7 +21,7 @@
 - No blind retry of any mutating GitHub request.
 - Recursive tree truncation is a hard failure, never partial success.
 - Read-after-write verification is mandatory for create/update/delete.
-- Literary contracts (`docs/TRANSLATION.md`) remain backend-agnostic.
+- Literary contracts remain backend-agnostic.
 - Every production slice follows test-only RED -> focused GREEN -> full-suite GREEN.
 
 ---
@@ -30,14 +30,14 @@
 
 **Files:**
 - Create: `tests/storage_contract.py`
+- Create: `tests/github_fake.py`
+- Create: `tests/test_workflow_v2_storage_contract.py`
 - Create: `tests/test_workflow_v2_github_storage.py`
 - Create: `scripts/workflow_v2/github_api.py`
 - Create: `scripts/workflow_v2/github_storage.py`
 - Modify: `scripts/workflow_v2/__init__.py`
 
 **Interfaces:**
-- Consumes: existing `StorageBackend`, `StoredValue`, `StorageNotFound`, `StorageAlreadyExists`, `StorageVersionConflict`, `InvalidStoragePath`, `StorageError`.
-- Produces:
 
 ```python
 @dataclass(frozen=True)
@@ -78,9 +78,7 @@ class GitHubStorage:
     def __init__(self, client: GitHubApiClient, *, repository: str, branch: str, root_prefix: str = "", commit_prefix: str = "workflow-v2"): ...
 ```
 
-- [ ] **Step 1 — RED contract helper:** create `tests/storage_contract.py` with a mixin/function set that checks create/read exact bytes, duplicate create, current/stale update, current/stale delete, missing read/update/delete, nested sorted list, exact-file prefix, missing prefix, and unsafe paths. Reuse it from filesystem tests if this can be done without changing their semantics; otherwise instantiate it independently for both backends.
-
-Core assertion shape:
+- [ ] **Step 1 — RED contract helper:** create `tests/storage_contract.py` with `exercise_backend_contract(testcase, factory)`. It must assert exact binary create/read, duplicate create, current/stale update, current/stale delete, missing read/update/delete, nested sorted list, exact-file prefix, missing prefix, and unsafe paths. The stale cases must prove the winner bytes remain unchanged.
 
 ```python
 def exercise_backend_contract(testcase, factory):
@@ -91,27 +89,29 @@ def exercise_backend_contract(testcase, factory):
     testcase.assertEqual(loaded.version, version)
 ```
 
-The helper must also prove a stale writer never overwrites the winner.
+- [ ] **Step 2 — RED filesystem contract class:** create `tests/test_workflow_v2_storage_contract.py` that runs the new contract against a fresh `FilesystemStorage` root. Do not modify existing filesystem storage tests.
 
-- [ ] **Step 2 — RED GitHub fake:** in `tests/test_workflow_v2_github_storage.py`, define an in-memory `FakeGitHubApiClient` whose file values use deterministic synthetic blob identities derived from bytes and whose tree reflects current files. Add contract tests importing `GitHubStorage`; before production exists, `require_api()` must fail only because `github_api`/`github_storage` are absent.
+- [ ] **Step 3 — RED deterministic GitHub fake:** create `tests/github_fake.py` with `FakeGitHubApiClient`. It stores repository paths as exact bytes, derives deterministic opaque blob IDs from bytes, exposes a recursive tree, records mutation calls/messages, and supports one-shot before/after/error hooks used by later tasks.
 
-- [ ] **Step 3 — Run focused RED:** `python -m unittest tests.test_workflow_v2_github_storage -v`. Expected: failures identify the missing GitHub storage/API surface, while existing storage tests remain green.
+- [ ] **Step 4 — RED GitHub contract class:** create `tests/test_workflow_v2_github_storage.py`. Import the planned public GitHub API/storage surface through a `require_api()` helper so pre-implementation failures identify only the missing backend. Run the same `exercise_backend_contract` using `root_prefix="books/sample"`, and assert fake-client paths are repository-relative under that prefix.
 
-- [ ] **Step 4 — Implement transport data/protocol:** add `github_api.py` value objects/protocol/error only. Validate constructor arguments minimally: error message non-empty; status integer or null. No HTTP implementation yet.
+- [ ] **Step 5 — Run focused RED:** `python -m unittest tests.test_workflow_v2_storage_contract tests.test_workflow_v2_github_storage -v`. Expected: filesystem contract green; GitHub cases fail because `GitHubStorage`/GitHub API types are not implemented.
 
-- [ ] **Step 5 — Implement path mapping:** in `github_storage.py`, validate repository as `owner/name`, non-empty branch/commit prefix, and safe `root_prefix`. Implement `_logical_path(path, allow_empty=False)` and `_repo_path(logical)` using POSIX components only. Reject unsafe values before client calls with `InvalidStoragePath`.
+- [ ] **Step 6 — Implement `github_api.py` transport data/protocol:** add the dataclasses, runtime-checkable protocol, and `GitHubApiError`. Require non-empty error messages; status must be `int` or `None`. Do not implement HTTP yet.
 
-- [ ] **Step 6 — Implement read/list:** map `GitHubApiError(status=404)` from `get_file` to `StorageNotFound`; other client errors to concise `StorageError`. For list, call `get_tree`, reject `truncated=True`, include only `type == "blob"` with regular-file modes `100644` or `100755`, strip root prefix, apply exact-file-or-descendant prefix semantics, and return sorted logical paths.
+- [ ] **Step 7 — Implement GitHubStorage construction/path mapping:** validate `repository` as exactly two non-empty `owner/name` components, non-empty `branch`, non-empty `commit_prefix`, and safe relative POSIX `root_prefix`. Implement path validation matching filesystem storage: empty only for `list("")`, no absolute paths, backslashes, empty segments, `.` or `..`.
 
-- [ ] **Step 7 — Implement create/update/delete happy paths:** pre-read for update/delete, compare exact opaque blob SHA, make one client mutation with deterministic message, then verify durable state by fresh read. Create reads back and returns its blob SHA; update returns read-back SHA; delete requires read-back 404. Do not use `GitHubMutation.blob_sha` as proof of final state.
+- [ ] **Step 8 — Implement read/list:** `read` maps client 404 to `StorageNotFound`, returns exact bytes and blob SHA, and maps all other API errors to `StorageError`. `list` calls recursive tree, rejects `truncated=True`, accepts only ordinary `blob` entries with mode `100644`/`100755`, strips `root_prefix`, applies exact-file-or-descendant prefix semantics, and sorts results.
 
-- [ ] **Step 8 — Export public backend types:** update `scripts/workflow_v2/__init__.py` to export `GitHubApiClient`, `GitHubApiError`, `GitHubFile`, `GitHubTree`, `GitHubTreeEntry`, `GitHubMutation`, and `GitHubStorage` without introducing transport imports elsewhere.
+- [ ] **Step 9 — Implement create/update/delete happy paths:** update/delete pre-read and compare exact opaque blob SHA before mutation. Each operation performs exactly one client mutation with `workflow-v2: <verb> <repo-path>`, then verifies durable state by fresh read. Create/update return read-back blob SHA; delete requires the read-back to be missing. Do not trust mutation-return SHA as final proof.
 
-- [ ] **Step 9 — Focused GREEN:** run `python -m unittest tests.test_workflow_v2_storage tests.test_workflow_v2_github_storage -v`. Expected: identical contract behavior for both backends.
+- [ ] **Step 10 — Export public types:** update `scripts/workflow_v2/__init__.py` to export `GitHubApiClient`, `GitHubApiError`, `GitHubFile`, `GitHubTree`, `GitHubTreeEntry`, `GitHubMutation`, and `GitHubStorage`.
 
-- [ ] **Step 10 — Full GREEN:** run `python -m unittest discover -s tests -v` on Python 3.10/3.12 CI.
+- [ ] **Step 11 — Focused GREEN:** `python -m unittest tests.test_workflow_v2_storage_contract tests.test_workflow_v2_storage tests.test_workflow_v2_github_storage -v`.
 
-- [ ] **Step 11 — Commit boundary:** commits preserve separate test-only RED evidence and minimum production GREEN. Suggested production commit: `feat: add GitHub storage backend core`.
+- [ ] **Step 12 — Full GREEN:** run `python -m unittest discover -s tests -v` through the Python 3.10/3.12 CI matrix.
+
+- [ ] **Step 13 — Commit boundary:** preserve test-only RED separately from production. Suggested production commit: `feat: add GitHub storage backend core`.
 
 ---
 
@@ -121,28 +121,26 @@ The helper must also prove a stale writer never overwrites the winner.
 - Modify: `tests/test_workflow_v2_github_storage.py`
 - Modify: `scripts/workflow_v2/github_storage.py`
 
-**Interfaces:**
-- Consumes: Task 1 `GitHubStorage` and `GitHubApiError(status=...)`.
-- Produces: deterministic mapping from GitHub mutation races/capability failures to existing storage exceptions.
+**Interfaces:** consumes Task 1 `GitHubStorage` and `GitHubApiError(status=...)`.
 
-- [ ] **Step 1 — RED race tests:** extend fake client with one-shot hooks able to mutate state immediately before a mutation, immediately after a mutation, or raise `GitHubApiError` with a selected status. Add tests for:
-  - stale expected SHA rejected before client mutation;
-  - create 409/422 followed by existing file => `StorageAlreadyExists`;
+- [ ] **Step 1 — RED race tests:** use the deterministic fake hooks to assert:
+  - stale expected SHA is rejected before any mutation call;
+  - create 409/422 followed by an existing path => `StorageAlreadyExists`;
   - update 409/422 followed by changed SHA => `StorageVersionConflict`;
-  - update 409/422 while expected SHA is still current => `StorageError`;
+  - update 409/422 while expected SHA remains current => `StorageError`;
   - delete 409/422 followed by changed SHA => `StorageVersionConflict`;
-  - successful create/update followed by concurrent overwrite => `StorageVersionConflict`;
+  - successful create/update followed by immediate concurrent overwrite => `StorageVersionConflict`;
   - successful delete followed by recreation => `StorageVersionConflict`;
-  - 401/403 => `StorageError` mentioning unavailable GitHub contents capability;
-  - client call count proves no automatic mutation retry.
+  - 401/403 => concise `StorageError` describing unavailable GitHub contents capability;
+  - mutation call count remains one; no automatic retry occurs.
 
-- [ ] **Step 2 — Run focused RED:** expect only the newly specified classification/race cases to fail.
+- [ ] **Step 2 — Run focused RED:** `python -m unittest tests.test_workflow_v2_github_storage -v`. Expected: only the newly specified race/classification behavior fails.
 
-- [ ] **Step 3 — Implement `_classify_mutation_failure`:** for mutation 409/422, perform at most one fresh read to classify durable state. Never convert unchanged expected state into a conflict without proof. Preserve the original API error as `__cause__`.
+- [ ] **Step 3 — Implement mutation-failure classification:** for client 409/422 perform one fresh read. Create classifies a now-existing path as `StorageAlreadyExists`. Update/delete classify missing/changed versions from durable state; if expected state is still current, raise generic `StorageError` rather than fabricating a race. Preserve the client exception as cause.
 
-- [ ] **Step 4 — Implement post-mutation verification:** use exact bytes for create/update and absence for delete. A competing read-back state becomes `StorageVersionConflict`; never silently return the intermediate mutation result.
+- [ ] **Step 4 — Implement post-mutation race verification:** create/update compare exact intended bytes; delete verifies absence. Any different winner state becomes `StorageVersionConflict`.
 
-- [ ] **Step 5 — GREEN focused + full matrix.**
+- [ ] **Step 5 — GREEN focused + full Python 3.10/3.12 matrix.**
 
 - [ ] **Step 6 — Commit:** `feat: classify GitHub storage races safely`.
 
@@ -153,39 +151,32 @@ The helper must also prove a stale writer never overwrites the winner.
 **Files:**
 - Create: `tests/test_workflow_v2_github_api.py`
 - Modify: `scripts/workflow_v2/github_api.py`
+- Modify: `scripts/workflow_v2/__init__.py`
 
 **Interfaces:**
-- Consumes: Task 1 data classes/protocol/error.
-- Produces:
 
 ```python
 class GitHubRestClient:
     def __init__(self, token: str | None, *, base_url: str = "https://api.github.com", api_version: str = "2026-03-10", opener=None): ...
 ```
 
-- [ ] **Step 1 — RED HTTP harness:** create a fake opener/response that records `urllib.request.Request` method, URL, headers, and body and returns queued bytes/status without network access.
+- [ ] **Step 1 — RED HTTP harness:** create a fake opener/response in `tests/test_workflow_v2_github_api.py` that records every `urllib.request.Request` method, URL, headers, and body and returns queued response bytes without network access.
 
-- [ ] **Step 2 — RED read tests:** require:
-  - `GET /repos/{owner}/{repo}/contents/{quoted-path}?ref={quoted-ref}`;
-  - contents response must be `type == "file"` with non-empty `sha`;
-  - follow with `GET /repos/{owner}/{repo}/git/blobs/{sha}`;
-  - strict Base64 decode of blob JSON `content` and `encoding == "base64"`;
-  - returned `GitHubFile.blob_sha` exactly equals contents SHA;
-  - malformed/non-file/invalid-base64 responses become `GitHubApiError`.
+- [ ] **Step 2 — RED read tests:** require `GET /repos/{owner}/{repo}/contents/{quoted-path}?ref={quoted-ref}`, validate `type == "file"` and non-empty `sha`, then require `GET /repos/{owner}/{repo}/git/blobs/{sha}`. Blob response must declare `encoding == "base64"`; strict Base64 decoding returns `GitHubFile` with exact bytes and the contents SHA. Non-file/malformed/invalid-base64 responses become `GitHubApiError`.
 
-- [ ] **Step 3 — RED tree tests:** require `GET /repos/{owner}/{repo}/git/trees/{quoted-ref}?recursive=1`, exact entry parsing, and preservation of `truncated`.
+- [ ] **Step 3 — RED tree tests:** require `GET /repos/{owner}/{repo}/git/trees/{quoted-ref}?recursive=1`, exact entry parsing, and preservation of the response `truncated` boolean.
 
-- [ ] **Step 4 — RED mutation tests:** require Base64 `content`, `branch`, deterministic `message`, and `sha` only for update/delete. Verify create/update parse optional content SHA and commit SHA; delete accepts its documented success response without requiring content metadata.
+- [ ] **Step 4 — RED mutation tests:** create/update bodies contain Base64 `content`, `branch`, and `message`; update additionally contains `sha`. Delete contains `branch`, `message`, and `sha` but no content. Parse optional content SHA and commit SHA into `GitHubMutation`; delete accepts the documented success response without requiring content metadata.
 
-- [ ] **Step 5 — RED header/error tests:** every request has `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2026-03-10`, and `Authorization: Bearer <token>` only when token is supplied. HTTP 401/403/404/409/422 and transport failures become `GitHubApiError(status=...)` with no token in the message. Malformed JSON is `GitHubApiError`.
+- [ ] **Step 5 — RED header/error tests:** every request has `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2026-03-10`; `Authorization: Bearer <token>` exists only with a supplied token. HTTP 401/403/404/409/422, URL/transport failures, invalid UTF-8, and malformed JSON become `GitHubApiError`; token text never appears in messages.
 
-- [ ] **Step 6 — Run focused RED:** `python -m unittest tests.test_workflow_v2_github_api -v`. Expected: missing `GitHubRestClient`/HTTP behavior only.
+- [ ] **Step 6 — Run focused RED:** `python -m unittest tests.test_workflow_v2_github_api -v`. Expected: missing `GitHubRestClient`/HTTP methods only.
 
-- [ ] **Step 7 — Implement `_request_json`:** use injected opener or `urllib.request.build_opener()`, JSON encode request bodies deterministically, decode UTF-8 response JSON, catch `urllib.error.HTTPError`, `URLError`, timeout/OSError, and sanitize messages. No retries.
+- [ ] **Step 7 — Implement `_request_json`:** use the injected opener or `urllib.request.build_opener()`, deterministic JSON request bodies, UTF-8 JSON response decoding, `urllib.error.HTTPError`/`URLError` plus timeout/OSError handling, no retries, concise sanitized `GitHubApiError`.
 
-- [ ] **Step 8 — Implement `get_file/get_tree/create/update/delete`:** quote path/ref segments with `urllib.parse.quote`; validate response shapes; strict Base64 decode; construct Task 1 value objects.
+- [ ] **Step 8 — Implement client methods:** quote repository/path/ref pieces safely with `urllib.parse.quote`; validate JSON shapes; strict Base64 decode; construct Task 1 values. Do not read tokens from environment variables.
 
-- [ ] **Step 9 — GREEN focused + full matrix.**
+- [ ] **Step 9 — Export `GitHubRestClient`; GREEN focused + full matrix.**
 
 - [ ] **Step 10 — Commit:** `feat: add GitHub REST storage transport`.
 
@@ -195,50 +186,39 @@ class GitHubRestClient:
 
 **Files:**
 - Create: `tests/test_workflow_v2_github_backend_domain.py`
-- Production: none unless a test exposes an actual backend-boundary defect.
+- Reuse: `tests/github_fake.py`
+- Production: none unless a test proves a backend-boundary defect.
 
-**Interfaces:**
-- Consumes: `WorkflowStateRepository(GitHubStorage(fake_client, repository="owner/repo", branch="work", root_prefix="books/sample"))`.
-- Produces: evidence that existing domain operations need no GitHub-specific implementation branches.
+- [ ] **Step 1 — Build canonical remote workspace:** use `WorkflowStateRepository(GitHubStorage(...))` to create schema-valid metadata/progress/ledger/source-manifest state under `books/sample`; do not seed JSON by bypassing repository validation.
 
-- [ ] **Step 1 — Build reusable fake repository state:** use the same fake API client from the GitHub storage tests or move it to a non-discovered `tests/github_fake.py` helper. Seed canonical metadata/progress/ledger/manifest bytes through `WorkflowStateRepository`, not by bypassing schemas.
+- [ ] **Step 2 — Claim parity:** acquire a translator claim, prove a second session conflicts, release by owner, and verify claim/audit durable state through GitHubStorage.
 
-- [ ] **Step 2 — Claim parity test:** acquire a translator claim, prove a second session conflicts, release by owner, and prove durable audit/claim state matches filesystem semantics.
+- [ ] **Step 3 — Coordination parity:** acquire a coordination lease, prove concurrent live lease conflict, release, and reacquire.
 
-- [ ] **Step 3 — Coordination parity test:** create a coordination lease, prove a concurrent live lease conflicts, release it, and reacquire.
+- [ ] **Step 4 — Status parity:** resolve status/resume for an extracted unit and assert the fake client recorded zero mutation calls during status resolution.
 
-- [ ] **Step 4 — Status parity test:** create one extracted unit and resolve status/resume read-only; assert no mutation calls occurred during status resolution.
+- [ ] **Step 5 — CAS parity:** perform one repository/domain write, retain its old revision, commit a competing winner, then prove stale write fails and winner bytes remain authoritative.
 
-- [ ] **Step 5 — CAS state-transition parity test:** exercise an existing repository/domain write using a stale revision and prove the concurrent winner is preserved.
+- [ ] **Step 6 — Run:** `python -m unittest tests.test_workflow_v2_github_backend_domain -v`. Immediate GREEN is valid test-only evidence. A genuine failure triggers `systematic-debugging`; fix only the backend boundary unless evidence proves an existing domain abstraction bug.
 
-- [ ] **Step 6 — Run tests:** if all pass immediately, record this as parity coverage with no production change. If a real defect appears, use systematic debugging and make the smallest backend-boundary fix only.
-
-- [ ] **Step 7 — Commit test-only parity coverage separately from any production fix.**
+- [ ] **Step 7 — Full matrix; commit parity tests separately from any production fix.**
 
 ---
 
 ### Task 5: Capability and orchestration documentation
 
 **Files:**
+- Modify: `tests/test_agent_contract.py`
 - Modify: `docs/ORCHESTRATION.md`
 - Modify: `docs/AGENT_SETUP.md`
-- Test: `tests/test_agent_contract.py`
 
-**Interfaces:** documentation only; no literary contract changes.
-
-- [ ] **Step 1 — RED contract tests:** assert orchestration/setup documentation states:
-  - GitHub API backend is an allowed execution substrate when available;
-  - durable GitHub reads/writes do not require GitHub Actions;
-  - Contents read is needed for read-only operations and Contents write for mutations;
-  - CAS conflict must cause re-read/replan, not blind retry;
-  - source/privacy rules remain unchanged;
-  - `docs/TRANSLATION.md` does not mention GitHub client/API details.
+- [ ] **Step 1 — RED contract tests:** assert orchestration/setup docs explicitly state GitHub API storage is an allowed orchestrator execution substrate, core durable read/write execution does not require GitHub Actions, read-only access requires repository contents/tree/blob reads, mutations require contents write, CAS conflict requires re-read/replan instead of blind retry, credentials are never persisted in book state, and `docs/TRANSLATION.md` contains no GitHub client/API execution instructions.
 
 - [ ] **Step 2 — Run focused RED:** `python -m unittest tests.test_agent_contract -v`.
 
-- [ ] **Step 3 — Update `docs/ORCHESTRATION.md`:** add a compact “GitHub-backed execution” section near execution modes/single-writer rules. Describe GitHubStorage as an orchestrator/runtime capability, not a literary concern.
+- [ ] **Step 3 — Update orchestration docs:** add a compact GitHub-backed execution section near execution modes/single-writer rules. Keep transport mechanics out of Translator/Reviewer instructions.
 
-- [ ] **Step 4 — Update `docs/AGENT_SETUP.md`:** document capability prerequisites, read-only vs write behavior, explicit branch/repository/root scope, token/credential non-persistence, and failure behavior. Do not instruct users to enable Actions for core execution.
+- [ ] **Step 4 — Update setup docs:** document repository/branch/root scoping, read vs write capabilities, explicit credential injection/non-persistence, fail-closed permission behavior, and that Actions remain optional CI only.
 
 - [ ] **Step 5 — GREEN agent contract + full matrix.**
 
@@ -250,25 +230,22 @@ class GitHubRestClient:
 
 **Files:**
 - Create: `tests/test_workflow_v2_github_backend_reliability.py`
+- Reuse: `tests/github_fake.py`
 - Production: only when failure injection demonstrates a real defect.
 
-**Interfaces:** uses fake-client mutation hooks from Task 2 and real domain managers where relevant.
+- [ ] **Step 1 — Failure injection:** cover six independent cases:
+  1. competing writer changes target after pre-read but before update -> conflict, winner preserved;
+  2. competing writer overwrites immediately after successful update -> read-back conflict, winner preserved;
+  3. transport failure during mutation -> exactly one mutation attempt, no hidden retry;
+  4. truncated recursive tree -> list and domain discovery fail closed rather than accepting partial state;
+  5. two claim create attempts race -> one owner wins, loser gets recoverable conflict behavior;
+  6. a fresh read after conflict observes the winner and permits normal caller recovery.
 
-- [ ] **Step 1 — Add failure-injection scenarios:** 
-  1. another writer changes target after pre-read but before update => conflict, winner preserved;
-  2. another writer overwrites immediately after successful update => read-back conflict, winner preserved;
-  3. transport failure during mutation => exactly one mutation attempt and no hidden retry;
-  4. truncated tree => list/status/claim discovery fails closed rather than using partial state;
-  5. claim create race => one owner succeeds and loser receives recoverable `ClaimConflict`/storage conflict behavior;
-  6. fresh read after conflict observes authoritative winner and allows normal caller recovery.
+- [ ] **Step 2 — Run focused:** `python -m unittest tests.test_workflow_v2_github_backend_reliability -v`. Immediate GREEN is test-only evidence. For real RED, preserve the failing run before a minimum fix.
 
-- [ ] **Step 2 — Run focused reliability suite:** `python -m unittest tests.test_workflow_v2_github_backend_reliability -v`.
+- [ ] **Step 3 — Full matrix GREEN.**
 
-- [ ] **Step 3 — Preserve evidence:** tests that immediately pass are test-only coverage; for genuine RED, capture exact failure before minimum production fix using `systematic-debugging`.
-
-- [ ] **Step 4 — Full matrix GREEN.**
-
-- [ ] **Step 5 — Commit reliability tests separately from any production fix.**
+- [ ] **Step 4 — Commit reliability tests separately from any production fix.**
 
 ---
 
@@ -276,19 +253,14 @@ class GitHubRestClient:
 
 **Files:** no intended production changes.
 
-- [ ] **Step 1 — Exact-head full suite:** verify `python -m unittest discover -s tests -v` succeeds on Python 3.10 and 3.12 for the exact final feature head; capture run id and exact test count.
+- [ ] **Step 1 — Exact-head full suite:** `python -m unittest discover -s tests -v` succeeds on Python 3.10 and 3.12 for the exact final feature head; record run id and exact test count.
 
-- [ ] **Step 2 — Acceptance audit:** map tests/evidence to #17:
-  - core coordination through GitHub backend without Actions;
-  - CAS conflicts surfaced/recoverable;
-  - common backend contract passes filesystem + GitHub;
-  - no GitHub client logic in literary/domain contracts;
-  - read/write capability failures concise and fail-closed.
+- [ ] **Step 2 — Acceptance audit:** map evidence to core coordination through GitHub without Actions, recoverable CAS conflicts, common filesystem/GitHub backend contract, concise capability failures, and absence of GitHub-specific literary/domain branching.
 
-- [ ] **Step 3 — Scope audit:** changed files should be limited to design/plan, `github_api.py`, `github_storage.py`, package exports, backend/parity/reliability tests, `docs/ORCHESTRATION.md`, `docs/AGENT_SETUP.md`, and the corresponding contract test. Any domain production change requires a documented test-proven reason.
+- [ ] **Step 3 — Scope audit:** changed files are limited to design/plan, `github_api.py`, `github_storage.py`, package exports, fake/contract/backend/parity/reliability tests, `docs/ORCHESTRATION.md`, `docs/AGENT_SETUP.md`, and agent contract tests. Any domain production change requires explicit test-proven justification in the PR body.
 
-- [ ] **Step 4 — PR audit:** base is `refactor/workflow-engine-v2`; branch is behind by 0 or safely updated; merge base is expected integration ancestry; no unresolved comments/reviews/threads; `main` remains unchanged.
+- [ ] **Step 4 — PR audit:** base `refactor/workflow-engine-v2`; behind by 0 or safely updated; merge base matches expected integration ancestry; no unresolved comments/reviews/threads; `main` unchanged.
 
-- [ ] **Step 5 — Update PR body:** include RED/GREEN run ids, exact final test count, backend contract/parity/reliability mapping, final base/head SHAs, and explicit statement that Actions are not a runtime dependency.
+- [ ] **Step 5 — PR evidence:** include RED/GREEN run ids, exact final test count, backend contract/parity/reliability mapping, base/head SHAs, and explicit statement that GitHub Actions are not a runtime dependency.
 
 - [ ] **Step 6 — Ready + merge:** mark Ready only after all guards pass. Merge with `expected_head_sha` into `refactor/workflow-engine-v2` only. Preserve `feature/workflow-v2-github-backend`. Never merge `main`.
