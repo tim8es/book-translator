@@ -489,6 +489,24 @@ class ReviewLedgerManager:
                 changed=False,
             )
 
+        current_record = resolution.current_record
+        snapshot = (
+            current_record.get("shared_state_revisions")
+            if isinstance(current_record, Mapping)
+            else None
+        )
+        if snapshot is not None:
+            try:
+                require_current_shared_state(self.repository.storage, snapshot)
+            except SharedStateStale as exc:
+                raise ReviewEvidenceError(
+                    f"chapter {chapter_number} PASS review evidence is stale: {exc}"
+                ) from exc
+            except SharedStateError as exc:
+                raise ReviewEvidenceError(
+                    f"cannot validate shared state before accepting chapter {chapter_number}: {exc}"
+                ) from exc
+
         updated = copy.deepcopy(dict(progress))
         target = self._chapter(updated, chapter_number)
         target["status"] = "reviewed"
