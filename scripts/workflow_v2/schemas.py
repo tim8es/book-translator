@@ -389,8 +389,12 @@ def _validate_coordination_lock(data: Mapping[str, Any], schema: SchemaKind) -> 
     lock_id = _require_nonempty_string(data, "lock_id", schema)
     _validate_hex_id(lock_id, schema, "lock_id")
     operation = _require_nonempty_string(data, "operation", schema)
-    if operation not in {"claim_admission", "finalize_admission"}:
-        raise _field(schema, "operation", "must be claim_admission or finalize_admission")
+    if operation not in {"claim_admission", "finalize_admission", "workflow_upgrade"}:
+        raise _field(
+            schema,
+            "operation",
+            "must be claim_admission, finalize_admission, or workflow_upgrade",
+        )
     _require_nonempty_string(data, "session_id", schema)
     acquired_at = _require_nonempty_string(data, "acquired_at", schema)
     expires_at = _require_nonempty_string(data, "expires_at", schema)

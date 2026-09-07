@@ -14,6 +14,21 @@ from .claims import (
     resolve_selector,
 )
 from .filesystem import FilesystemStorage
+from .migration_journal import (
+    MIGRATION_PATH,
+    MigrationJournalError,
+    load_migration_journal,
+    serialize_migration_journal,
+    validate_migration_journal,
+)
+from .migrations import (
+    MigratedDocument,
+    MigrationCompatibilityError,
+    MigrationConflict,
+    MigrationError,
+    detect_schema_version,
+    migrate_document,
+)
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .reviews import (
     AcceptReviewResult,
@@ -60,6 +75,12 @@ __all__ = [
     "InvalidClaimSelector",
     "InvalidStoragePath",
     "LoadedDocument",
+    "MIGRATION_PATH",
+    "MigratedDocument",
+    "MigrationCompatibilityError",
+    "MigrationConflict",
+    "MigrationError",
+    "MigrationJournalError",
     "ParsedDocument",
     "RepositoryError",
     "ReviewClaimError",
@@ -82,7 +103,12 @@ __all__ = [
     "UnsupportedSchemaVersion",
     "WorkflowStateRepository",
     "canonical_unit_id",
+    "detect_schema_version",
+    "load_migration_journal",
+    "migrate_document",
     "parse_document",
     "patch_text",
     "resolve_selector",
+    "serialize_migration_journal",
+    "validate_migration_journal",
 ]

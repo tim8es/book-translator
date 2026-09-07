@@ -7,6 +7,7 @@ from typing import Any
 
 from .claims import ClaimManager, canonical_unit_id
 from .coordination import FINALIZATION_PATH
+from .migration_journal import MIGRATION_PATH, MigrationJournalError, load_migration_journal
 from .repository import RepositoryError, WorkflowStateRepository
 from .reviews import REVIEW_EVIDENCE_VERSION, ReviewEvidenceError, ReviewLedgerManager
 from .schemas import SchemaError, SchemaKind
@@ -80,6 +81,24 @@ class StatusResolver:
         elif corpus_state == "invalid":
             detail = corpus_data.get("error")
             errors.append(str(detail) if detail else "source corpus integrity is invalid")
+
+        migration: dict[str, Any] = {"active": False}
+        try:
+            journal, _ = load_migration_journal(self.repository.storage)
+        except StorageNotFound:
+            pass
+        except (MigrationJournalError, StorageError) as exc:
+            errors.append(f"migration state is unavailable or invalid: {exc}")
+        else:
+            migration = {
+                "active": True,
+                "phase": journal["phase"],
+                "from_revision": journal["from_revision"],
+                "to_revision": journal["to_revision"],
+                "document_count": len(journal["documents"]),
+            }
+            if journal["book_slug"] != progress.get("book_slug"):
+                errors.append("migration journal book_slug does not match progress")
 
         finalization: dict[str, Any] = {"active": False}
         try:
@@ -205,6 +224,7 @@ class StatusResolver:
             "reviews": reviews,
             "claims": claims,
             "corpus": corpus_data,
+            "migration": migration,
             "finalization": finalization,
             "units": units,
             "state_revisions": revisions,
@@ -222,6 +242,14 @@ class StatusResolver:
                 "reason": "preflight_failed",
                 "errors": list(status.get("errors") or ()),
                 "context": self._context("blocked", None, status),
+            }
+
+        migration = status.get("migration")
+        if isinstance(migration, Mapping) and migration.get("active") is True:
+            return {
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "operation": "workflow_upgrade",
+                "context": self._context("workflow_upgrade", None, status),
             }
 
         finalization = status.get("finalization")
@@ -338,6 +366,8 @@ class StatusResolver:
             files.append("review-ledger.json")
         if operation == "finalize":
             files.append(FINALIZATION_PATH)
+        if operation == "workflow_upgrade":
+            files.append(MIGRATION_PATH)
 
         return {
             "role": role,

@@ -42,6 +42,35 @@ def _explicit_source(metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
 
 
+def _extracted_entries(
+    book_dir: Path,
+    progress: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    chapters = progress.get("chapters")
+    if not isinstance(chapters, list):
+        raise SourceIntegrityError("progress.json must contain a chapters array")
+
+    extracted: list[dict[str, Any]] = []
+    for record in chapters:
+        if not isinstance(record, Mapping):
+            raise SourceIntegrityError("Every chapter entry must be an object")
+        rel = _checked_extracted_rel(book_dir, record.get("source_path"))
+        path = book_dir / rel
+        if not path.is_file():
+            raise SourceIntegrityError(
+                f"Cannot seal incomplete corpus; missing {rel.as_posix()}"
+            )
+        extracted.append(
+            {
+                "number": record.get("number"),
+                "title": record.get("title"),
+                "path": rel.as_posix(),
+                "sha256": sha256_path(path),
+            }
+        )
+    return extracted
+
+
 def build_source_manifest(
     book_dir: Path,
     metadata: Mapping[str, Any],
@@ -50,9 +79,6 @@ def build_source_manifest(
 ) -> dict[str, Any]:
     """Build a sealed manifest from exact source/extracted bytes without writing state."""
 
-    chapters = progress.get("chapters")
-    if not isinstance(chapters, list):
-        raise SourceIntegrityError("progress.json must contain a chapters array")
     if not source.is_file():
         raise SourceIntegrityError(f"Source file does not exist: {source}")
 
@@ -80,25 +106,7 @@ def build_source_manifest(
         source_size = actual_size
         storage_mode = str(explicit.get("storage_mode"))
 
-    extracted: list[dict[str, Any]] = []
-    for record in chapters:
-        if not isinstance(record, Mapping):
-            raise SourceIntegrityError("Every chapter entry must be an object")
-        rel = _checked_extracted_rel(book_dir, record.get("source_path"))
-        path = book_dir / rel
-        if not path.is_file():
-            raise SourceIntegrityError(
-                f"Cannot seal incomplete corpus; missing {rel.as_posix()}"
-            )
-        extracted.append(
-            {
-                "number": record.get("number"),
-                "title": record.get("title"),
-                "path": rel.as_posix(),
-                "sha256": sha256_path(path),
-            }
-        )
-
+    extracted = _extracted_entries(book_dir, progress)
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "source_file": metadata.get("source_file"),
@@ -111,3 +119,47 @@ def build_source_manifest(
         manifest["source_storage_mode"] = storage_mode
         manifest["source_size_bytes"] = source_size
     return manifest
+
+
+def build_private_source_manifest_from_identity(
+    book_dir: Path,
+    metadata: Mapping[str, Any],
+    progress: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Seal a private-external corpus without requiring the original binary."""
+
+    explicit = _explicit_source(metadata)
+    if explicit is None or explicit.get("storage_mode") != "private_external":
+        raise SourceIntegrityError(
+            "private source manifest reconstruction requires metadata source.storage_mode=private_external"
+        )
+
+    filename = explicit.get("filename")
+    if not isinstance(filename, str) or not filename.strip():
+        raise SourceIntegrityError("Private source filename identity is missing")
+    if filename != metadata.get("source_file"):
+        raise SourceIntegrityError("Private source filename identity does not match source_file")
+
+    size_bytes = explicit.get("size_bytes")
+    if type(size_bytes) is not int or size_bytes < 0:
+        raise SourceIntegrityError("Private source size identity is invalid")
+
+    source_sha = explicit.get("sha256")
+    if (
+        not isinstance(source_sha, str)
+        or len(source_sha) != 64
+        or any(ch not in "0123456789abcdef" for ch in source_sha)
+    ):
+        raise SourceIntegrityError("Private source SHA-256 identity is invalid")
+
+    extracted = _extracted_entries(book_dir, progress)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source_file": filename,
+        "source_format": metadata.get("source_format"),
+        "source_sha256": source_sha,
+        "source_storage_mode": "private_external",
+        "source_size_bytes": size_bytes,
+        "chapter_count": len(extracted),
+        "extracted": extracted,
+    }
