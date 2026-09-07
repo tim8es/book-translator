@@ -192,6 +192,8 @@ class WorkflowV2ParallelSliceTests(unittest.TestCase):
     def test_resume_cli_accepts_invocation_scoped_parallel_flag(self):
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command")
+        subparsers.add_parser("extract")
+        subparsers.add_parser("validate")
         register_status_commands(
             subparsers,
             self.root,
