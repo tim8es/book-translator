@@ -481,3 +481,11 @@ Before declaring a book complete, the Orchestrator verifies that:
 11. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
 
 A built output file alone is not evidence that the book is complete.
+
+## GitHub API storage
+
+GitHub API storage is a supported durable orchestration substrate for environments such as ChatGPT Web that can call GitHub APIs but do not have a local checkout. GitHub Actions are not required for runtime orchestration.
+
+The backend must preserve the same `StorageBackend` semantics as filesystem execution: reads and listings are observational; create is create-if-absent; update/delete are compare-and-swap against the last observed blob revision. A rejected or ambiguous mutation must not be blindly retried. Re-read authoritative GitHub state, classify the durable result, and replan from that state.
+
+Use GitHub-specific mechanics only at the storage/transport boundary. Literary Translator and Reviewer contracts remain backend-agnostic.
