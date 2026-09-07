@@ -189,6 +189,29 @@ class WorkflowV2ParallelSliceTests(unittest.TestCase):
                 },
             )
 
+    def test_parallel_claim_snapshot_requires_base_commit(self):
+        with self.assertRaises(SchemaError):
+            self.repository.create(
+                ".workflow/claims/chapter-000001.json",
+                SchemaKind.CLAIM,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "claim_id": "e" * 32,
+                    "unit_id": "chapter-000001",
+                    "role": "translator",
+                    "session_id": "parallel-session",
+                    "base_revision": self.progress_revision,
+                    "base_commit": None,
+                    "workflow_revision": "workflow-revision",
+                    "shared_state_revisions": {
+                        "glossary": self.glossary_revision,
+                        "style_guide": self.style_revision,
+                    },
+                    "claimed_at": "2026-09-07T12:00:00Z",
+                    "expires_at": "2026-09-07T13:00:00Z",
+                },
+            )
+
     def test_resume_cli_accepts_invocation_scoped_parallel_flag(self):
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command")
