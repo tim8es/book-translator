@@ -9,6 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
+CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
 WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow_v2"
 
 
@@ -18,6 +19,7 @@ class WorkflowV2ParallelHandshakeTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
+        shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
         shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow_v2")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
