@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .coordination import BookCoordinationManager, CoordinationError
 from .repository import RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError, SchemaKind
 from .shared_state import (
@@ -249,10 +250,15 @@ class ProposalManager:
         *,
         now: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
+        coordination: BookCoordinationManager | None = None,
     ):
         self.repository = repository
         self._now_factory = now or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: uuid4().hex)
+        self._coordination = coordination or BookCoordinationManager(
+            repository,
+            now=self._now_factory,
+        )
 
     def _now(self) -> datetime:
         value = self._now_factory()
@@ -452,7 +458,7 @@ class ProposalManager:
         replacement: bytes | None = None,
         reason: str | None = None,
     ) -> ProposalResolutionResult:
-        """Resolve one proposal through the central single-writer shared-state path."""
+        """Resolve one proposal through the serialized single-writer shared-state path."""
 
         if not isinstance(proposal_id, str) or HEX_ID_RE.fullmatch(proposal_id) is None:
             raise ProposalError(
@@ -462,6 +468,48 @@ class ProposalManager:
         if type(accept) is not bool:
             raise ProposalError("accept must be a boolean")
 
+        try:
+            lease = self._coordination.acquire(
+                operation="proposal_reconcile",
+                session_id=session_id,
+            )
+        except CoordinationError as exc:
+            raise ProposalConflict(
+                f"proposal reconciliation is blocked by book coordination: {exc}"
+            ) from exc
+
+        try:
+            result = self._reconcile_locked(
+                proposal_id,
+                session_id=session_id,
+                accept=accept,
+                replacement=replacement,
+                reason=reason,
+            )
+        except Exception:
+            try:
+                self._coordination.release(lease)
+            except CoordinationError:
+                pass
+            raise
+
+        try:
+            self._coordination.release(lease)
+        except CoordinationError as exc:
+            raise ProposalConflict(
+                "proposal reconciliation completed but coordination mutex could not be released"
+            ) from exc
+        return result
+
+    def _reconcile_locked(
+        self,
+        proposal_id: str,
+        *,
+        session_id: str,
+        accept: bool,
+        replacement: bytes | None,
+        reason: str | None,
+    ) -> ProposalResolutionResult:
         resolution_path = _resolution_path(proposal_id)
         try:
             existing, revision = _load(
