@@ -14,6 +14,15 @@ from .claims import (
     resolve_selector,
 )
 from .filesystem import FilesystemStorage
+from .github_api import (
+    GitHubApiClient,
+    GitHubApiError,
+    GitHubFile,
+    GitHubMutation,
+    GitHubTree,
+    GitHubTreeEntry,
+)
+from .github_storage import GitHubStorage
 from .migration_journal import (
     MIGRATION_PATH,
     MigrationJournalError,
@@ -72,6 +81,13 @@ __all__ = [
     "ClaimOwnershipError",
     "ClaimRollbackError",
     "FilesystemStorage",
+    "GitHubApiClient",
+    "GitHubApiError",
+    "GitHubFile",
+    "GitHubMutation",
+    "GitHubStorage",
+    "GitHubTree",
+    "GitHubTreeEntry",
     "InvalidClaimSelector",
     "InvalidStoragePath",
     "LoadedDocument",
