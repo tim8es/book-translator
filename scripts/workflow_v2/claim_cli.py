@@ -78,6 +78,24 @@ def _git_head(root: Path) -> str | None:
     return value or None
 
 
+def _shared_state_revisions(args: argparse.Namespace) -> dict[str, str] | None:
+    glossary = args.glossary_revision
+    style_guide = args.style_guide_revision
+    if glossary is None and style_guide is None:
+        return None
+    if glossary is None or style_guide is None:
+        raise ClaimCliError(
+            "--glossary-revision and --style-guide-revision must be provided together"
+        )
+    if not glossary.strip() or not style_guide.strip():
+        raise ClaimCliError("shared-state revisions must be non-empty strings")
+    if args.base_commit is None or not args.base_commit.strip():
+        raise ClaimCliError(
+            "snapshot claim requires explicit --base-commit from resume --parallel"
+        )
+    return {"glossary": glossary, "style_guide": style_guide}
+
+
 def _claim_json(claim: ActiveClaim) -> dict[str, Any]:
     return {**claim.data, "revision": claim.version}
 
@@ -100,6 +118,7 @@ def claim_command(args: argparse.Namespace, root: Path) -> int:
     progress, progress_revision = _load_progress(repository)
     workflow_revision = _load_workflow_revision(repository)
     manager = ClaimManager(repository)
+    shared_state_revisions = _shared_state_revisions(args)
     base_commit = args.base_commit if args.base_commit is not None else _git_head(root)
     try:
         claims = manager.acquire(
@@ -110,6 +129,7 @@ def claim_command(args: argparse.Namespace, root: Path) -> int:
             base_revision=progress_revision,
             base_commit=base_commit,
             workflow_revision=workflow_revision,
+            shared_state_revisions=shared_state_revisions,
             lease_seconds=args.lease_seconds,
         )
     except (ClaimError, SchemaError, RepositoryError, StorageError) as exc:
@@ -194,7 +214,15 @@ def register_claim_commands(subparsers: argparse._SubParsersAction, root: Path) 
     claim.add_argument("--role", choices=("translator", "reviewer"), required=True)
     claim.add_argument("--session-id", required=True, help="Stable identity of the active worker/session.")
     claim.add_argument("--lease-seconds", type=int, default=3600, help="Lease duration in seconds (default: 3600).")
-    claim.add_argument("--base-commit", help="Git commit associated with dispatch; best-effort HEAD when omitted.")
+    claim.add_argument("--base-commit", help="Git commit associated with dispatch; best-effort HEAD when omitted for legacy/sequential claims.")
+    claim.add_argument(
+        "--glossary-revision",
+        help="Frozen glossary revision from resume --parallel; requires --style-guide-revision and --base-commit.",
+    )
+    claim.add_argument(
+        "--style-guide-revision",
+        help="Frozen style-guide revision from resume --parallel; requires --glossary-revision and --base-commit.",
+    )
     claim.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
     claim.set_defaults(func=lambda args: claim_command(args, root))
 
