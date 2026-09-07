@@ -13,7 +13,7 @@ if str(SCRIPTS) not in sys.path:
 
 from workflow_v2.filesystem import FilesystemStorage
 from workflow_v2.repository import WorkflowStateRepository
-from workflow_v2.reviews import ReviewClaimError, ReviewLedgerManager
+from workflow_v2.reviews import ReviewClaimError, ReviewEvidenceError, ReviewLedgerManager
 from workflow_v2.schemas import SCHEMA_VERSION, SchemaKind
 
 try:
@@ -99,6 +99,39 @@ class WorkflowV2ProposalTests(unittest.TestCase):
     def load_json(self, path):
         return json.loads(self.storage.read(path).content.decode("utf-8"))
 
+    def review_fixture(self):
+        metadata = {
+            "schema_version": SCHEMA_VERSION,
+            "title": "Demo",
+            "target_language": "ru",
+            "source_format": "markdown",
+            "source_file": "demo.md",
+            "chapter_count": 1,
+            "workflow": {
+                "resolved_revision": WORKFLOW_REVISION,
+                "review_evidence": "review-ledger-v1",
+            },
+        }
+        try:
+            self.repository.create(
+                "review-ledger.json",
+                SchemaKind.REVIEW_LEDGER,
+                {"schema_version": SCHEMA_VERSION, "book_slug": "demo", "next_sequence": 1, "records": []},
+            )
+        except Exception:
+            pass
+        artifacts = {
+            "extracted/001-one.md": b"source\n",
+            "translated/001-one.md": b"translation\n",
+        }
+        review = ReviewLedgerManager(
+            self.repository,
+            artifact_reader=lambda path: artifacts[path],
+            now=lambda: NOW,
+            id_factory=lambda: "e" * 32,
+        )
+        return metadata, review
+
     def test_submit_persists_immutable_claim_bound_proposal_without_shared_write(self):
         before_glossary = self.storage.read("glossary.md")
         before_style = self.storage.read("style-guide.md")
@@ -176,33 +209,7 @@ class WorkflowV2ProposalTests(unittest.TestCase):
         self.assertEqual(self.storage.read("style-guide.md"), before)
 
     def test_reviewer_result_rejects_shared_state_drift_and_records_snapshot_when_current(self):
-        metadata = {
-            "schema_version": SCHEMA_VERSION,
-            "title": "Demo",
-            "target_language": "ru",
-            "source_format": "markdown",
-            "source_file": "demo.md",
-            "chapter_count": 1,
-            "workflow": {
-                "resolved_revision": WORKFLOW_REVISION,
-                "review_evidence": "review-ledger-v1",
-            },
-        }
-        self.repository.create(
-            "review-ledger.json",
-            SchemaKind.REVIEW_LEDGER,
-            {"schema_version": SCHEMA_VERSION, "book_slug": "demo", "next_sequence": 1, "records": []},
-        )
-        artifacts = {
-            "extracted/001-one.md": b"source\n",
-            "translated/001-one.md": b"translation\n",
-        }
-        review = ReviewLedgerManager(
-            self.repository,
-            artifact_reader=lambda path: artifacts[path],
-            now=lambda: NOW,
-            id_factory=lambda: "e" * 32,
-        )
+        metadata, review = self.review_fixture()
 
         self.storage.write_if_version(
             "style-guide.md", b"# Style\ndrifted\n", self.style_revision
@@ -245,6 +252,38 @@ class WorkflowV2ProposalTests(unittest.TestCase):
             recorded.record["shared_state_revisions"],
             updated_claim["shared_state_revisions"],
         )
+
+    def test_accept_review_rejects_drift_after_pass_record_before_promotion(self):
+        metadata, review = self.review_fixture()
+        recorded = review.record(
+            self.progress,
+            self.progress_revision,
+            metadata,
+            1,
+            outcome="PASS",
+            reviewer_session_id="worker-a",
+        )
+        self.assertEqual(
+            recorded.record["shared_state_revisions"],
+            self.claim["shared_state_revisions"],
+        )
+
+        self.storage.write_if_version(
+            "glossary.md", b"# Glossary\nchanged after review\n", self.glossary_revision
+        )
+        before = self.repository.read("progress.json", SchemaKind.PROGRESS)
+
+        with self.assertRaises(ReviewEvidenceError):
+            review.accept_review(
+                self.progress,
+                self.progress_revision,
+                metadata,
+                1,
+            )
+
+        after = self.repository.read("progress.json", SchemaKind.PROGRESS)
+        self.assertEqual(after.version, before.version)
+        self.assertEqual(after.data["chapters"][0]["status"], "translated")
 
 
 if __name__ == "__main__":
