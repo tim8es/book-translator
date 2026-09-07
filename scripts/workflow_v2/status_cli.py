@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,45 @@ def _snapshot(
         raise StatusCliError(str(exc)) from exc
 
 
+def _git_head(root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _parallel_dispatch_snapshot(
+    status: Mapping[str, Any],
+    root: Path,
+) -> tuple[str, dict[str, str]]:
+    base_commit = _git_head(root)
+    if base_commit is None:
+        raise StatusCliError(
+            "parallel resume requires Git HEAD so dispatch can bind a fixed base_commit"
+        )
+
+    revisions = status.get("state_revisions")
+    if not isinstance(revisions, Mapping):
+        raise StatusCliError("parallel resume shared-state revisions are unavailable")
+
+    shared: dict[str, str] = {}
+    for key in ("glossary", "style_guide"):
+        revision = revisions.get(key)
+        if not isinstance(revision, str) or not revision.strip():
+            raise StatusCliError(f"parallel resume requires current {key} revision")
+        shared[key] = revision
+    return base_commit, shared
+
+
 def _print_json(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
@@ -159,6 +199,20 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
         payload = resolver.resume(status, parallel=getattr(args, "parallel", None))
     except StatusError as exc:
         raise StatusCliError(str(exc)) from exc
+
+    if payload["operation"] == "parallel":
+        base_commit, shared_state_revisions = _parallel_dispatch_snapshot(status, root)
+        assignments = payload.get("assignments")
+        if not isinstance(assignments, list):
+            raise StatusCliError("parallel resume returned invalid assignments")
+        for assignment in assignments:
+            if not isinstance(assignment, Mapping):
+                raise StatusCliError("parallel resume returned invalid assignment")
+            context = assignment.get("context")
+            if not isinstance(context, dict):
+                raise StatusCliError("parallel resume assignment context is invalid")
+            context["base_commit"] = base_commit
+            context["shared_state_revisions"] = dict(shared_state_revisions)
 
     if args.json:
         _print_json(payload)
