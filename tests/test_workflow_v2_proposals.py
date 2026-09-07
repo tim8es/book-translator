@@ -11,14 +11,16 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from workflow_v2.coordination import BookCoordinationManager
 from workflow_v2.filesystem import FilesystemStorage
 from workflow_v2.repository import WorkflowStateRepository
 from workflow_v2.reviews import ReviewClaimError, ReviewEvidenceError, ReviewLedgerManager
 from workflow_v2.schemas import SCHEMA_VERSION, SchemaKind
 
 try:
-    from workflow_v2.proposals import ProposalManager
+    from workflow_v2.proposals import ProposalConflict, ProposalManager
 except (ImportError, ModuleNotFoundError):
+    ProposalConflict = None
     ProposalManager = None
 
 
@@ -112,14 +114,11 @@ class WorkflowV2ProposalTests(unittest.TestCase):
                 "review_evidence": "review-ledger-v1",
             },
         }
-        try:
-            self.repository.create(
-                "review-ledger.json",
-                SchemaKind.REVIEW_LEDGER,
-                {"schema_version": SCHEMA_VERSION, "book_slug": "demo", "next_sequence": 1, "records": []},
-            )
-        except Exception:
-            pass
+        self.repository.create(
+            "review-ledger.json",
+            SchemaKind.REVIEW_LEDGER,
+            {"schema_version": SCHEMA_VERSION, "book_slug": "demo", "next_sequence": 1, "records": []},
+        )
         artifacts = {
             "extracted/001-one.md": b"source\n",
             "translated/001-one.md": b"translation\n",
@@ -192,6 +191,32 @@ class WorkflowV2ProposalTests(unittest.TestCase):
         self.assertEqual(second.resolution, first.resolution)
         self.assertFalse(second.changed_shared_state)
         self.assertEqual(self.load_json(first.path), first.resolution)
+
+    def test_reconcile_is_blocked_by_live_book_coordination_mutex(self):
+        proposal = self.submit(target="glossary")
+        before = self.storage.read("glossary.md")
+        coordinator = BookCoordinationManager(
+            self.repository,
+            now=lambda: NOW,
+            id_factory=lambda: "f" * 32,
+        )
+        lease = coordinator.acquire(
+            operation="claim_admission",
+            session_id="other-orchestrator",
+            lease_seconds=60,
+        )
+
+        try:
+            with self.assertRaises(ProposalConflict):
+                self.manager().reconcile(
+                    proposal.proposal["proposal_id"],
+                    session_id="orchestrator-a",
+                    accept=True,
+                    replacement=b"# Glossary\nnew\n",
+                )
+            self.assertEqual(self.storage.read("glossary.md"), before)
+        finally:
+            coordinator.release(lease)
 
     def test_rejected_proposal_never_mutates_shared_state(self):
         proposal = self.submit(target="style_guide")
