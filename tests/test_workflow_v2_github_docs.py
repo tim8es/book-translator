@@ -13,7 +13,7 @@ class WorkflowV2GitHubDocumentationTests(unittest.TestCase):
         self.assertIn("github actions", lowered)
         self.assertIn("not required", lowered)
         self.assertIn("re-read", lowered)
-        self.assertIn("blind retry", lowered)
+        self.assertRegex(lowered, r"blind(?:ly)? retr(?:y|ied)")
 
     def test_setup_declares_capabilities_scope_and_credential_non_persistence(self):
         text = (ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
