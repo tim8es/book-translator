@@ -81,6 +81,8 @@ This strict rule applies to:
 
 Translator and Reviewer roles may return artifacts, findings, warnings, corrections, and proposed glossary/style decisions. They do not independently race to persist shared state.
 
+When a worker has a frozen shared-state snapshot, glossary/style suggestions are persisted as immutable `.workflow/proposals/<proposal-id>.json` records tied to the worker claim, `base_commit`, workflow revision, and the exact glossary/style revisions used by that worker. Workers do not directly mutate `glossary.md` or `style-guide.md`. The Orchestrator reconciles each proposal through the central single-writer path: acquire the book coordination mutex, re-check the frozen shared-state revisions, apply an accepted replacement with compare-and-swap, and persist the immutable `.workflow/proposals/<proposal-id>.resolution.json`. A stale proposal is resolved as stale without overwriting newer shared state.
+
 A translation artifact may be written directly by a worker only when the active environment provides a non-conflicting target. The Orchestrator remains responsible for accepting that artifact as canonical book state.
 
 ## Book selection
@@ -213,7 +215,9 @@ T1 -> R1 -> state commit -> T2 -> R2 -> state commit -> T3 ...
 
 Do not translate multiple chapters concurrently by default.
 
-Later chapters can depend on terminology, character voice, ambiguity, and continuity decisions established during earlier reviewed chapters. Parallel chapter translation requires a separate explicit future mode with conflict handling and state-version checks; it is not part of this contract.
+Later chapters can depend on terminology, character voice, ambiguity, and continuity decisions established during earlier reviewed chapters. Explicit parallel execution is therefore opt-in per invocation only: `resume --parallel N` with `N > 1`. Without that flag, scheduling remains sequential and unchanged.
+
+In explicit parallel mode, the Orchestrator may plan up to `N` disjoint, currently unclaimed worker assignments. Every dispatched parallel claim must record a non-empty `base_commit` plus the frozen `glossary.md` and `style-guide.md` storage revisions from the same planning snapshot. If those revisions or the base commit cannot be recorded, do not dispatch the unit in parallel. Shared-state suggestions from parallel workers use the proposal/reconciliation path above; they never authorize direct concurrent glossary/style writes.
 
 ## Selecting the next chapter
 
@@ -237,6 +241,19 @@ When Python is available, acquire the claim with the active session identity:
 python scripts/book.py claim <book-slug> <chapter-or-range> --role <translator|reviewer> --session-id <session-id>
 ```
 
+For explicit parallel dispatch, first obtain the fixed planning snapshot from `resume --parallel N`; use `--json` for machine consumption. Pass the exact returned values into `claim` without recomputing Git HEAD or shared-state revisions:
+
+```bash
+python scripts/book.py claim <book-slug> <chapter> \
+  --role <translator|reviewer> \
+  --session-id <session-id> \
+  --base-commit <context.base_commit> \
+  --glossary-revision <context.shared_state_revisions.glossary> \
+  --style-guide-revision <context.shared_state_revisions.style_guide>
+```
+
+Human `resume --parallel N` output emits the same three values as a copyable `claim-snapshot` flag line. If any planning value is unavailable or stale by claim admission time, do not dispatch that parallel worker.
+
 Inspect current ownership when needed with:
 
 ```bash
@@ -257,7 +274,7 @@ python scripts/book.py release <book-slug> <chapter-or-range> --session-id <sess
 
 For the normal chapter pipeline, acquire a translator claim before translator dispatch, release it after the translation result is durably accepted or abandoned, then acquire the reviewer claim before reviewer dispatch and release it after the review result is processed. Do not infer ownership from chat history; durable claim state is authoritative.
 
-Range claims provide safe coordination for an explicitly requested bounded range, but they do not enable parallel translation by themselves. The default sequential chapter policy above remains in force until a separate parallel execution mode defines its own scheduling and conflict policy.
+Range claims provide safe coordination for an explicitly requested bounded range, but they do not enable parallel translation by themselves. Explicit parallel scheduling must still return disjoint units, and each parallel worker claim must bind the exact unit/role to the planning snapshot's `base_commit`, glossary revision, and style-guide revision before work starts.
 
 ## Translator context pack
 
@@ -280,16 +297,22 @@ If the chapter directly continues a scene and prior text is materially necessary
 
 ## Accepting a Translator result
 
-The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract.
+The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract. A Translator result is not durably accepted merely because the translation file exists.
 
-Before changing state to `translated`, the Orchestrator verifies that:
+For the first `extracted -> translated` transition, acceptance must run while the matching Translator claim is still live:
 
-- the expected translation artifact exists or was returned completely;
-- it is non-empty;
-- it corresponds to the selected chapter;
-- proposed global decisions are handled explicitly rather than silently committed by the worker.
+```bash
+python scripts/book.py accept-translation <book-slug> <chapter> \
+  --session-id <translator-session>
+```
 
-After accepting the artifact, persist `translated` and any accepted global decisions through the single-writer path.
+`accept-translation` verifies the exact chapter and workflow revision, the owning live Translator claim, a non-empty canonical translation artifact, and the current source/translation SHA-256 identities. When the claim contains frozen glossary/style revisions, the command re-checks that shared-state snapshot under the same book coordination mutex used by proposal reconciliation; drift before acceptance rejects the result as stale without advancing `progress.json`.
+
+On success, one compare-and-swap of `progress.json` performs both effects atomically: it changes the chapter state to `translated` and stores `translation_acceptance` evidence on that chapter. The evidence binds the accepted source and translation hashes to the exact claim id/revision, Translator session, claim base progress revision, `base_commit`, workflow revision, and frozen shared-state revisions (or `null` for a legacy/sequential claim without a snapshot). There is no separate evidence-write window in which lifecycle state can advance without its acceptance provenance.
+
+Only after `accept-translation` succeeds may the Orchestrator release the Translator claim. A retry after a successful progress CAS is idempotent when the current canonical artifacts still match the stored `translation_acceptance`, including after the original claim has been released. If the artifact identity or stored evidence no longer matches, fail closed rather than fabricating acceptance.
+
+Proposed global decisions are handled explicitly rather than silently committed by the worker. Accepted glossary/style proposals are reconciled centrally through the single-writer proposal path; the worker result never directly races those shared files.
 
 ## Reviewer context pack
 
@@ -351,7 +374,7 @@ For a current PASS, promote lifecycle state only through:
 python scripts/book.py accept-review <book-slug> <chapter>
 ```
 
-`accept-review` re-resolves current evidence and uses compare-and-swap on `progress.json`; a missing, stale, mismatched, or current `CORRECTIONS_REQUIRED` record cannot promote the chapter. If a concurrent state change occurs, re-read repository state rather than treating the old PASS result as reusable authority.
+`accept-review` re-resolves current evidence and uses compare-and-swap on `progress.json`; a missing, stale, mismatched, or current `CORRECTIONS_REQUIRED` record cannot promote the chapter. For snapshot-backed parallel review evidence, promotion also re-checks the stored glossary/style revisions used by the reviewer, so a shared-state change between `review-record` and `accept-review` blocks promotion as stale. If a concurrent state change occurs, re-read repository state rather than treating the old PASS result as reusable authority.
 
 If the outcome is `CORRECTIONS_REQUIRED`, do not mark the chapter reviewed. Apply or obtain the corrections through the appropriate role boundary and re-run independent review on the corrected artifact until a Reviewer returns `PASS`, record each outcome, and only then attempt `accept-review`.
 
@@ -434,6 +457,7 @@ At minimum, structural validation must protect these invariants:
 - workflow provenance is present for new books;
 - source identity/integrity state is retained when `source-manifest.json` exists;
 - no translation artifact replaced the preserved source;
+- when `translation_acceptance` evidence is present, its recorded source and translation hashes still match the current canonical artifacts;
 - for ledger-enabled books, `review-ledger.json` exists, validates, and every chapter marked `reviewed` resolves to current exact PASS evidence.
 
 When `source-manifest.json` exists, structural validation is not enough: `python scripts/corpus.py verify <book-slug>` must also confirm the preserved source and extracted SHA-256 values before literary work resumes.
@@ -442,7 +466,8 @@ Neither structural nor integrity validation can substitute for a Reviewer `PASS`
 
 ## Failure handling
 
-- If translation fails or is incomplete, do not advance the chapter to `translated`.
+- If translation fails, is incomplete, or cannot pass `accept-translation`, do not advance the chapter to `translated`.
+- If stored `translation_acceptance` no longer matches the canonical source or translation artifact, treat the translated lifecycle state as invalid until explicitly reconciled.
 - If review fails to run, errors, returns `CORRECTIONS_REQUIRED`, or cannot be durably recorded, keep the chapter `translated`.
 - If review evidence is missing, malformed, mismatched, or stale, do not promote or continue treating the lifecycle state as validly reviewed.
 - If corpus preflight, hash verification, or structural validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.

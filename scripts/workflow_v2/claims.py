@@ -12,6 +12,7 @@ from uuid import uuid4
 from .coordination import BookCoordinationManager, CoordinationError
 from .repository import LoadedDocument, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaKind, parse_document
+from .shared_state import SharedStateError, require_current_shared_state
 from .storage import StorageAlreadyExists, StorageError, StorageNotFound, StorageVersionConflict
 
 
@@ -241,6 +242,17 @@ class ClaimManager:
                     raise ClaimError("claim admission blocked while finalization is active")
             except CoordinationError as exc:
                 raise ClaimError(f"claim admission blocked: {exc}") from exc
+
+            if frozen_shared_state is not None:
+                try:
+                    require_current_shared_state(
+                        self.repository.storage,
+                        frozen_shared_state,
+                    )
+                except SharedStateError as exc:
+                    raise ClaimError(
+                        f"shared state snapshot is stale or invalid: {exc}"
+                    ) from exc
 
             for unit_id in unit_ids:
                 try:

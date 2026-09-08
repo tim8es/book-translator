@@ -16,6 +16,7 @@ from .coordination import FINALIZATION_PATH
 from .migration_journal import MigrationJournalError, load_migration_journal
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
+from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
 from .storage import StorageError, StorageNotFound, StorageVersionConflict
 
 
@@ -192,7 +193,7 @@ class ReviewLedgerManager:
         unit_id: str,
         reviewer_session_id: str,
         workflow_revision: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         if not isinstance(reviewer_session_id, str) or not reviewer_session_id.strip():
             raise ReviewClaimError("reviewer session id must be a non-empty string")
         path = f".workflow/claims/{unit_id}.json"
@@ -216,6 +217,20 @@ class ReviewLedgerManager:
             raise ReviewClaimError(
                 f"unit {unit_id} reviewer claim is expired and cannot authorize new review evidence"
             )
+
+        snapshot = claim.get("shared_state_revisions")
+        if snapshot is not None:
+            try:
+                require_current_shared_state(self.repository.storage, snapshot)
+            except SharedStateStale as exc:
+                raise ReviewClaimError(
+                    f"unit {unit_id} reviewer result is stale: {exc}"
+                ) from exc
+            except SharedStateError as exc:
+                raise ReviewClaimError(
+                    f"cannot validate shared state for reviewer claim {unit_id}: {exc}"
+                ) from exc
+        return copy.deepcopy(claim)
 
     @staticmethod
     def _history_for(ledger: Mapping[str, Any], unit_id: str) -> list[dict[str, Any]]:
@@ -361,7 +376,7 @@ class ReviewLedgerManager:
             allow_untranslated=False,
         )
         assert translation_sha256 is not None
-        self._require_reviewer_claim(unit_id, reviewer_session_id, workflow_revision)
+        claim = self._require_reviewer_claim(unit_id, reviewer_session_id, workflow_revision)
         loaded = self._load_ledger(progress)
         history = self._history_for(loaded.data, unit_id)
         record_id = self._new_id()
@@ -382,6 +397,10 @@ class ReviewLedgerManager:
             "correction_round": self._correction_round(history, outcome),
             "supersedes_record_id": history[-1]["record_id"] if history else None,
         }
+        if "shared_state_revisions" in claim:
+            record["shared_state_revisions"] = copy.deepcopy(
+                claim["shared_state_revisions"]
+            )
         parse_document(
             SchemaKind.REVIEW_LEDGER,
             {
@@ -469,6 +488,24 @@ class ReviewLedgerManager:
                 progress_revision=progress_revision,
                 changed=False,
             )
+
+        current_record = resolution.current_record
+        snapshot = (
+            current_record.get("shared_state_revisions")
+            if isinstance(current_record, Mapping)
+            else None
+        )
+        if snapshot is not None:
+            try:
+                require_current_shared_state(self.repository.storage, snapshot)
+            except SharedStateStale as exc:
+                raise ReviewEvidenceError(
+                    f"chapter {chapter_number} PASS review evidence is stale: {exc}"
+                ) from exc
+            except SharedStateError as exc:
+                raise ReviewEvidenceError(
+                    f"cannot validate shared state before accepting chapter {chapter_number}: {exc}"
+                ) from exc
 
         updated = copy.deepcopy(dict(progress))
         target = self._chapter(updated, chapter_number)

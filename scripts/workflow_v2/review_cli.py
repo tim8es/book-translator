@@ -27,6 +27,11 @@ from .storage import (
     StorageNotFound,
     StorageVersionConflict,
 )
+from .translations import (
+    AcceptTranslationResult,
+    TranslationAcceptanceError,
+    TranslationAcceptanceManager,
+)
 
 
 REVIEW_REPORT_PATH = "REVIEW_REPORT.md"
@@ -106,6 +111,16 @@ def _manager(book_dir: Path, repository: WorkflowStateRepository) -> ReviewLedge
     return ReviewLedgerManager(repository, artifact_reader=_artifact_reader(book_dir))
 
 
+def _translation_manager(
+    book_dir: Path,
+    repository: WorkflowStateRepository,
+) -> TranslationAcceptanceManager:
+    return TranslationAcceptanceManager(
+        repository,
+        artifact_reader=_artifact_reader(book_dir),
+    )
+
+
 def _print_json(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
@@ -134,6 +149,16 @@ def _accept_json(result: AcceptReviewResult) -> dict[str, Any]:
         "changed": result.changed,
         "progress_revision": result.progress_revision,
         "status": result.status,
+        "unit_id": result.unit_id,
+    }
+
+
+def _accept_translation_json(result: AcceptTranslationResult) -> dict[str, Any]:
+    return {
+        "changed": result.changed,
+        "progress_revision": result.progress_revision,
+        "status": result.status,
+        "translation_sha256": result.translation_sha256,
         "unit_id": result.unit_id,
     }
 
@@ -242,6 +267,33 @@ def review_report_command(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def accept_translation_command(args: argparse.Namespace, root: Path) -> int:
+    book_dir, repository = _repository(root, args.slug)
+    progress, progress_revision = _load_progress(repository)
+    metadata = _load_metadata(repository)
+    manager = _translation_manager(book_dir, repository)
+    try:
+        result = manager.accept(
+            progress,
+            progress_revision,
+            metadata,
+            args.chapter,
+            session_id=args.session_id,
+        )
+    except (TranslationAcceptanceError, SchemaError, RepositoryError, StorageError) as exc:
+        raise ReviewCliError(str(exc)) from exc
+
+    if args.json:
+        _print_json(_accept_translation_json(result))
+    else:
+        suffix = "unchanged" if not result.changed else "updated"
+        print(
+            f"accepted {result.unit_id} as translated ({suffix}) "
+            f"translation_sha256={result.translation_sha256}"
+        )
+    return 0
+
+
 def accept_review_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
@@ -298,6 +350,30 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
         help="Emit deterministic machine-readable JSON without writing REVIEW_REPORT.md.",
     )
     report.set_defaults(func=lambda args: review_report_command(args, root))
+
+    accept_translation = subparsers.add_parser(
+        "accept-translation",
+        help="Promote one Translator artifact through its durable claim and shared-state snapshot.",
+    )
+    accept_translation.add_argument("slug", help="Book slug under books/.")
+    accept_translation.add_argument(
+        "chapter",
+        type=_positive_chapter,
+        help="Positive chapter number.",
+    )
+    accept_translation.add_argument(
+        "--session-id",
+        required=True,
+        help="Owning translator session identity.",
+    )
+    accept_translation.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit deterministic machine-readable JSON.",
+    )
+    accept_translation.set_defaults(
+        func=lambda args: accept_translation_command(args, root)
+    )
 
     accept = subparsers.add_parser("accept-review", help="Promote one chapter using current PASS evidence.")
     accept.add_argument("slug", help="Book slug under books/.")
