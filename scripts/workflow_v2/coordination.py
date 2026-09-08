@@ -190,6 +190,49 @@ class BookCoordinationManager:
             raise CoordinationError(f"cannot acquire coordination mutex after cleanup: {exc}") from exc
         return CoordinationLease(COORDINATION_PATH, document, version)
 
+    def renew(
+        self,
+        lease: CoordinationLease,
+        *,
+        lease_seconds: int = 60,
+    ) -> CoordinationLease:
+        """Extend a still-live lease only while the exact holder still owns it."""
+
+        if not isinstance(lease, CoordinationLease):
+            raise CoordinationError("renew requires a CoordinationLease")
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise CoordinationError("lease_seconds must be a positive integer")
+        now = self._now()
+        try:
+            current = self._read()
+        except StorageNotFound as exc:
+            raise CoordinationConflict("coordination mutex no longer exists") from exc
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise CoordinationError(f"coordination mutex is invalid or unavailable: {exc}") from exc
+
+        identity_keys = ("lock_id", "operation", "session_id", "acquired_at")
+        if current.version != lease.version or any(
+            current.data.get(key) != lease.data.get(key) for key in identity_keys
+        ):
+            raise CoordinationConflict("coordination mutex changed before renewal")
+        if _parse_utc(current.data["expires_at"]) <= now:
+            raise CoordinationConflict("coordination mutex expired before renewal")
+
+        document = dict(current.data)
+        document["expires_at"] = _format_utc(now + timedelta(seconds=lease_seconds))
+        try:
+            version = self.repository.write_if_version(
+                COORDINATION_PATH,
+                SchemaKind.COORDINATION_LOCK,
+                document,
+                current.version,
+            )
+        except (StorageNotFound, StorageVersionConflict) as exc:
+            raise CoordinationConflict("coordination mutex changed during renewal") from exc
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise CoordinationError(f"cannot renew coordination mutex: {exc}") from exc
+        return CoordinationLease(COORDINATION_PATH, document, version)
+
     def release(self, lease: CoordinationLease) -> None:
         if not isinstance(lease, CoordinationLease):
             raise CoordinationError("release requires a CoordinationLease")
