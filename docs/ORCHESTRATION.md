@@ -241,6 +241,19 @@ When Python is available, acquire the claim with the active session identity:
 python scripts/book.py claim <book-slug> <chapter-or-range> --role <translator|reviewer> --session-id <session-id>
 ```
 
+For explicit parallel dispatch, first obtain the fixed planning snapshot from `resume --parallel N`; use `--json` for machine consumption. Pass the exact returned values into `claim` without recomputing Git HEAD or shared-state revisions:
+
+```bash
+python scripts/book.py claim <book-slug> <chapter> \
+  --role <translator|reviewer> \
+  --session-id <session-id> \
+  --base-commit <context.base_commit> \
+  --glossary-revision <context.shared_state_revisions.glossary> \
+  --style-guide-revision <context.shared_state_revisions.style_guide>
+```
+
+Human `resume --parallel N` output emits the same three values as a copyable `claim-snapshot` flag line. If any planning value is unavailable or stale by claim admission time, do not dispatch that parallel worker.
+
 Inspect current ownership when needed with:
 
 ```bash
