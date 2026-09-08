@@ -514,3 +514,11 @@ GitHub API storage is a supported durable orchestration substrate for environmen
 The backend must preserve the same `StorageBackend` semantics as filesystem execution: reads and listings are observational; create is create-if-absent; update/delete are compare-and-swap against the last observed blob revision. A rejected or ambiguous mutation must not be blindly retried. Re-read authoritative GitHub state, classify the durable result, and replan from that state.
 
 Use GitHub-specific mechanics only at the storage/transport boundary. Literary Translator and Reviewer contracts remain backend-agnostic.
+
+## Authoritative machine state and generated projections
+
+Authoritative execution and review state lives in versioned machine-readable records such as `metadata.json`, `progress.json`, `review-ledger.json`, `source-manifest.json`, durable claims/coordination records, proposal/resolution records, and output manifests. Current artifact bytes and their recorded revisions/hashes are part of that authority.
+
+`STATE.md`, `FINAL_QUALITY_GATES.md`, and `REVIEW_REPORT.md` are generated projections of authoritative machine state. They are deterministic human-readable evidence, not lifecycle or review authority. Handwritten range audits or edits to generated Markdown must never be used to manufacture PASS coverage or completion. When authoritative state changes, regenerate the projections through the normal review-report/finalize paths.
+
+Repository contributors and Git-backed book workflows should follow `docs/COMMIT_DISCIPLINE.md` for audit-friendly commit boundaries, provenance, and revert/recovery behavior. That document governs Git history as a secondary audit trail; it does not replace the machine-state acceptance rules in this orchestration contract.
