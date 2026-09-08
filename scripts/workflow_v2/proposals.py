@@ -441,10 +441,11 @@ class ProposalManager:
 
         target = proposal["target"]
         frozen = proposal["shared_state_revisions"]
-        other_keys = SHARED_STATE_KEYS - {target}
-        if any(current[key] != frozen[key] for key in other_keys):
-            return None
         target_value = self.repository.storage.read(SHARED_STATE_PATHS[target])
+        if target_value.version != current.get(target):
+            return None
+        if target_value.version == frozen[target]:
+            return None
         if target_value.content != replacement:
             return None
         return target_value.version
