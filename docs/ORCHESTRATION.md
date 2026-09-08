@@ -297,17 +297,22 @@ If the chapter directly continues a scene and prior text is materially necessary
 
 ## Accepting a Translator result
 
-The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract.
+The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract. A Translator result is not durably accepted merely because the translation file exists.
 
-Before changing state to `translated`, the Orchestrator verifies that:
+For the first `extracted -> translated` transition, acceptance must run while the matching Translator claim is still live:
 
-- the expected translation artifact exists or was returned completely;
-- it is non-empty;
-- it corresponds to the selected chapter;
-- proposed global decisions are handled explicitly rather than silently committed by the worker;
-- when the worker claim contains frozen shared-state revisions, the relevant glossary/style revisions still match those used by the worker; otherwise treat the result as stale and re-check/re-dispatch before acceptance.
+```bash
+python scripts/book.py accept-translation <book-slug> <chapter> \
+  --session-id <translator-session>
+```
 
-After accepting the artifact, persist `translated` and any accepted global decisions through the single-writer path. Accepted glossary/style proposals are reconciled centrally; the worker result never directly races those shared files.
+`accept-translation` verifies the exact chapter and workflow revision, the owning live Translator claim, a non-empty canonical translation artifact, and the current source/translation SHA-256 identities. When the claim contains frozen glossary/style revisions, the command re-checks that shared-state snapshot under the same book coordination mutex used by proposal reconciliation; drift before acceptance rejects the result as stale without advancing `progress.json`.
+
+On success, one compare-and-swap of `progress.json` performs both effects atomically: it changes the chapter state to `translated` and stores `translation_acceptance` evidence on that chapter. The evidence binds the accepted source and translation hashes to the exact claim id/revision, Translator session, claim base progress revision, `base_commit`, workflow revision, and frozen shared-state revisions (or `null` for a legacy/sequential claim without a snapshot). There is no separate evidence-write window in which lifecycle state can advance without its acceptance provenance.
+
+Only after `accept-translation` succeeds may the Orchestrator release the Translator claim. A retry after a successful progress CAS is idempotent when the current canonical artifacts still match the stored `translation_acceptance`, including after the original claim has been released. If the artifact identity or stored evidence no longer matches, fail closed rather than fabricating acceptance.
+
+Proposed global decisions are handled explicitly rather than silently committed by the worker. Accepted glossary/style proposals are reconciled centrally through the single-writer proposal path; the worker result never directly races those shared files.
 
 ## Reviewer context pack
 
@@ -452,6 +457,7 @@ At minimum, structural validation must protect these invariants:
 - workflow provenance is present for new books;
 - source identity/integrity state is retained when `source-manifest.json` exists;
 - no translation artifact replaced the preserved source;
+- when `translation_acceptance` evidence is present, its recorded source and translation hashes still match the current canonical artifacts;
 - for ledger-enabled books, `review-ledger.json` exists, validates, and every chapter marked `reviewed` resolves to current exact PASS evidence.
 
 When `source-manifest.json` exists, structural validation is not enough: `python scripts/corpus.py verify <book-slug>` must also confirm the preserved source and extracted SHA-256 values before literary work resumes.
@@ -460,7 +466,8 @@ Neither structural nor integrity validation can substitute for a Reviewer `PASS`
 
 ## Failure handling
 
-- If translation fails or is incomplete, do not advance the chapter to `translated`.
+- If translation fails, is incomplete, or cannot pass `accept-translation`, do not advance the chapter to `translated`.
+- If stored `translation_acceptance` no longer matches the canonical source or translation artifact, treat the translated lifecycle state as invalid until explicitly reconciled.
 - If review fails to run, errors, returns `CORRECTIONS_REQUIRED`, or cannot be durably recorded, keep the chapter `translated`.
 - If review evidence is missing, malformed, mismatched, or stale, do not promote or continue treating the lifecycle state as validly reviewed.
 - If corpus preflight, hash verification, or structural validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.
