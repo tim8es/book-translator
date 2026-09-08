@@ -229,6 +229,12 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
     elif payload["operation"] == "parallel":
         assignments = payload["assignments"]
         print(f"next=parallel requested={payload['parallel']} assignments={len(assignments)}")
+        print(
+            "claim-snapshot "
+            f"--base-commit {base_commit} "
+            f"--glossary-revision {shared_state_revisions['glossary']} "
+            f"--style-guide-revision {shared_state_revisions['style_guide']}"
+        )
         for assignment in assignments:
             print(
                 f"unit={assignment['unit_id']} chapter={assignment['chapter_number']} "
