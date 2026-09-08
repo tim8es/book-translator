@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from .coordination import BookCoordinationManager, CoordinationError
+from .coordination import BookCoordinationManager, CoordinationError, CoordinationLease
 from .repository import RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError, SchemaKind
 from .shared_state import (
@@ -31,6 +31,7 @@ from .storage import (
 
 
 PROPOSAL_PREFIX = ".workflow/proposals"
+PROPOSAL_RECONCILE_LEASE_SECONDS = 900
 HEX_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 UNIT_ID_RE = re.compile(r"^chapter-[0-9]{6}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -89,6 +90,11 @@ class ProposalResolutionResult:
     path: str
     revision: str
     changed_shared_state: bool
+
+
+@dataclass
+class _ReconciliationLeaseState:
+    lease: CoordinationLease
 
 
 def _nonempty(value: object, field: str) -> str:
@@ -274,6 +280,17 @@ class ProposalManager:
             )
         return value
 
+    def _renew_reconciliation_lease(self, state: _ReconciliationLeaseState) -> None:
+        try:
+            state.lease = self._coordination.renew(
+                state.lease,
+                lease_seconds=PROPOSAL_RECONCILE_LEASE_SECONDS,
+            )
+        except CoordinationError as exc:
+            raise ProposalConflict(
+                f"proposal reconciliation lost book coordination before mutation: {exc}"
+            ) from exc
+
     def _claim(self, unit_id: str, session_id: str) -> dict[str, Any]:
         if not isinstance(unit_id, str) or UNIT_ID_RE.fullmatch(unit_id) is None:
             raise ProposalClaimError("unit_id must match chapter-[0-9]{6}")
@@ -358,9 +375,11 @@ class ProposalManager:
         resolution: dict[str, Any],
         *,
         changed_shared_state: bool,
+        lease_state: _ReconciliationLeaseState,
     ) -> ProposalResolutionResult:
         path = _resolution_path(resolution["proposal_id"])
         content = _serialize(resolution, resolution=True)
+        self._renew_reconciliation_lease(lease_state)
         try:
             revision = self.repository.storage.create_if_absent(path, content)
         except StorageAlreadyExists:
@@ -392,6 +411,7 @@ class ProposalManager:
         resulting_revision: str,
         replacement: bytes,
         changed_shared_state: bool,
+        lease_state: _ReconciliationLeaseState,
     ) -> ProposalResolutionResult:
         resolution = {
             "schema_version": 1,
@@ -406,7 +426,9 @@ class ProposalManager:
             "reason": None,
         }
         return self._persist_resolution(
-            resolution, changed_shared_state=changed_shared_state
+            resolution,
+            changed_shared_state=changed_shared_state,
+            lease_state=lease_state,
         )
 
     def _terminal_resolution(
@@ -416,6 +438,7 @@ class ProposalManager:
         session_id: str,
         status: str,
         reason: str,
+        lease_state: _ReconciliationLeaseState,
     ) -> ProposalResolutionResult:
         resolution = {
             "schema_version": 1,
@@ -429,7 +452,11 @@ class ProposalManager:
             "resulting_sha256": None,
             "reason": _nonempty(reason, "reason"),
         }
-        return self._persist_resolution(resolution, changed_shared_state=False)
+        return self._persist_resolution(
+            resolution,
+            changed_shared_state=False,
+            lease_state=lease_state,
+        )
 
     def _recovery_match(
         self,
@@ -473,11 +500,13 @@ class ProposalManager:
             lease = self._coordination.acquire(
                 operation="proposal_reconcile",
                 session_id=session_id,
+                lease_seconds=PROPOSAL_RECONCILE_LEASE_SECONDS,
             )
         except CoordinationError as exc:
             raise ProposalConflict(
                 f"proposal reconciliation is blocked by book coordination: {exc}"
             ) from exc
+        lease_state = _ReconciliationLeaseState(lease)
 
         try:
             result = self._reconcile_locked(
@@ -486,16 +515,17 @@ class ProposalManager:
                 accept=accept,
                 replacement=replacement,
                 reason=reason,
+                lease_state=lease_state,
             )
         except Exception:
             try:
-                self._coordination.release(lease)
+                self._coordination.release(lease_state.lease)
             except CoordinationError:
                 pass
             raise
 
         try:
-            self._coordination.release(lease)
+            self._coordination.release(lease_state.lease)
         except CoordinationError as exc:
             raise ProposalConflict(
                 "proposal reconciliation completed but coordination mutex could not be released"
@@ -510,6 +540,7 @@ class ProposalManager:
         accept: bool,
         replacement: bytes | None,
         reason: str | None,
+        lease_state: _ReconciliationLeaseState,
     ) -> ProposalResolutionResult:
         resolution_path = _resolution_path(proposal_id)
         try:
@@ -538,6 +569,7 @@ class ProposalManager:
                 session_id=session_id,
                 status="rejected",
                 reason=reason or "rejected by orchestrator",
+                lease_state=lease_state,
             )
 
         if not isinstance(replacement, bytes) or not replacement.strip():
@@ -563,16 +595,19 @@ class ProposalManager:
                     resulting_revision=recovered_revision,
                     replacement=replacement,
                     changed_shared_state=False,
+                    lease_state=lease_state,
                 )
             return self._terminal_resolution(
                 proposal,
                 session_id=session_id,
                 status="stale",
                 reason="shared state changed: " + ", ".join(changed),
+                lease_state=lease_state,
             )
 
         target = proposal["target"]
         target_path = SHARED_STATE_PATHS[target]
+        self._renew_reconciliation_lease(lease_state)
         try:
             resulting_revision = self.repository.storage.write_if_version(
                 target_path,
@@ -594,6 +629,7 @@ class ProposalManager:
                     resulting_revision=recovered_revision,
                     replacement=replacement,
                     changed_shared_state=False,
+                    lease_state=lease_state,
                 )
             changed = [
                 key for key in sorted(SHARED_STATE_KEYS) if current[key] != frozen[key]
@@ -603,6 +639,7 @@ class ProposalManager:
                 session_id=session_id,
                 status="stale",
                 reason="shared state changed: " + ", ".join(changed or [target]),
+                lease_state=lease_state,
             )
         except StorageError as exc:
             raise ProposalError(f"cannot write {target_path}: {exc}") from exc
@@ -613,4 +650,5 @@ class ProposalManager:
             resulting_revision=resulting_revision,
             replacement=replacement,
             changed_shared_state=True,
+            lease_state=lease_state,
         )
