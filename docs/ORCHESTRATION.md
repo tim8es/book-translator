@@ -81,6 +81,8 @@ This strict rule applies to:
 
 Translator and Reviewer roles may return artifacts, findings, warnings, corrections, and proposed glossary/style decisions. They do not independently race to persist shared state.
 
+When a worker has a frozen shared-state snapshot, glossary/style suggestions are persisted as immutable `.workflow/proposals/<proposal-id>.json` records tied to the worker claim, `base_commit`, workflow revision, and the exact glossary/style revisions used by that worker. Workers do not directly mutate `glossary.md` or `style-guide.md`. The Orchestrator reconciles each proposal through the central single-writer path: acquire the book coordination mutex, re-check the frozen shared-state revisions, apply an accepted replacement with compare-and-swap, and persist the immutable `.workflow/proposals/<proposal-id>.resolution.json`. A stale proposal is resolved as stale without overwriting newer shared state.
+
 A translation artifact may be written directly by a worker only when the active environment provides a non-conflicting target. The Orchestrator remains responsible for accepting that artifact as canonical book state.
 
 ## Book selection
@@ -109,6 +111,7 @@ books/<book-slug>/
 ├── output/
 ├── metadata.json
 ├── progress.json
+├── review-ledger.json
 ├── source-manifest.json
 ├── glossary.md
 └── style-guide.md
@@ -121,6 +124,7 @@ Initialization requirements:
 - use stable, unique chapter numbering/slugs and aligned source/translation paths;
 - create per-book metadata and progress state;
 - copy the selected workflow repository/requested ref/resolved revision into `metadata.json.workflow`;
+- for a ledger-enabled workflow, record `metadata.json.workflow.review_evidence` and initialize the matching empty `review-ledger.json` rather than fabricating historical review evidence;
 - initialize glossary and style-guide durable memory;
 - perform structural validation before sustained translation;
 - seal the verified source corpus after successful extraction.
@@ -211,7 +215,9 @@ T1 -> R1 -> state commit -> T2 -> R2 -> state commit -> T3 ...
 
 Do not translate multiple chapters concurrently by default.
 
-Later chapters can depend on terminology, character voice, ambiguity, and continuity decisions established during earlier reviewed chapters. Parallel chapter translation requires a separate explicit future mode with conflict handling and state-version checks; it is not part of this contract.
+Later chapters can depend on terminology, character voice, ambiguity, and continuity decisions established during earlier reviewed chapters. Explicit parallel execution is therefore opt-in per invocation only: `resume --parallel N` with `N > 1`. Without that flag, scheduling remains sequential and unchanged.
+
+In explicit parallel mode, the Orchestrator may plan up to `N` disjoint, currently unclaimed worker assignments. Every dispatched parallel claim must record a non-empty `base_commit` plus the frozen `glossary.md` and `style-guide.md` storage revisions from the same planning snapshot. If those revisions or the base commit cannot be recorded, do not dispatch the unit in parallel. Shared-state suggestions from parallel workers use the proposal/reconciliation path above; they never authorize direct concurrent glossary/style writes.
 
 ## Selecting the next chapter
 
@@ -224,6 +230,51 @@ Unless the user explicitly requests another scope:
 5. repair invalid extraction/state before dispatching literary work.
 
 Do not retranslate a reviewed chapter without a concrete reason. If a reviewed translation changes materially, move it back to the appropriate non-reviewed state until the changed artifact passes review again.
+
+## Durable claim gate
+
+Before dispatching literary work, the Orchestrator must acquire a durable claim for the exact chapter or validated range and role being dispatched. Claim acquisition is an execution gate: if it conflicts, do not start the worker and do not ask the user to manually schedule competing sessions.
+
+When Python is available, acquire the claim with the active session identity:
+
+```bash
+python scripts/book.py claim <book-slug> <chapter-or-range> --role <translator|reviewer> --session-id <session-id>
+```
+
+For explicit parallel dispatch, first obtain the fixed planning snapshot from `resume --parallel N`; use `--json` for machine consumption. Pass the exact returned values into `claim` without recomputing Git HEAD or shared-state revisions:
+
+```bash
+python scripts/book.py claim <book-slug> <chapter> \
+  --role <translator|reviewer> \
+  --session-id <session-id> \
+  --base-commit <context.base_commit> \
+  --glossary-revision <context.shared_state_revisions.glossary> \
+  --style-guide-revision <context.shared_state_revisions.style_guide>
+```
+
+Human `resume --parallel N` output emits the same three values as a copyable `claim-snapshot` flag line. If any planning value is unavailable or stale by claim admission time, do not dispatch that parallel worker.
+
+Inspect current ownership when needed with:
+
+```bash
+python scripts/book.py claims <book-slug>
+```
+
+A lease timestamp is not automatic permission to reuse a unit. An expired claim remains occupied until explicit cleanup removes it and records the auditable `lease_expired` lifecycle evidence. When stale claims need reclamation, run:
+
+```bash
+python scripts/book.py cleanup-claims <book-slug>
+```
+
+Release a claim only from the owning session, after the Orchestrator has accepted the role result or explicitly abandoned that unit. Use the same session identity that acquired the claim:
+
+```bash
+python scripts/book.py release <book-slug> <chapter-or-range> --session-id <session-id>
+```
+
+For the normal chapter pipeline, acquire a translator claim before translator dispatch, release it after the translation result is durably accepted or abandoned, then acquire the reviewer claim before reviewer dispatch and release it after the review result is processed. Do not infer ownership from chat history; durable claim state is authoritative.
+
+Range claims provide safe coordination for an explicitly requested bounded range, but they do not enable parallel translation by themselves. Explicit parallel scheduling must still return disjoint units, and each parallel worker claim must bind the exact unit/role to the planning snapshot's `base_commit`, glossary revision, and style-guide revision before work starts.
 
 ## Translator context pack
 
@@ -246,16 +297,22 @@ If the chapter directly continues a scene and prior text is materially necessary
 
 ## Accepting a Translator result
 
-The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract.
+The Translator returns a complete chapter artifact plus any proposals/warnings defined by the active book workflow's literary contract. A Translator result is not durably accepted merely because the translation file exists.
 
-Before changing state to `translated`, the Orchestrator verifies that:
+For the first `extracted -> translated` transition, acceptance must run while the matching Translator claim is still live:
 
-- the expected translation artifact exists or was returned completely;
-- it is non-empty;
-- it corresponds to the selected chapter;
-- proposed global decisions are handled explicitly rather than silently committed by the worker.
+```bash
+python scripts/book.py accept-translation <book-slug> <chapter> \
+  --session-id <translator-session>
+```
 
-After accepting the artifact, persist `translated` and any accepted global decisions through the single-writer path.
+`accept-translation` verifies the exact chapter and workflow revision, the owning live Translator claim, a non-empty canonical translation artifact, and the current source/translation SHA-256 identities. When the claim contains frozen glossary/style revisions, the command re-checks that shared-state snapshot under the same book coordination mutex used by proposal reconciliation; drift before acceptance rejects the result as stale without advancing `progress.json`.
+
+On success, one compare-and-swap of `progress.json` performs both effects atomically: it changes the chapter state to `translated` and stores `translation_acceptance` evidence on that chapter. The evidence binds the accepted source and translation hashes to the exact claim id/revision, Translator session, claim base progress revision, `base_commit`, workflow revision, and frozen shared-state revisions (or `null` for a legacy/sequential claim without a snapshot). There is no separate evidence-write window in which lifecycle state can advance without its acceptance provenance.
+
+Only after `accept-translation` succeeds may the Orchestrator release the Translator claim. A retry after a successful progress CAS is idempotent when the current canonical artifacts still match the stored `translation_acceptance`, including after the original claim has been released. If the artifact identity or stored evidence no longer matches, fail closed rather than fabricating acceptance.
+
+Proposed global decisions are handled explicitly rather than silently committed by the worker. Accepted glossary/style proposals are reconciled centrally through the single-writer proposal path; the worker result never directly races those shared files.
 
 ## Reviewer context pack
 
@@ -274,21 +331,54 @@ Do not pass the Translator's hidden reasoning or justification.
 
 For the v3 literary contract, the Reviewer returns either `PASS` or `CORRECTIONS_REQUIRED` under `docs/TRANSLATION.md`. A legacy workflow follows the equivalent review/state semantics defined by that recorded revision.
 
-```text
-translated artifact
-  -> Reviewer under the active book workflow revision
-  -> CORRECTIONS_REQUIRED: remain translated
-       -> apply/obtain corrections
-       -> review corrected artifact again
-  -> PASS: Orchestrator accepts valid proposals
-       -> structural/integrity validation while still translated
-       -> persist reviewed
-       -> validate the resulting state
+For a ledger-enabled book, a Reviewer result in chat or worker output is not durable review evidence by itself. The Orchestrator must record the outcome while the matching reviewer claim is still live:
+
+```bash
+python scripts/book.py review-record <book-slug> <chapter> \
+  --outcome PASS|CORRECTIONS_REQUIRED \
+  --session-id <reviewer-session>
 ```
 
-If the outcome is `CORRECTIONS_REQUIRED`, do not mark the chapter reviewed. Apply or obtain the corrections through the appropriate role boundary and re-run independent review on the corrected artifact until a Reviewer returns `PASS`.
+The command hashes the current canonical source and translation bytes and binds the record to the book's immutable workflow/review-contract revision. Handwritten Markdown audit or review files may be useful notes, but they are not authoritative review coverage.
 
-A `PASS` is necessary but not sufficient for the durable state transition. Before persisting `reviewed`, the Orchestrator must also ensure the reviewed artifact is the canonical artifact, required files exist, accepted global decisions have been applied consistently, and structural/integrity state validates.
+Inspect machine-resolved review state when needed with:
+
+```bash
+python scripts/book.py reviews <book-slug>
+```
+
+A ledger-enabled chapter has current PASS coverage only when the highest-sequence exact record matches the current source hash, translation hash, workflow revision, and review-contract revision and has outcome `PASS`. If either artifact changes, the old record remains audit history but current review resolution becomes `stale`; no chat statement or Markdown note restores coverage.
+
+The normal ledger-enabled state boundary is:
+
+```text
+translated artifact
+  -> acquire reviewer claim
+  -> Reviewer under the active book workflow revision
+  -> record Reviewer outcome with review-record while claim is live
+  -> CORRECTIONS_REQUIRED: remain translated
+       -> release reviewer claim
+       -> apply/obtain corrections through the translator boundary
+       -> acquire a fresh reviewer claim
+       -> review corrected artifact again
+  -> PASS: verify current PASS with machine review state
+       -> structural/integrity validation while still translated
+       -> promote through accept-review
+       -> validate the resulting reviewed state
+       -> release reviewer claim
+```
+
+For a current PASS, promote lifecycle state only through:
+
+```bash
+python scripts/book.py accept-review <book-slug> <chapter>
+```
+
+`accept-review` re-resolves current evidence and uses compare-and-swap on `progress.json`; a missing, stale, mismatched, or current `CORRECTIONS_REQUIRED` record cannot promote the chapter. For snapshot-backed parallel review evidence, promotion also re-checks the stored glossary/style revisions used by the reviewer, so a shared-state change between `review-record` and `accept-review` blocks promotion as stale. If a concurrent state change occurs, re-read repository state rather than treating the old PASS result as reusable authority.
+
+If the outcome is `CORRECTIONS_REQUIRED`, do not mark the chapter reviewed. Apply or obtain the corrections through the appropriate role boundary and re-run independent review on the corrected artifact until a Reviewer returns `PASS`, record each outcome, and only then attempt `accept-review`.
+
+A `PASS` is necessary but not sufficient for the durable state transition. Before promotion, the Orchestrator must also ensure the reviewed artifact is the canonical artifact, required files exist, accepted global decisions have been applied consistently, and structural/integrity state validates. For ledger-enabled books, `progress.json.status=reviewed` is valid only while the current exact review resolution remains `pass`; if later artifact changes make that evidence stale, validation must fail until lifecycle state and review evidence are reconciled explicitly.
 
 ## Context freshness
 
@@ -366,7 +456,9 @@ At minimum, structural validation must protect these invariants:
 - glossary and style guide exist for active books;
 - workflow provenance is present for new books;
 - source identity/integrity state is retained when `source-manifest.json` exists;
-- no translation artifact replaced the preserved source.
+- no translation artifact replaced the preserved source;
+- when `translation_acceptance` evidence is present, its recorded source and translation hashes still match the current canonical artifacts;
+- for ledger-enabled books, `review-ledger.json` exists, validates, and every chapter marked `reviewed` resolves to current exact PASS evidence.
 
 When `source-manifest.json` exists, structural validation is not enough: `python scripts/corpus.py verify <book-slug>` must also confirm the preserved source and extracted SHA-256 values before literary work resumes.
 
@@ -374,8 +466,10 @@ Neither structural nor integrity validation can substitute for a Reviewer `PASS`
 
 ## Failure handling
 
-- If translation fails or is incomplete, do not advance the chapter to `translated`.
-- If review fails to run, errors, or returns `CORRECTIONS_REQUIRED`, keep the chapter `translated`.
+- If translation fails, is incomplete, or cannot pass `accept-translation`, do not advance the chapter to `translated`.
+- If stored `translation_acceptance` no longer matches the canonical source or translation artifact, treat the translated lifecycle state as invalid until explicitly reconciled.
+- If review fails to run, errors, returns `CORRECTIONS_REQUIRED`, or cannot be durably recorded, keep the chapter `translated`.
+- If review evidence is missing, malformed, mismatched, or stale, do not promote or continue treating the lifecycle state as validly reviewed.
 - If corpus preflight, hash verification, or structural validation fails, stop state advancement, repair durable state in one batch when possible, and validate again before starting the next chapter.
 - If the exact source is unavailable, do not silently use a same-title/same-name replacement.
 - If the required workflow revision cannot be loaded or its routing mechanism cannot be interpreted, do not silently substitute another revision and claim exact reproducibility.
@@ -401,13 +495,22 @@ Before declaring a book complete, the Orchestrator verifies that:
 
 1. every intended chapter is present and in real reading order;
 2. every intended chapter is `reviewed` through the review/state boundary above;
-3. structural validation succeeds;
-4. when `source-manifest.json` exists, sealed-corpus SHA-256 verification succeeds;
-5. glossary and style-guide decisions are consistent across the book;
-6. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under the active literary contract when a book-level consistency check warrants it;
-7. requested output artifacts are ordered/checked if output was requested;
-8. the preserved source remains unchanged;
-9. workflow provenance remains intact;
-10. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
+3. for ledger-enabled books, every intended chapter resolves to current exact PASS review evidence from `review-ledger.json`;
+4. structural validation succeeds;
+5. when `source-manifest.json` exists, sealed-corpus SHA-256 verification succeeds;
+6. glossary and style-guide decisions are consistent across the book;
+7. selected difficult, ambiguous, emotionally important, or plot-critical passages are re-checked under the active literary contract when a book-level consistency check warrants it;
+8. requested output artifacts are ordered/checked if output was requested;
+9. the preserved source remains unchanged;
+10. workflow provenance remains intact;
+11. source-corpus integrity/provenance remains reproducible or any intentional private-source limitation is explicitly recorded.
 
 A built output file alone is not evidence that the book is complete.
+
+## GitHub API storage
+
+GitHub API storage is a supported durable orchestration substrate for environments such as ChatGPT Web that can call GitHub APIs but do not have a local checkout. GitHub Actions are not required for runtime orchestration.
+
+The backend must preserve the same `StorageBackend` semantics as filesystem execution: reads and listings are observational; create is create-if-absent; update/delete are compare-and-swap against the last observed blob revision. A rejected or ambiguous mutation must not be blindly retried. Re-read authoritative GitHub state, classify the durable result, and replan from that state.
+
+Use GitHub-specific mechanics only at the storage/transport boundary. Literary Translator and Reviewer contracts remain backend-agnostic.

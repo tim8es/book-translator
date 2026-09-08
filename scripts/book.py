@@ -21,8 +21,23 @@ from typing import Iterable
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
+from workflow_v2 import (
+    FilesystemStorage,
+    RepositoryError,
+    ReviewEvidenceError,
+    ReviewLedgerManager,
+    SchemaError,
+    SchemaKind,
+    StorageError,
+    WorkflowStateRepository,
+)
+from workflow_v2.claim_cli import ClaimCliError, register_claim_commands
+from workflow_v2.patch_cli import PatchCliError, register_patch_command
+from workflow_v2.review_cli import ReviewCliError, register_review_commands
+from workflow_v2.reviews import REVIEW_EVIDENCE_VERSION
+from workflow_v2.schemas import SCHEMA_VERSION
 
-SCHEMA_VERSION = 1
+
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
 CANONICAL_REPOSITORY = "https://github.com/tim8es/book-translator"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -332,8 +347,8 @@ def book_dir_for(slug: str) -> Path:
     return repo_root() / "books" / slug
 
 
-def safe_write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def state_repository(book_dir: Path) -> WorkflowStateRepository:
+    return WorkflowStateRepository(FilesystemStorage(book_dir))
 
 
 def template_text(name: str, fallback: str) -> str:
@@ -344,8 +359,34 @@ def template_text(name: str, fallback: str) -> str:
 
 
 def create_support_files(book_dir: Path) -> None:
-    glossary_fallback = """# Glossary\n\n| Original | Translation | Type | Notes |\n| --- | --- | --- | --- |\n"""
-    style_fallback = """# Style Guide\n\n## Narration\n\n- Point of view:\n- Narrative distance:\n- Register:\n- Typical sentence length and movement:\n\n## Prose tendencies\n\n- Terse or expansive:\n- Plain or lexically rich:\n- Restrained or expressive:\n\n## Character voices\n\n## Recurring stylistic decisions\n\n## Ambiguities to preserve\n\n## Review notes\n"""
+    glossary_fallback = """# Glossary
+
+| Original | Translation | Type | Notes |
+| --- | --- | --- | --- |
+"""
+    style_fallback = """# Style Guide
+
+## Narration
+
+- Point of view:
+- Narrative distance:
+- Register:
+- Typical sentence length and movement:
+
+## Prose tendencies
+
+- Terse or expansive:
+- Plain or lexically rich:
+- Restrained or expressive:
+
+## Character voices
+
+## Recurring stylistic decisions
+
+## Ambiguities to preserve
+
+## Review notes
+"""
     (book_dir / "glossary.md").write_text(template_text("glossary.md", glossary_fallback), encoding="utf-8")
     (book_dir / "style-guide.md").write_text(template_text("style-guide.md", style_fallback), encoding="utf-8")
 
@@ -423,6 +464,8 @@ def extract_command(args: argparse.Namespace) -> int:
             }
         )
 
+    workflow = workflow_provenance()
+    workflow["review_evidence"] = REVIEW_EVIDENCE_VERSION
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "title": args.title or detected.get("title") or source.stem,
@@ -433,16 +476,27 @@ def extract_command(args: argparse.Namespace) -> int:
         "source_file": source.name,
         "chapter_count": len(chapter_records),
         "imported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "workflow": workflow_provenance(),
+        "workflow": workflow,
     }
     progress = {
         "schema_version": SCHEMA_VERSION,
         "book_slug": slug,
         "chapters": chapter_records,
     }
+    review_ledger = {
+        "schema_version": SCHEMA_VERSION,
+        "book_slug": slug,
+        "next_sequence": 1,
+        "records": [],
+    }
 
-    safe_write_json(book_dir / "metadata.json", metadata)
-    safe_write_json(book_dir / "progress.json", progress)
+    repository = state_repository(book_dir)
+    try:
+        repository.create("metadata.json", SchemaKind.METADATA, metadata)
+        repository.create("progress.json", SchemaKind.PROGRESS, progress)
+        repository.create("review-ledger.json", SchemaKind.REVIEW_LEDGER, review_ledger)
+    except (SchemaError, RepositoryError, StorageError) as exc:
+        raise BookError(f"Cannot write workflow state for books/{slug}: {exc}") from exc
     create_support_files(book_dir)
 
     print(f"Extracted {len(chapter_records)} chapter(s) into books/{slug}/extracted/")
@@ -459,12 +513,36 @@ def load_book(slug: str) -> tuple[Path, dict, dict]:
         raise BookError(f"Missing metadata.json for books/{slug}")
     if not progress_path.is_file():
         raise BookError(f"Missing progress.json for books/{slug}")
+
+    repository = state_repository(book_dir)
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        progress = json.loads(progress_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise BookError(f"Invalid JSON in books/{slug}: {exc}") from exc
+        metadata = repository.read(
+            "metadata.json",
+            SchemaKind.METADATA,
+            allow_legacy=True,
+        ).data
+        progress = repository.read(
+            "progress.json",
+            SchemaKind.PROGRESS,
+            allow_legacy=True,
+        ).data
+    except (SchemaError, RepositoryError, StorageError) as exc:
+        raise BookError(f"Invalid workflow state in books/{slug}: {exc}") from exc
     return book_dir, metadata, progress
+
+
+def _review_artifact_reader(book_dir: Path):
+    root = book_dir.resolve(strict=False)
+
+    def read(relative_path: str) -> bytes:
+        target = (root / relative_path).resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise OSError(f"artifact path escapes book workspace: {relative_path}") from exc
+        return target.read_bytes()
+
+    return read
 
 
 def validate_book(slug: str) -> tuple[list[str], list[str]]:
@@ -556,10 +634,40 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
         for path in sorted(referenced_extracted - actual):
             errors.append(f"progress.json references missing extracted chapter: {path}")
 
-    if metadata.get("schema_version") != SCHEMA_VERSION:
-        warnings.append(f"metadata.json schema_version is {metadata.get('schema_version')}, expected {SCHEMA_VERSION}")
-    if progress.get("schema_version") != SCHEMA_VERSION:
-        warnings.append(f"progress.json schema_version is {progress.get('schema_version')}, expected {SCHEMA_VERSION}")
+    if isinstance(workflow, dict) and workflow.get("review_evidence") == REVIEW_EVIDENCE_VERSION:
+        repository = state_repository(book_dir)
+        ledger_valid = False
+        try:
+            ledger = repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
+        except (SchemaError, RepositoryError, StorageError) as exc:
+            errors.append(f"review-ledger.json is required and must be valid: {exc}")
+        else:
+            if ledger.data.get("book_slug") != progress.get("book_slug"):
+                errors.append(
+                    "review-ledger.json book_slug does not match progress.json book_slug"
+                )
+            else:
+                ledger_valid = True
+
+        if ledger_valid:
+            manager = ReviewLedgerManager(
+                repository,
+                artifact_reader=_review_artifact_reader(book_dir),
+            )
+            for chapter in chapters:
+                if not isinstance(chapter, dict) or chapter.get("status") != "reviewed":
+                    continue
+                number = chapter.get("number")
+                try:
+                    resolution = manager.resolve_unit(progress, metadata, number)
+                except ReviewEvidenceError as exc:
+                    errors.append(f"Chapter {number}: review-ledger validation failed: {exc}")
+                    continue
+                if resolution.state != "pass":
+                    errors.append(
+                        f"Chapter {number}: status=reviewed requires current PASS review evidence; "
+                        f"review state={resolution.state}"
+                    )
 
     return errors, warnings
 
@@ -637,6 +745,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.set_defaults(func=build_command)
 
+    register_patch_command(subparsers, repo_root())
+    register_claim_commands(subparsers, repo_root())
+    register_review_commands(subparsers, repo_root())
     return parser
 
 
@@ -644,7 +755,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except BookError as exc:
+    except (BookError, ClaimCliError, PatchCliError, ReviewCliError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

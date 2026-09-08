@@ -11,6 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
+WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow_v2"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
 
 
@@ -22,6 +23,7 @@ class CorpusSealTests(unittest.TestCase):
             (repo / "scripts").mkdir(parents=True)
             shutil.copy2(BOOK_SCRIPT, repo / "scripts" / "book.py")
             shutil.copy2(CORPUS_SCRIPT, repo / "scripts" / "corpus.py")
+            shutil.copytree(WORKFLOW_V2, repo / "scripts" / "workflow_v2")
             if TEMPLATES.exists():
                 shutil.copytree(TEMPLATES, repo / "docs" / "templates")
             source = repo / "sample.md"

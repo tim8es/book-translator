@@ -114,6 +114,7 @@ For a namespaced installation, examples include:
 .book-translator/docs/TRANSLATION.md
 .book-translator/scripts/book.py
 .book-translator/scripts/corpus.py
+.book-translator/scripts/workflow_v2/
 .book-translator/books/<book-slug>/
 ```
 
@@ -139,6 +140,7 @@ Relative to `install_root`, a normal runtime installation contains:
 - `docs/templates/`;
 - `scripts/book.py`;
 - `scripts/corpus.py`;
+- `scripts/workflow_v2/`;
 - `books/.gitkeep` for an empty book root.
 
 A development copy additionally contains repository-development files such as:
@@ -208,3 +210,13 @@ Setup is complete when:
 - manifest-required semantic inputs are available or are the only identified missing inputs.
 
 Then transition to the `orchestrator` context profile. Do not carry this setup document into Translator or Reviewer context merely because it was read during bootstrap.
+
+## GitHub API storage capabilities
+
+GitHub API storage is available when the environment can address a concrete repository, branch, and optional book root prefix. The root prefix scopes logical Workflow v2 paths such as `progress.json` to the selected book without leaking repository-relative mechanics into domain code.
+
+Read capability requires GitHub Contents metadata plus tree and blob reads. Mutable coordination additionally requires Contents write capability on the selected branch. A permission failure is a capability failure; do not substitute a different repository or branch silently.
+
+Credentials are runtime transport secrets and are never persisted in book metadata, progress, claims, review ledgers, generated reports, or installation provenance. Do not log or echo authorization tokens in failure text.
+
+GitHub Actions are not required for GitHub API storage execution. They may remain a development CI harness, but runtime orchestration must work directly through the GitHub API backend.

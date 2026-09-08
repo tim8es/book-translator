@@ -1,0 +1,479 @@
+"""Versioned Workflow v2 JSON document schemas.
+
+The schema layer validates durable document shape only. Cross-document lifecycle,
+concurrency, review, and finalization invariants belong to later workflow-domain
+operations.
+"""
+
+from __future__ import annotations
+
+import copy
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import PurePosixPath
+from typing import Any
+
+
+SCHEMA_VERSION = 1
+ALLOWED_PROGRESS_STATUSES = {"pending", "extracted", "translated", "reviewed"}
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+CLAIM_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+UNIT_ID_RE = re.compile(r"^chapter-[0-9]{6}$")
+UTC_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
+)
+LEGACY_COMPATIBLE_KINDS: set["SchemaKind"]
+
+
+class SchemaError(ValueError):
+    """A durable workflow document does not satisfy its declared schema."""
+
+
+class UnsupportedSchemaVersion(SchemaError):
+    """A document declares a schema version this workflow does not support."""
+
+
+class SchemaKind(str, Enum):
+    METADATA = "metadata"
+    PROGRESS = "progress"
+    CLAIM = "claim"
+    CLAIM_EVENT = "claim_event"
+    REVIEW_LEDGER = "review_ledger"
+    SOURCE_MANIFEST = "source_manifest"
+    GENERATED_STATE = "generated_state"
+    COORDINATION_LOCK = "coordination_lock"
+    FINALIZATION_LOCK = "finalization_lock"
+
+
+LEGACY_COMPATIBLE_KINDS = {SchemaKind.METADATA, SchemaKind.PROGRESS}
+
+
+@dataclass(frozen=True)
+class ParsedDocument:
+    data: dict[str, Any]
+    legacy: bool
+
+
+def _field(schema: SchemaKind, path: str, message: str) -> SchemaError:
+    return SchemaError(f"{schema.value}.{path}: {message}")
+
+
+def _require_nonempty_string(data: Mapping[str, Any], key: str, schema: SchemaKind, *, path: str | None = None) -> str:
+    value = data.get(key)
+    label = path or key
+    if not isinstance(value, str) or not value.strip():
+        raise _field(schema, label, "must be a non-empty string")
+    return value
+
+
+def _require_int(
+    data: Mapping[str, Any],
+    key: str,
+    schema: SchemaKind,
+    *,
+    minimum: int | None = None,
+    path: str | None = None,
+) -> int:
+    value = data.get(key)
+    label = path or key
+    if type(value) is not int:
+        raise _field(schema, label, "must be an integer")
+    if minimum is not None and value < minimum:
+        raise _field(schema, label, f"must be >= {minimum}")
+    return value
+
+
+def _require_list(data: Mapping[str, Any], key: str, schema: SchemaKind, *, path: str | None = None) -> list[Any]:
+    value = data.get(key)
+    label = path or key
+    if not isinstance(value, list):
+        raise _field(schema, label, "must be an array")
+    return value
+
+
+def _require_mapping(
+    data: Mapping[str, Any],
+    key: str,
+    schema: SchemaKind,
+    *,
+    path: str | None = None,
+) -> Mapping[str, Any]:
+    value = data.get(key)
+    label = path or key
+    if not isinstance(value, Mapping):
+        raise _field(schema, label, "must be an object")
+    return value
+
+
+def _validate_basename(value: str, schema: SchemaKind, path: str) -> None:
+    if value in {".", ".."} or "/" in value or "\\" in value:
+        raise _field(schema, path, "must be a filename basename")
+
+
+def _validate_relative_path(value: str, schema: SchemaKind, path: str) -> None:
+    if "\\" in value:
+        raise _field(schema, path, "must use a safe relative POSIX path")
+    parsed = PurePosixPath(value)
+    if parsed.is_absolute() or not parsed.parts or any(part in {"", ".", ".."} for part in parsed.parts):
+        raise _field(schema, path, "must use a safe relative POSIX path")
+
+
+def _validate_sha256(value: str, schema: SchemaKind, path: str) -> None:
+    if not SHA256_RE.fullmatch(value):
+        raise _field(schema, path, "must be a 64-character lowercase hexadecimal SHA-256")
+
+
+def _validate_hex_id(value: str, schema: SchemaKind, path: str) -> None:
+    if not CLAIM_ID_RE.fullmatch(value):
+        raise _field(schema, path, "must be a 32-character lowercase hexadecimal identifier")
+
+
+def _validate_unit_id(value: str, schema: SchemaKind, path: str) -> None:
+    if not UNIT_ID_RE.fullmatch(value):
+        raise _field(schema, path, "must match chapter-[0-9]{6}")
+
+
+def _parse_utc_timestamp(value: str, schema: SchemaKind, path: str) -> datetime:
+    if not UTC_TIMESTAMP_RE.fullmatch(value):
+        raise _field(schema, path, "must be an RFC 3339 UTC timestamp")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise _field(schema, path, "must be a valid RFC 3339 UTC timestamp") from exc
+    if parsed.utcoffset() != timedelta(0):
+        raise _field(schema, path, "must be in UTC")
+    return parsed
+
+
+def _validate_metadata(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    _require_nonempty_string(data, "title", schema)
+    _require_nonempty_string(data, "target_language", schema)
+    _require_nonempty_string(data, "source_format", schema)
+    source_file = _require_nonempty_string(data, "source_file", schema)
+    _validate_basename(source_file, schema, "source_file")
+    _require_int(data, "chapter_count", schema, minimum=0)
+    workflow = data.get("workflow")
+    if workflow is not None and not isinstance(workflow, Mapping):
+        raise _field(schema, "workflow", "must be an object when present")
+    if isinstance(workflow, Mapping) and "review_evidence" in workflow:
+        review_evidence = workflow["review_evidence"]
+        if review_evidence != "review-ledger-v1":
+            raise _field(
+                schema,
+                "workflow.review_evidence",
+                f"unsupported review_evidence mode {review_evidence!r}; expected 'review-ledger-v1'",
+            )
+
+
+def _validate_progress(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    _require_nonempty_string(data, "book_slug", schema)
+    chapters = _require_list(data, "chapters", schema)
+    for index, chapter in enumerate(chapters):
+        prefix = f"chapters[{index}]"
+        if not isinstance(chapter, Mapping):
+            raise _field(schema, prefix, "must be an object")
+        _require_int(chapter, "number", schema, minimum=1, path=f"{prefix}.number")
+        _require_nonempty_string(chapter, "title", schema, path=f"{prefix}.title")
+        _require_nonempty_string(chapter, "slug", schema, path=f"{prefix}.slug")
+        source_path = _require_nonempty_string(chapter, "source_path", schema, path=f"{prefix}.source_path")
+        translation_path = _require_nonempty_string(
+            chapter,
+            "translation_path",
+            schema,
+            path=f"{prefix}.translation_path",
+        )
+        _validate_relative_path(source_path, schema, f"{prefix}.source_path")
+        _validate_relative_path(translation_path, schema, f"{prefix}.translation_path")
+        status = _require_nonempty_string(chapter, "status", schema, path=f"{prefix}.status")
+        if status not in ALLOWED_PROGRESS_STATUSES:
+            raise _field(
+                schema,
+                f"{prefix}.status",
+                "must be one of pending, extracted, translated, reviewed",
+            )
+
+
+def _validate_claim(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    claim_id = _require_nonempty_string(data, "claim_id", schema)
+    _validate_hex_id(claim_id, schema, "claim_id")
+    unit_id = _require_nonempty_string(data, "unit_id", schema)
+    _validate_unit_id(unit_id, schema, "unit_id")
+    role = _require_nonempty_string(data, "role", schema)
+    if role not in {"translator", "reviewer"}:
+        raise _field(schema, "role", "must be translator or reviewer")
+    for key in ("session_id", "base_revision", "workflow_revision"):
+        _require_nonempty_string(data, key, schema)
+
+    if "base_commit" not in data:
+        raise _field(schema, "base_commit", "is required")
+    base_commit = data["base_commit"]
+    if base_commit is not None and (not isinstance(base_commit, str) or not base_commit.strip()):
+        raise _field(schema, "base_commit", "must be null or a non-empty string")
+
+    claimed_at = _require_nonempty_string(data, "claimed_at", schema)
+    expires_at = _require_nonempty_string(data, "expires_at", schema)
+    claimed = _parse_utc_timestamp(claimed_at, schema, "claimed_at")
+    expires = _parse_utc_timestamp(expires_at, schema, "expires_at")
+    if expires <= claimed:
+        raise _field(schema, "expires_at", "must be later than claimed_at")
+
+
+def _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    event_id = _require_nonempty_string(data, "event_id", schema)
+    _validate_hex_id(event_id, schema, "event_id")
+    action = _require_nonempty_string(data, "action", schema)
+    allowed = {"release_requested", "cleanup_requested", "released", "cleaned"}
+    if action not in allowed:
+        raise _field(schema, "action", "must be release_requested, cleanup_requested, released, or cleaned")
+    unit_id = _require_nonempty_string(data, "unit_id", schema)
+    _validate_unit_id(unit_id, schema, "unit_id")
+    occurred_at = _require_nonempty_string(data, "occurred_at", schema)
+    _parse_utc_timestamp(occurred_at, schema, "occurred_at")
+
+    if action in {"release_requested", "cleanup_requested"}:
+        _require_nonempty_string(data, "claim_revision", schema)
+        claim = _require_mapping(data, "claim", schema)
+        parsed_claim = parse_document(SchemaKind.CLAIM, claim).data
+        if parsed_claim["unit_id"] != unit_id:
+            raise _field(schema, "claim.unit_id", "must match event unit_id")
+        _require_nonempty_string(data, "reason", schema)
+        if "detail" in data and data["detail"] is not None and not isinstance(data["detail"], str):
+            raise _field(schema, "detail", "must be a string or null when present")
+    else:
+        request_event_id = _require_nonempty_string(data, "request_event_id", schema)
+        _validate_hex_id(request_event_id, schema, "request_event_id")
+
+
+def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    _require_nonempty_string(data, "book_slug", schema)
+    next_sequence = _require_int(data, "next_sequence", schema, minimum=1)
+    records = _require_list(data, "records", schema)
+
+    record_ids: set[str] = set()
+    sequences: set[int] = set()
+    last_by_unit: dict[str, str] = {}
+    correction_round_by_unit: dict[str, int] = {}
+
+    for index, record in enumerate(records):
+        prefix = f"records[{index}]"
+        if not isinstance(record, Mapping):
+            raise _field(schema, prefix, "must be an object")
+
+        record_id = _require_nonempty_string(record, "record_id", schema, path=f"{prefix}.record_id")
+        _validate_hex_id(record_id, schema, f"{prefix}.record_id")
+        if record_id in record_ids:
+            raise _field(schema, f"{prefix}.record_id", "must be unique within the ledger")
+        record_ids.add(record_id)
+
+        sequence = _require_int(record, "sequence", schema, minimum=1, path=f"{prefix}.sequence")
+        if sequence in sequences:
+            raise _field(schema, f"{prefix}.sequence", "must be unique within the ledger")
+        if sequence != index + 1:
+            raise _field(schema, f"{prefix}.sequence", f"must equal {index + 1} in stored order")
+        sequences.add(sequence)
+
+        unit_id = _require_nonempty_string(record, "unit_id", schema, path=f"{prefix}.unit_id")
+        _validate_unit_id(unit_id, schema, f"{prefix}.unit_id")
+
+        outcome = _require_nonempty_string(record, "outcome", schema, path=f"{prefix}.outcome")
+        if outcome not in {"PASS", "CORRECTIONS_REQUIRED"}:
+            raise _field(schema, f"{prefix}.outcome", "must be PASS or CORRECTIONS_REQUIRED")
+
+        source_sha256 = _require_nonempty_string(record, "source_sha256", schema, path=f"{prefix}.source_sha256")
+        _validate_sha256(source_sha256, schema, f"{prefix}.source_sha256")
+        translation_sha256 = _require_nonempty_string(
+            record,
+            "translation_sha256",
+            schema,
+            path=f"{prefix}.translation_sha256",
+        )
+        _validate_sha256(translation_sha256, schema, f"{prefix}.translation_sha256")
+
+        _require_nonempty_string(record, "workflow_revision", schema, path=f"{prefix}.workflow_revision")
+        _require_nonempty_string(
+            record,
+            "review_contract_revision",
+            schema,
+            path=f"{prefix}.review_contract_revision",
+        )
+        _require_nonempty_string(
+            record,
+            "reviewer_session_id",
+            schema,
+            path=f"{prefix}.reviewer_session_id",
+        )
+        reviewed_at = _require_nonempty_string(record, "reviewed_at", schema, path=f"{prefix}.reviewed_at")
+        _parse_utc_timestamp(reviewed_at, schema, f"{prefix}.reviewed_at")
+        _require_nonempty_string(record, "state_revision", schema, path=f"{prefix}.state_revision")
+
+        if "review_commit" not in record:
+            raise _field(schema, f"{prefix}.review_commit", "is required")
+        review_commit = record["review_commit"]
+        if review_commit is not None and (not isinstance(review_commit, str) or not review_commit.strip()):
+            raise _field(schema, f"{prefix}.review_commit", "must be null or a non-empty string")
+
+        correction_round = _require_int(
+            record,
+            "correction_round",
+            schema,
+            minimum=0,
+            path=f"{prefix}.correction_round",
+        )
+        previous_round = correction_round_by_unit.get(unit_id, 0)
+        expected_round = previous_round + 1 if outcome == "CORRECTIONS_REQUIRED" else previous_round
+        if correction_round != expected_round:
+            raise _field(
+                schema,
+                f"{prefix}.correction_round",
+                f"must equal {expected_round} for this unit history",
+            )
+        correction_round_by_unit[unit_id] = expected_round
+
+        if "supersedes_record_id" not in record:
+            raise _field(schema, f"{prefix}.supersedes_record_id", "is required")
+        supersedes = record["supersedes_record_id"]
+        expected_supersedes = last_by_unit.get(unit_id)
+        if supersedes is not None:
+            if not isinstance(supersedes, str):
+                raise _field(schema, f"{prefix}.supersedes_record_id", "must be null or a record id")
+            _validate_hex_id(supersedes, schema, f"{prefix}.supersedes_record_id")
+        if supersedes != expected_supersedes:
+            if expected_supersedes is None:
+                message = "must be null for the first record of a unit"
+            else:
+                message = f"must reference the immediately preceding record {expected_supersedes} for this unit"
+            raise _field(schema, f"{prefix}.supersedes_record_id", message)
+
+        last_by_unit[unit_id] = record_id
+
+    expected_next = len(records) + 1
+    if next_sequence != expected_next:
+        raise _field(schema, "next_sequence", f"must equal {expected_next} for the stored history")
+
+
+def _validate_source_manifest(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    source_file = _require_nonempty_string(data, "source_file", schema)
+    _validate_basename(source_file, schema, "source_file")
+    _require_nonempty_string(data, "source_format", schema)
+    source_sha256 = _require_nonempty_string(data, "source_sha256", schema)
+    _validate_sha256(source_sha256, schema, "source_sha256")
+    chapter_count = _require_int(data, "chapter_count", schema, minimum=0)
+    extracted = _require_list(data, "extracted", schema)
+    if chapter_count != len(extracted):
+        raise _field(schema, "chapter_count", "must equal the number of extracted entries")
+
+    for index, item in enumerate(extracted):
+        prefix = f"extracted[{index}]"
+        if not isinstance(item, Mapping):
+            raise _field(schema, prefix, "must be an object")
+        _require_int(item, "number", schema, minimum=1, path=f"{prefix}.number")
+        _require_nonempty_string(item, "title", schema, path=f"{prefix}.title")
+        path = _require_nonempty_string(item, "path", schema, path=f"{prefix}.path")
+        _validate_relative_path(path, schema, f"{prefix}.path")
+        sha256 = _require_nonempty_string(item, "sha256", schema, path=f"{prefix}.sha256")
+        _validate_sha256(sha256, schema, f"{prefix}.sha256")
+
+
+def _validate_generated_state(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    _require_nonempty_string(data, "book_slug", schema)
+    _require_nonempty_string(data, "source_revision", schema)
+    _require_nonempty_string(data, "generated_at", schema)
+    _require_mapping(data, "data", schema)
+
+
+def _validate_coordination_lock(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    lock_id = _require_nonempty_string(data, "lock_id", schema)
+    _validate_hex_id(lock_id, schema, "lock_id")
+    operation = _require_nonempty_string(data, "operation", schema)
+    if operation not in {"claim_admission", "finalize_admission", "workflow_upgrade"}:
+        raise _field(
+            schema,
+            "operation",
+            "must be claim_admission, finalize_admission, or workflow_upgrade",
+        )
+    _require_nonempty_string(data, "session_id", schema)
+    acquired_at = _require_nonempty_string(data, "acquired_at", schema)
+    expires_at = _require_nonempty_string(data, "expires_at", schema)
+    acquired = _parse_utc_timestamp(acquired_at, schema, "acquired_at")
+    expires = _parse_utc_timestamp(expires_at, schema, "expires_at")
+    if expires <= acquired:
+        raise _field(schema, "expires_at", "must be later than acquired_at")
+
+
+def _validate_finalization_lock(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    lock_id = _require_nonempty_string(data, "lock_id", schema)
+    _validate_hex_id(lock_id, schema, "lock_id")
+    _require_nonempty_string(data, "book_slug", schema)
+    _require_nonempty_string(data, "workflow_revision", schema)
+    _require_nonempty_string(data, "base_progress_revision", schema)
+    candidate = _require_nonempty_string(data, "candidate_progress_sha256", schema)
+    _validate_sha256(candidate, schema, "candidate_progress_sha256")
+    phase = _require_nonempty_string(data, "phase", schema)
+    if phase not in {"preparing", "promoted"}:
+        raise _field(schema, "phase", "must be preparing or promoted")
+    if "promoted_progress_revision" not in data:
+        raise _field(schema, "promoted_progress_revision", "is required")
+    promoted_revision = data["promoted_progress_revision"]
+    if phase == "preparing":
+        if promoted_revision is not None:
+            raise _field(schema, "promoted_progress_revision", "must be null while phase is preparing")
+    elif not isinstance(promoted_revision, str) or not promoted_revision.strip():
+        raise _field(schema, "promoted_progress_revision", "must be a non-empty string while phase is promoted")
+    _require_nonempty_string(data, "session_id", schema)
+    started_at = _require_nonempty_string(data, "started_at", schema)
+    _parse_utc_timestamp(started_at, schema, "started_at")
+
+
+_VALIDATORS = {
+    SchemaKind.METADATA: _validate_metadata,
+    SchemaKind.PROGRESS: _validate_progress,
+    SchemaKind.CLAIM: _validate_claim,
+    SchemaKind.CLAIM_EVENT: _validate_claim_event,
+    SchemaKind.REVIEW_LEDGER: _validate_review_ledger,
+    SchemaKind.SOURCE_MANIFEST: _validate_source_manifest,
+    SchemaKind.GENERATED_STATE: _validate_generated_state,
+    SchemaKind.COORDINATION_LOCK: _validate_coordination_lock,
+    SchemaKind.FINALIZATION_LOCK: _validate_finalization_lock,
+}
+
+
+def parse_document(
+    schema: SchemaKind,
+    data: Mapping[str, Any],
+    *,
+    allow_legacy: bool = False,
+) -> ParsedDocument:
+    """Validate and normalize one durable workflow document.
+
+    Explicit unsupported versions are never interpreted as another version. Legacy
+    compatibility is intentionally limited to metadata/progress documents that omit
+    `schema_version`; the returned normalized copy is never written automatically.
+    """
+
+    if not isinstance(data, Mapping):
+        raise SchemaError(f"{schema.value}: document must be an object")
+
+    normalized = copy.deepcopy(dict(data))
+    legacy = False
+
+    if "schema_version" not in normalized:
+        if allow_legacy and schema in LEGACY_COMPATIBLE_KINDS:
+            normalized["schema_version"] = SCHEMA_VERSION
+            legacy = True
+        else:
+            raise _field(schema, "schema_version", "is required")
+
+    version = normalized.get("schema_version")
+    if type(version) is not int:
+        raise _field(schema, "schema_version", "must be an integer")
+    if version != SCHEMA_VERSION:
+        raise UnsupportedSchemaVersion(
+            f"{schema.value}.schema_version: unsupported version {version}; expected {SCHEMA_VERSION}"
+        )
+
+    _VALIDATORS[schema](normalized, schema)
+    return ParsedDocument(data=normalized, legacy=legacy)
