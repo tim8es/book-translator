@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -16,11 +16,15 @@ WORKFLOW_V2 = SCRIPTS / "workflow_v2"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from workflow_v2.coordination import (
+    BookCoordinationManager,
+    CoordinationConflict,
+)
 from workflow_v2.filesystem import FilesystemStorage
-from workflow_v2.proposals import ProposalError, ProposalManager
+from workflow_v2.proposals import ProposalConflict, ProposalError, ProposalManager
 from workflow_v2.repository import WorkflowStateRepository
 from workflow_v2.schemas import SCHEMA_VERSION, SchemaKind
-from workflow_v2.storage import StorageError
+from workflow_v2.storage import StorageError, StorageNotFound
 
 
 NOW = datetime(2026, 9, 8, 0, 0, tzinfo=timezone.utc)
@@ -140,6 +144,139 @@ class ProposalCrashRecoveryReleaseTests(unittest.TestCase):
         self.assertEqual(retried.resolution["resulting_revision"], applied.version)
         self.assertEqual(self.storage.read("glossary.md").version, applied.version)
         self.assertEqual(self.storage.read("glossary.md").content, replacement)
+
+
+class ProposalCoordinationLeaseReleaseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.storage = FilesystemStorage(self.root)
+        self.repository = WorkflowStateRepository(self.storage)
+        progress_revision = self.repository.create(
+            "progress.json",
+            SchemaKind.PROGRESS,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "book_slug": "demo",
+                "chapters": [
+                    {
+                        "number": 1,
+                        "title": "One",
+                        "slug": "one",
+                        "source_path": "extracted/001-one.md",
+                        "translation_path": "translated/001-one.md",
+                        "status": "translated",
+                    }
+                ],
+            },
+        )
+        self.glossary_revision = self.storage.create_if_absent(
+            "glossary.md", b"# Glossary\nold\n"
+        )
+        self.style_revision = self.storage.create_if_absent(
+            "style-guide.md", b"# Style\nold\n"
+        )
+        self.repository.create(
+            ".workflow/claims/chapter-000001.json",
+            SchemaKind.CLAIM,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "claim_id": "c" * 32,
+                "unit_id": "chapter-000001",
+                "role": "reviewer",
+                "session_id": "worker-a",
+                "base_revision": progress_revision,
+                "base_commit": "base-commit",
+                "workflow_revision": WORKFLOW_REVISION,
+                "shared_state_revisions": {
+                    "glossary": self.glossary_revision,
+                    "style_guide": self.style_revision,
+                },
+                "claimed_at": "2026-09-07T23:30:00Z",
+                "expires_at": "2026-09-08T00:30:00Z",
+            },
+        )
+        self.clock = [NOW]
+        self.coordinator_a = BookCoordinationManager(
+            self.repository,
+            now=lambda: self.clock[0],
+            id_factory=lambda: "a" * 32,
+        )
+        self.coordinator_b = BookCoordinationManager(
+            self.repository,
+            now=lambda: self.clock[0],
+            id_factory=lambda: "b" * 32,
+        )
+        self.ids = iter(f"{value:032x}" for value in range(100, 200))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_expired_holder_cannot_renew_after_reacquire(self):
+        lease = self.coordinator_a.acquire(
+            operation="proposal_reconcile",
+            session_id="orchestrator-a",
+            lease_seconds=60,
+        )
+        self.clock[0] = NOW + timedelta(seconds=60)
+        replacement = self.coordinator_b.acquire(
+            operation="proposal_reconcile",
+            session_id="orchestrator-b",
+            lease_seconds=60,
+        )
+        try:
+            with self.assertRaises(CoordinationConflict):
+                self.coordinator_a.renew(lease, lease_seconds=900)
+        finally:
+            self.coordinator_b.release(replacement)
+
+    def test_stale_reconciler_cannot_mutate_after_lease_takeover(self):
+        submitter = ProposalManager(
+            self.repository,
+            now=lambda: self.clock[0],
+            id_factory=lambda: next(self.ids),
+            coordination=self.coordinator_a,
+        )
+        proposal = submitter.submit(
+            "chapter-000001",
+            session_id="worker-a",
+            target="glossary",
+            suggestion="Prefer the accepted term.",
+            rationale="Stable terminology.",
+        )
+        proposal_id = proposal.proposal["proposal_id"]
+        replacement = b"# Glossary\naccepted\n"
+        coordinator_b = self.coordinator_b
+        clock = self.clock
+
+        class TakeoverProposalManager(ProposalManager):
+            def _reconcile_locked(self, *args, **kwargs):
+                clock[0] = NOW + timedelta(seconds=60)
+                self.takeover_lease = coordinator_b.acquire(
+                    operation="proposal_reconcile",
+                    session_id="orchestrator-b",
+                    lease_seconds=60,
+                )
+                return super()._reconcile_locked(*args, **kwargs)
+
+        manager = TakeoverProposalManager(
+            self.repository,
+            now=lambda: self.clock[0],
+            id_factory=lambda: next(self.ids),
+            coordination=self.coordinator_a,
+        )
+        with self.assertRaises(ProposalConflict):
+            manager.reconcile(
+                proposal_id,
+                session_id="orchestrator-a",
+                accept=True,
+                replacement=replacement,
+            )
+
+        self.assertEqual(self.storage.read("glossary.md").content, b"# Glossary\nold\n")
+        with self.assertRaises(StorageNotFound):
+            self.storage.read(f".workflow/proposals/{proposal_id}.resolution.json")
+        self.coordinator_b.release(manager.takeover_lease)
 
 
 class ParallelHumanContractReleaseTests(unittest.TestCase):
