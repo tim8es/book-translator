@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import subprocess
@@ -334,6 +335,42 @@ class ParallelHumanContractReleaseTests(unittest.TestCase):
         )
         return result
 
+    def _translation_path(self, chapter_number=1):
+        progress = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        chapter = next(item for item in progress["chapters"] if item["number"] == chapter_number)
+        return self.repo / "books" / "sample" / chapter["translation_path"]
+
+    def _parallel_claim(self, chapter_number=1, session_id="worker-a"):
+        plan = json.loads(
+            self.run_cli("resume", "sample", "--parallel", "2", "--json").stdout
+        )
+        assignment = next(
+            item for item in plan["assignments"] if item["chapter_number"] == chapter_number
+        )
+        context = assignment["context"]
+        snapshot = context["shared_state_revisions"]
+        claim = json.loads(
+            self.run_cli(
+                "claim",
+                "sample",
+                str(chapter_number),
+                "--role",
+                "translator",
+                "--session-id",
+                session_id,
+                "--base-commit",
+                context["base_commit"],
+                "--glossary-revision",
+                snapshot["glossary"],
+                "--style-guide-revision",
+                snapshot["style_guide"],
+                "--json",
+            ).stdout
+        )["claims"][0]
+        return context, claim
+
     def test_human_parallel_resume_emits_copyable_exact_claim_snapshot_flags(self):
         plan = json.loads(
             self.run_cli("resume", "sample", "--parallel", "2", "--json").stdout
@@ -356,6 +393,152 @@ class ParallelHumanContractReleaseTests(unittest.TestCase):
         self.assertIn("--glossary-revision", text)
         self.assertIn("--style-guide-revision", text)
         self.assertIn("resume --parallel", text)
+
+    def test_parallel_translation_acceptance_persists_exact_claim_snapshot_and_artifact_identity(self):
+        context, claim = self._parallel_claim()
+        translation = self._translation_path()
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation_bytes = "# Один\n\nПеревод.\n".encode("utf-8")
+        translation.write_bytes(translation_bytes)
+        source_path = self.repo / "books" / "sample" / "extracted" / "001-one.md"
+
+        accepted = json.loads(
+            self.run_cli(
+                "accept-translation",
+                "sample",
+                "1",
+                "--session-id",
+                "worker-a",
+                "--json",
+            ).stdout
+        )
+        self.assertTrue(accepted["changed"])
+        self.assertEqual(accepted["status"], "translated")
+        self.assertEqual(accepted["unit_id"], "chapter-000001")
+
+        progress_path = self.repo / "books" / "sample" / "progress.json"
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        chapter = progress["chapters"][0]
+        evidence = chapter["translation_acceptance"]
+        self.assertEqual(chapter["status"], "translated")
+        self.assertEqual(evidence["claim_id"], claim["claim_id"])
+        self.assertEqual(evidence["claim_revision"], claim["revision"])
+        self.assertEqual(evidence["session_id"], "worker-a")
+        self.assertEqual(evidence["base_revision"], claim["base_revision"])
+        self.assertEqual(evidence["base_commit"], context["base_commit"])
+        self.assertEqual(evidence["workflow_revision"], claim["workflow_revision"])
+        self.assertEqual(evidence["shared_state_revisions"], context["shared_state_revisions"])
+        self.assertEqual(
+            evidence["source_sha256"], hashlib.sha256(source_path.read_bytes()).hexdigest()
+        )
+        self.assertEqual(
+            evidence["translation_sha256"], hashlib.sha256(translation_bytes).hexdigest()
+        )
+
+        self.run_cli("release", "sample", "1", "--session-id", "worker-a")
+        before_retry = progress_path.read_bytes()
+        retried = json.loads(
+            self.run_cli(
+                "accept-translation",
+                "sample",
+                "1",
+                "--session-id",
+                "worker-a",
+                "--json",
+            ).stdout
+        )
+        self.assertFalse(retried["changed"])
+        self.assertEqual(progress_path.read_bytes(), before_retry)
+
+    def test_parallel_translation_acceptance_rejects_shared_state_drift_without_progress_mutation(self):
+        self._parallel_claim()
+        translation = self._translation_path()
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_text("# Один\n\nПеревод.\n", encoding="utf-8")
+        progress_path = self.repo / "books" / "sample" / "progress.json"
+        before = progress_path.read_bytes()
+        glossary = self.repo / "books" / "sample" / "glossary.md"
+        glossary.write_text(glossary.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "accept-translation",
+            "sample",
+            "1",
+            "--session-id",
+            "worker-a",
+            expect=1,
+        )
+        self.assertIn("shared state", result.stderr.lower())
+        self.assertEqual(progress_path.read_bytes(), before)
+
+    def test_translation_acceptance_is_blocked_by_live_proposal_reconciliation_mutex(self):
+        self._parallel_claim()
+        translation = self._translation_path()
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_text("# Один\n\nПеревод.\n", encoding="utf-8")
+        progress_path = self.repo / "books" / "sample" / "progress.json"
+        before = progress_path.read_bytes()
+        lock = {
+            "schema_version": 1,
+            "lock_id": "d" * 32,
+            "operation": "proposal_reconcile",
+            "session_id": "orchestrator-b",
+            "acquired_at": "2026-09-08T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }
+        lock_path = self.repo / "books" / "sample" / ".workflow" / "coordination-lock.json"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps(lock) + "\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "accept-translation",
+            "sample",
+            "1",
+            "--session-id",
+            "worker-a",
+            expect=1,
+        )
+        self.assertIn("coordination", result.stderr.lower())
+        self.assertEqual(progress_path.read_bytes(), before)
+
+    def test_sequential_legacy_claim_can_use_translation_acceptance_without_snapshot(self):
+        claim = json.loads(
+            self.run_cli(
+                "claim",
+                "sample",
+                "1",
+                "--role",
+                "translator",
+                "--session-id",
+                "worker-a",
+                "--json",
+            ).stdout
+        )["claims"][0]
+        self.assertNotIn("shared_state_revisions", claim)
+        translation = self._translation_path()
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_text("# Один\n\nПеревод.\n", encoding="utf-8")
+
+        accepted = json.loads(
+            self.run_cli(
+                "accept-translation",
+                "sample",
+                "1",
+                "--session-id",
+                "worker-a",
+                "--json",
+            ).stdout
+        )
+        self.assertTrue(accepted["changed"])
+        progress = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        self.assertIsNone(progress["chapters"][0]["translation_acceptance"]["shared_state_revisions"])
+
+    def test_authoritative_contract_requires_machine_translation_acceptance_before_release(self):
+        text = (ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
+        self.assertIn("accept-translation", text)
+        self.assertIn("translation_acceptance", text)
 
 
 if __name__ == "__main__":
