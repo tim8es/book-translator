@@ -192,7 +192,6 @@ class TranslationAcceptanceManager:
         metadata: Mapping[str, Any],
         chapter_number: int,
         *,
-        session_id: str,
         progress_revision: str,
     ) -> AcceptTranslationResult:
         chapter = self._chapter(progress, chapter_number)
@@ -206,10 +205,6 @@ class TranslationAcceptanceManager:
         if evidence.get("unit_id") != unit_id:
             raise TranslationAcceptanceError(
                 f"chapter {chapter_number} translation acceptance unit identity is invalid"
-            )
-        if evidence.get("session_id") != session_id:
-            raise TranslationAcceptanceError(
-                f"chapter {chapter_number} translation acceptance belongs to session {evidence.get('session_id')}"
             )
         if evidence.get("workflow_revision") != workflow_revision:
             raise TranslationAcceptanceError(
@@ -251,17 +246,29 @@ class TranslationAcceptanceManager:
 
         chapter = self._chapter(progress, chapter_number)
         status = chapter.get("status")
-        if status in {"translated", "reviewed"}:
+        if status == "reviewed":
             return self._verify_existing(
                 progress,
                 metadata,
                 chapter_number,
-                session_id=session_id,
                 progress_revision=progress_revision,
             )
-        if status != "extracted":
+        if status == "translated":
+            try:
+                return self._verify_existing(
+                    progress,
+                    metadata,
+                    chapter_number,
+                    progress_revision=progress_revision,
+                )
+            except TranslationAcceptanceError:
+                # A translated chapter can legitimately re-enter the Translator boundary
+                # after CORRECTIONS_REQUIRED. The fresh live claim below must then replace
+                # the current acceptance evidence in the same progress CAS.
+                pass
+        elif status != "extracted":
             raise TranslationAcceptanceError(
-                f"chapter {chapter_number} must be extracted before translation can be accepted; status={status!r}"
+                f"chapter {chapter_number} must be extracted or translated before translation can be accepted; status={status!r}"
             )
 
         try:
