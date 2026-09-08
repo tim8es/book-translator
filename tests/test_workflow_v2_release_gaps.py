@@ -21,7 +21,12 @@ from workflow_v2.coordination import (
     CoordinationConflict,
 )
 from workflow_v2.filesystem import FilesystemStorage
-from workflow_v2.proposals import ProposalConflict, ProposalError, ProposalManager
+from workflow_v2.proposals import (
+    PROPOSAL_RECONCILE_LEASE_SECONDS,
+    ProposalConflict,
+    ProposalError,
+    ProposalManager,
+)
 from workflow_v2.repository import WorkflowStateRepository
 from workflow_v2.schemas import SCHEMA_VERSION, SchemaKind
 from workflow_v2.storage import StorageError, StorageNotFound
@@ -251,7 +256,7 @@ class ProposalCoordinationLeaseReleaseTests(unittest.TestCase):
 
         class TakeoverProposalManager(ProposalManager):
             def _reconcile_locked(self, *args, **kwargs):
-                clock[0] = NOW + timedelta(seconds=60)
+                clock[0] = NOW + timedelta(seconds=PROPOSAL_RECONCILE_LEASE_SECONDS)
                 self.takeover_lease = coordinator_b.acquire(
                     operation="proposal_reconcile",
                     session_id="orchestrator-b",
