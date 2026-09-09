@@ -149,7 +149,10 @@ A development copy additionally contains repository-development files such as:
 - `.github/`;
 - `.gitignore`;
 - `LICENSE`;
-- `README.md`.
+- `README.md`;
+- `docs/COMMIT_DISCIPLINE.md`.
+
+`docs/COMMIT_DISCIPLINE.md` defines contributor Git boundaries, revert/recovery expectations, and release-integration history guidance. It is development/audit guidance, not part of the bounded runtime context for Translator or Reviewer roles.
 
 Do not copy a real book workspace from the canonical repository into a new installation.
 
