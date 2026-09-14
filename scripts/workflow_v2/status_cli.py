@@ -1,4 +1,4 @@
-"""Argparse integration for read-only Workflow v2 status and resume."""
+"""Argparse integration for read-only current-workflow status and resume."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _resolver(root: Path, slug: str) -> StatusResolver:
 
 
 def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str, Any]]:
-    """Reuse existing structural and corpus validators without copying hash logic."""
+    """Run structural and sealed-corpus validation for a supported workspace."""
 
     try:
         book_module = importlib.import_module("book")
@@ -73,40 +73,40 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
     except Exception as exc:
         raise StatusCliError(f"cannot run structural preflight: {exc}") from exc
 
-    manifest_path = book_dir / "source-manifest.json"
     mode = source_storage_mode(metadata)
+    if mode is None:
+        return structural_errors, {
+            "state": "invalid",
+            "error": "metadata.json source identity is required by the current workflow",
+        }
+
+    manifest_path = book_dir / "source-manifest.json"
     if not manifest_path.is_file():
-        if mode is not None:
-            return structural_errors, {
-                "state": "invalid",
-                "storage_mode": mode,
-                "error": "source-manifest.json is missing for explicit-source book",
-            }
-        return structural_errors, {"state": "unsealed"}
+        return structural_errors, {
+            "state": "invalid",
+            "storage_mode": mode,
+            "error": "source-manifest.json is required by the current workflow",
+        }
 
     try:
         corpus_module = importlib.import_module("corpus")
         manifest = corpus_module.load_source_manifest(book_dir)
         if manifest is None:
-            if mode is not None:
-                return structural_errors, {
-                    "state": "invalid",
-                    "storage_mode": mode,
-                    "error": "source-manifest.json is missing for explicit-source book",
-                }
-            return structural_errors, {"state": "unsealed"}
+            return structural_errors, {
+                "state": "invalid",
+                "storage_mode": mode,
+                "error": "source-manifest.json is required by the current workflow",
+            }
         verified = corpus_module.verify_manifest(book_dir, metadata, progress, manifest)
     except Exception as exc:
-        payload: dict[str, Any] = {"state": "invalid", "error": str(exc)}
-        if mode is not None:
-            payload["storage_mode"] = mode
+        payload: dict[str, Any] = {
+            "state": "invalid",
+            "storage_mode": mode,
+            "error": str(exc),
+        }
         return structural_errors, payload
 
     return structural_errors, dict(verified)
-
-
-# Private alias retained for callers that imported the pre-#12 helper directly.
-_default_preflight = default_preflight
 
 
 def _snapshot(
@@ -297,7 +297,6 @@ def register_status_commands(
         )
     )
 
-    # Imported lazily to keep finalize CLI independent of status CLI internals.
     from .finalize_cli import register_finalize_command
 
     register_finalize_command(
