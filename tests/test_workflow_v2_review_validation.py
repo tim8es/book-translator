@@ -72,6 +72,20 @@ class WorkflowV2ReviewValidationTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
+    def accept_translation(self, content="Перевод.\n"):
+        path = self.make_translation(content)
+        self.run_cli(
+            "claim", "sample", "1", "--role", "translator",
+            "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "accept-translation", "sample", "1", "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "release", "sample", "1", "--session-id", "translator-a", "--json"
+        )
+        return path
+
     def mark_status(self, status):
         repository = self.state()
         loaded = repository.read("progress.json", SchemaKind.PROGRESS)
@@ -136,35 +150,34 @@ class WorkflowV2ReviewValidationTests(unittest.TestCase):
         self.assertIn("review-ledger", result.stderr.lower())
 
     def test_reviewed_status_without_current_pass_is_invalid(self):
-        self.make_translation()
+        self.accept_translation()
         self.mark_status("reviewed")
         result = self.run_cli("validate", "sample", expect=1)
         self.assertIn("current pass", result.stderr.lower())
 
     def test_exact_current_pass_allows_reviewed_status(self):
-        self.make_translation()
-        self.mark_status("translated")
+        self.accept_translation()
         self.record_pass()
         self.mark_status("reviewed")
         self.run_cli("validate", "sample")
 
-    def test_editing_reviewed_translation_makes_validation_stale(self):
-        translation = self.make_translation()
-        self.mark_status("translated")
+    def test_editing_reviewed_translation_fails_acceptance_integrity(self):
+        translation = self.accept_translation()
         self.record_pass()
         self.mark_status("reviewed")
         translation.write_text("Изменённый перевод.\n", encoding="utf-8")
 
         result = self.run_cli("validate", "sample", expect=1)
-        self.assertIn("stale", result.stderr.lower())
+        self.assertIn("translation_acceptance", result.stderr)
+        self.assertIn("sha256 mismatch", result.stderr)
 
     def test_missing_review_evidence_marker_is_invalid_current_state(self):
+        self.accept_translation()
         metadata_path = self.book / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         del metadata["workflow"]["review_evidence"]
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (self.book / "review-ledger.json").unlink()
-        self.make_translation()
         self.mark_status("reviewed")
 
         result = self.run_cli("validate", "sample", expect=1)
