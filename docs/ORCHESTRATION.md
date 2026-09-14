@@ -147,7 +147,7 @@ python scripts/book.py accept-translation <book-slug> <chapter> \
   --session-id <translator-session>
 ```
 
-`accept-translation` verifies the current workflow revision, owning live Translator claim, canonical source/translation bytes, artifact SHA-256 identity, and any frozen shared-state snapshot. Only a successful compare-and-swap may advance `extracted -> translated`. Release the Translator claim afterward.
+`accept-translation` verifies the current workflow revision, owning live Translator claim, canonical source/translation bytes, artifact SHA-256 identity, and any frozen shared-state snapshot. A successful acceptance persists exact `translation_acceptance` evidence in `progress.json`; only its successful compare-and-swap may advance `extracted -> translated`. Release the Translator claim afterward.
 
 ## Reviewer boundary
 
