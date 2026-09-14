@@ -1,4 +1,4 @@
-"""Explicit Workflow v2 source identity and book CLI integration."""
+"""Explicit source identity and current-workspace CLI integration."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
 from .storage import StorageError
+
+
+CURRENT_REVIEW_EVIDENCE = "review-ledger-v1"
 
 
 class SourceCliError(RuntimeError):
@@ -43,22 +46,34 @@ def normalize_structural_errors(
     metadata: Mapping[str, Any],
     errors: Sequence[str],
 ) -> list[str]:
-    """Apply explicit-source structural policy without duplicating hash verification."""
+    """Apply the current workspace contract without duplicating hash verification."""
 
     result = [str(error) for error in errors]
     source = _explicit_source(metadata)
     if source is None:
-        return result
-
-    source_file = metadata.get("source_file")
-    legacy_missing = f"Source file declared in metadata.json does not exist: source/{source_file}"
-    if source.get("storage_mode") == "private_external":
-        result = [error for error in result if error != legacy_missing]
-
-    if not (book_dir / "source-manifest.json").is_file():
-        message = "Missing source-manifest.json for explicit-source book"
+        message = "metadata.json source identity is required for the current workflow"
         if message not in result:
             result.append(message)
+    else:
+        source_file = metadata.get("source_file")
+        missing_source = f"Source file declared in metadata.json does not exist: source/{source_file}"
+        if source.get("storage_mode") == "private_external":
+            result = [error for error in result if error != missing_source]
+
+        if not (book_dir / "source-manifest.json").is_file():
+            message = "Missing source-manifest.json for current workflow book"
+            if message not in result:
+                result.append(message)
+
+    workflow = metadata.get("workflow")
+    if not isinstance(workflow, Mapping) or workflow.get("review_evidence") != CURRENT_REVIEW_EVIDENCE:
+        message = (
+            "metadata.json workflow.review_evidence must equal "
+            f"{CURRENT_REVIEW_EVIDENCE!r} for the current workflow"
+        )
+        if message not in result:
+            result.append(message)
+
     return result
 
 
@@ -108,6 +123,24 @@ def _source_identity(source: Path, *, private: bool) -> dict[str, Any]:
     }
 
 
+def _current_workspace_errors(book_module: Any, slug: str) -> list[str]:
+    try:
+        book_dir, metadata, _ = book_module.load_book(slug)
+    except Exception as exc:
+        return [str(exc)]
+
+    errors, _ = book_module.validate_book(slug)
+    errors = normalize_structural_errors(book_dir, metadata, errors)
+    errors.extend(
+        manifest_structure_errors(
+            book_dir,
+            metadata,
+            book_module.state_repository(book_dir),
+        )
+    )
+    return errors
+
+
 def source_extract_command(
     args: argparse.Namespace,
     root: Path,
@@ -147,12 +180,10 @@ def source_extract_command(
         if identity["storage_mode"] == "private_external" and stored_source.is_file():
             stored_source.unlink()
 
-        errors, _ = book_module.validate_book(slug)
-        errors = normalize_structural_errors(book_dir, metadata, errors)
-        errors.extend(manifest_structure_errors(book_dir, metadata, repository))
+        errors = _current_workspace_errors(book_module, slug)
         if errors:
             raise SourceCliError(
-                "Explicit-source initialization failed validation:\n- " + "\n- ".join(errors)
+                "Current workflow initialization failed validation:\n- " + "\n- ".join(errors)
             )
     except (SourceIntegrityError, SchemaError, RepositoryError, StorageError) as exc:
         if not existed_before and book_dir.exists():
@@ -171,17 +202,11 @@ def source_extract_command(
 
 def source_validate_command(args: argparse.Namespace, root: Path) -> int:
     book_module = _active_book_module()
-    errors, warnings = book_module.validate_book(args.slug)
+    errors = _current_workspace_errors(book_module, args.slug)
     try:
-        book_dir, metadata, _ = book_module.load_book(args.slug)
+        _, warnings = book_module.validate_book(args.slug)
     except Exception:
-        book_dir = None
-        metadata = None
-    if book_dir is not None and isinstance(metadata, Mapping):
-        errors = normalize_structural_errors(book_dir, metadata, errors)
-        errors.extend(
-            manifest_structure_errors(book_dir, metadata, book_module.state_repository(book_dir))
-        )
+        warnings = []
 
     for warning in warnings:
         print(f"WARNING: {warning}")
@@ -191,6 +216,20 @@ def source_validate_command(args: argparse.Namespace, root: Path) -> int:
         return 1
     print(f"books/{args.slug}: valid")
     return 0
+
+
+def source_build_command(
+    args: argparse.Namespace,
+    root: Path,
+    original: Callable[[argparse.Namespace], int],
+) -> int:
+    book_module = _active_book_module()
+    errors = _current_workspace_errors(book_module, args.slug)
+    if errors:
+        raise SourceCliError(
+            "Book does not satisfy the current workflow contract:\n- " + "\n- ".join(errors)
+        )
+    return original(args)
 
 
 def _adapt_errors(command: Callable[[argparse.Namespace], int], error_factory: ErrorFactory):
@@ -209,16 +248,18 @@ def register_source_overrides(
     *,
     error_factory: ErrorFactory,
 ) -> None:
-    """Extend existing book.py extract/validate parsers without duplicating them."""
+    """Extend extract/validate/build with the current workspace contract."""
 
     extract = subparsers.choices.get("extract")
     validate = subparsers.choices.get("validate")
-    if extract is None or validate is None:
-        raise SourceCliError("book.py extract/validate parsers are unavailable")
+    build = subparsers.choices.get("build")
+    if extract is None or validate is None or build is None:
+        raise SourceCliError("book.py extract/validate/build parsers are unavailable")
     if getattr(extract, "_explicit_source_v1_registered", False):
         return
 
     original_extract = extract.get_default("func")
+    original_build = build.get_default("func")
     extract.add_argument(
         "--private-source",
         action="store_true",
@@ -235,6 +276,12 @@ def register_source_overrides(
     validate.set_defaults(
         func=_adapt_errors(
             lambda args: source_validate_command(args, root),
+            error_factory,
+        )
+    )
+    build.set_defaults(
+        func=_adapt_errors(
+            lambda args: source_build_command(args, root, original_build),
             error_factory,
         )
     )
