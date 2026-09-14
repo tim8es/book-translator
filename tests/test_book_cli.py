@@ -136,7 +136,7 @@ class BookCliSmokeTests(unittest.TestCase):
             chapter["status"] = "reviewed"
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         result = self.run_cli("build", "sample-book", expect=1)
-        self.assertIn("current PASS review evidence", result.stderr)
+        self.assertIn("review-ledger validation failed", result.stderr)
 
     def test_validate_requires_style_guide(self):
         source = self.repo / "sample.md"
