@@ -88,16 +88,20 @@ class WorkflowV2FinalizeReliabilityTests(unittest.TestCase):
             "ru",
         )
         book = self.repo / "books" / "sample"
-        repository = self.repository(book)
-        progress = repository.read("progress.json", SchemaKind.PROGRESS)
-        translated = dict(progress.data)
-        translated["chapters"] = [dict(item) for item in progress.data["chapters"]]
-        translation_path = book / translated["chapters"][0]["translation_path"]
+        progress = self.repository(book).read("progress.json", SchemaKind.PROGRESS).data
+        translation_path = book / progress["chapters"][0]["translation_path"]
         translation_path.parent.mkdir(parents=True, exist_ok=True)
         translation_path.write_text("# Один\n\nАльфа.\n", encoding="utf-8")
-        translated["chapters"][0]["status"] = "translated"
-        repository.write_if_version(
-            "progress.json", SchemaKind.PROGRESS, translated, progress.version
+        self.run_book(
+            "claim", "sample", "1", "--role", "translator",
+            "--session-id", "translator-a", "--json"
+        )
+        self.run_book(
+            "accept-translation", "sample", "1",
+            "--session-id", "translator-a", "--json"
+        )
+        self.run_book(
+            "release", "sample", "1", "--session-id", "translator-a", "--json"
         )
 
         self.run_book(
