@@ -35,6 +35,7 @@ class WorkflowV2GitHubBackendDomainTests(unittest.TestCase):
                 "repository": "https://github.com/tim8es/book-translator",
                 "requested_ref": "refactor/workflow-engine-v2",
                 "resolved_revision": "rev-1",
+                "review_evidence": "review-ledger-v1",
             },
         }
         self.progress = {
@@ -57,6 +58,17 @@ class WorkflowV2GitHubBackendDomainTests(unittest.TestCase):
         self.progress_revision = self.repository.create(
             "progress.json", SchemaKind.PROGRESS, self.progress
         )
+        self.repository.create(
+            "review-ledger.json",
+            SchemaKind.REVIEW_LEDGER,
+            {
+                "schema_version": 1,
+                "book_slug": "sample",
+                "next_sequence": 1,
+                "records": [],
+            },
+        )
+        self.storage.create_if_absent("chapters/chapter-001.md", b"# One\n\nAlpha.\n")
 
     def claim_manager(self, session_seed=1):
         ids = iter([f"{session_seed + index:032x}" for index in range(20)])
@@ -118,7 +130,7 @@ class WorkflowV2GitHubBackendDomainTests(unittest.TestCase):
         self.client.mutations.clear()
         resolver = StatusResolver(
             self.repository,
-            artifact_reader=lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
+            artifact_reader=lambda path: self.storage.read(path).content,
         )
 
         status = resolver.status(corpus={"state": "verified", "storage_mode": "embedded"})
