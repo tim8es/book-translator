@@ -121,6 +121,56 @@ def _translation_manager(
     )
 
 
+def _require_current_translation_acceptance(
+    progress: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    chapter_number: int,
+) -> None:
+    """Keep Reviewer operations behind the durable Translator acceptance gate."""
+
+    chapters = progress.get("chapters")
+    if not isinstance(chapters, list):
+        raise ReviewCliError("progress state must contain a chapters array")
+    chapter = next(
+        (
+            item
+            for item in chapters
+            if isinstance(item, Mapping) and item.get("number") == chapter_number
+        ),
+        None,
+    )
+    if chapter is None:
+        raise ReviewCliError(f"progress does not contain chapter {chapter_number}")
+    evidence = chapter.get("translation_acceptance")
+    if not isinstance(evidence, Mapping):
+        raise ReviewCliError(
+            f"chapter {chapter_number} requires current translation_acceptance evidence before review"
+        )
+    expected_unit = f"chapter-{chapter_number:06d}"
+    if evidence.get("unit_id") != expected_unit:
+        raise ReviewCliError(
+            f"chapter {chapter_number} translation_acceptance unit identity is invalid"
+        )
+    if evidence.get("role") != "translator":
+        raise ReviewCliError(
+            f"chapter {chapter_number} translation_acceptance role must be translator"
+        )
+    workflow = metadata.get("workflow")
+    workflow_revision = None
+    if isinstance(workflow, Mapping):
+        for key in ("resolved_revision", "requested_ref"):
+            value = workflow.get(key)
+            if isinstance(value, str) and value.strip():
+                workflow_revision = value
+                break
+    if workflow_revision is None:
+        raise ReviewCliError("metadata workflow revision is unavailable")
+    if evidence.get("workflow_revision") != workflow_revision:
+        raise ReviewCliError(
+            f"chapter {chapter_number} translation_acceptance uses another workflow revision"
+        )
+
+
 def _print_json(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
@@ -193,6 +243,7 @@ def review_record_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
     metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
     manager = _manager(book_dir, repository)
     review_commit = args.review_commit if args.review_commit is not None else _git_head(root)
     try:
@@ -298,6 +349,7 @@ def accept_review_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
     metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
     manager = _manager(book_dir, repository)
     try:
         result = manager.accept_review(progress, progress_revision, metadata, args.chapter)
