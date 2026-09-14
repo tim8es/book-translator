@@ -62,38 +62,19 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         translation.parent.mkdir(parents=True, exist_ok=True)
         translation.write_text("# Один\n\nАльфа.\n", encoding="utf-8")
         self.run_cli(
-            "claim",
-            slug,
-            "1",
-            "--role",
-            "translator",
-            "--session-id",
-            "translator-a",
-            "--json",
+            "claim", slug, "1", "--role", "translator",
+            "--session-id", "translator-a", "--json",
         )
         self.run_cli(
-            "accept-translation",
-            slug,
-            "1",
-            "--session-id",
-            "translator-a",
-            "--json",
+            "accept-translation", slug, "1", "--session-id", "translator-a", "--json",
         )
         self.run_cli("release", slug, "1", "--session-id", "translator-a")
         return book, translation
 
     def claim_reviewer(self, slug="sample", *, session_id="reviewer-a", role="reviewer"):
         return self.run_cli(
-            "claim",
-            slug,
-            "1",
-            "--role",
-            role,
-            "--session-id",
-            session_id,
-            "--base-commit",
-            "dispatch-commit",
-            "--json",
+            "claim", slug, "1", "--role", role, "--session-id", session_id,
+            "--base-commit", "dispatch-commit", "--json",
         )
 
     def assert_canonical_json(self, result):
@@ -104,22 +85,14 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         )
         return payload
 
-    def test_pass_record_list_accept_and_stale_detection_end_to_end(self):
+    def test_pass_record_list_accept_and_tamper_detection_end_to_end(self):
         book, translation = self.initialize_book()
         self.claim_reviewer()
 
         recorded = self.assert_canonical_json(
             self.run_cli(
-                "review-record",
-                "sample",
-                "1",
-                "--outcome",
-                "PASS",
-                "--session-id",
-                "reviewer-a",
-                "--review-commit",
-                "review-commit-a",
-                "--json",
+                "review-record", "sample", "1", "--outcome", "PASS",
+                "--session-id", "reviewer-a", "--review-commit", "review-commit-a", "--json",
             )
         )
         record = recorded["record"]
@@ -147,9 +120,9 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         self.assertEqual(progress["chapters"][0]["status"], "reviewed")
 
         translation.write_text("# Один\n\nИзменённая Альфа.\n", encoding="utf-8")
-        stale = self.assert_canonical_json(self.run_cli("reviews", "sample", "--json"))
-        self.assertEqual(stale["reviews"][0]["state"], "stale")
-        self.assertIsNone(stale["reviews"][0]["current_record"])
+        tampered = self.run_cli("reviews", "sample", "--json", expect=1)
+        self.assertIn("translation_acceptance", tampered.stderr)
+        self.assertIn("sha256 mismatch", tampered.stderr)
         self.run_cli("accept-review", "sample", "1", "--json", expect=1)
 
     def test_corrections_required_is_recorded_and_blocks_acceptance(self):
@@ -158,14 +131,8 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
 
         recorded = self.assert_canonical_json(
             self.run_cli(
-                "review-record",
-                "sample",
-                "1",
-                "--outcome",
-                "CORRECTIONS_REQUIRED",
-                "--session-id",
-                "reviewer-a",
-                "--json",
+                "review-record", "sample", "1", "--outcome", "CORRECTIONS_REQUIRED",
+                "--session-id", "reviewer-a", "--json",
             )
         )
         self.assertEqual(recorded["record"]["correction_round"], 1)
@@ -177,15 +144,8 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         self.initialize_book()
         self.claim_reviewer(session_id="someone-else")
         foreign = self.run_cli(
-            "review-record",
-            "sample",
-            "1",
-            "--outcome",
-            "PASS",
-            "--session-id",
-            "reviewer-a",
-            "--json",
-            expect=1,
+            "review-record", "sample", "1", "--outcome", "PASS",
+            "--session-id", "reviewer-a", "--json", expect=1,
         )
         self.assertIn("someone-else", foreign.stderr)
 
@@ -198,15 +158,8 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         self.claim_reviewer()
 
         result = self.run_cli(
-            "review-record",
-            "sample",
-            "1",
-            "--outcome",
-            "PASS",
-            "--session-id",
-            "reviewer-a",
-            "--json",
-            expect=1,
+            "review-record", "sample", "1", "--outcome", "PASS",
+            "--session-id", "reviewer-a", "--json", expect=1,
         )
         self.assertIn("translation_acceptance", result.stderr)
 
@@ -219,15 +172,8 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         self.claim_reviewer()
 
         result = self.run_cli(
-            "review-record",
-            "sample",
-            "1",
-            "--outcome",
-            "PASS",
-            "--session-id",
-            "reviewer-a",
-            "--json",
-            expect=1,
+            "review-record", "sample", "1", "--outcome", "PASS",
+            "--session-id", "reviewer-a", "--json", expect=1,
         )
         self.assertIn("translation_acceptance", result.stderr)
 
