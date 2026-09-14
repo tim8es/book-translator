@@ -132,19 +132,11 @@ class BookCliSmokeTests(unittest.TestCase):
         self.run_cli("build", "sample-book", expect=1)
         self.run_cli("build", "sample-book", "--allow-unreviewed")
 
-        # This smoke test predates machine review evidence and only verifies the
-        # build command's lifecycle-state filter, so keep its final state legacy.
-        metadata_path = book / "metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["workflow"].pop("review_evidence", None)
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (book / "review-ledger.json").unlink()
-
         for chapter in progress["chapters"]:
             chapter["status"] = "reviewed"
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.run_cli("build", "sample-book")
-        self.assertTrue((book / "output" / "sample-book.md").is_file())
+        result = self.run_cli("build", "sample-book", expect=1)
+        self.assertIn("current PASS review evidence", result.stderr)
 
     def test_validate_requires_style_guide(self):
         source = self.repo / "sample.md"
@@ -167,7 +159,7 @@ class BookCliSmokeTests(unittest.TestCase):
         result = self.run_cli("validate", "sample", expect=1)
         self.assertIn("unsupported version 2", result.stderr)
 
-    def test_validate_accepts_legacy_state_without_rewriting(self):
+    def test_validate_rejects_unversioned_state_without_rewriting(self):
         source = self.repo / "sample.md"
         source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
         self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
@@ -182,7 +174,8 @@ class BookCliSmokeTests(unittest.TestCase):
             path.write_bytes(content)
             original_bytes[path.name] = content
 
-        self.run_cli("validate", "sample")
+        result = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("schema_version", result.stderr)
 
         for path in paths:
             self.assertEqual(path.read_bytes(), original_bytes[path.name])
