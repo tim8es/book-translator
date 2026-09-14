@@ -1,4 +1,4 @@
-"""Package-level Workflow v2 explicit-source schema extensions."""
+"""Package-level current-workspace schema extensions."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ from . import schemas
 from .schemas import SchemaKind
 
 
+_CURRENT_REVIEW_EVIDENCE = "review-ledger-v1"
+
+
 def _validate_metadata_source(data: Mapping[str, Any], schema: SchemaKind) -> None:
-    if "source" not in data:
-        return
     source = data.get("source")
     if not isinstance(source, Mapping):
-        raise schemas._field(schema, "source", "must be an object")
+        raise schemas._field(schema, "source", "is required and must be an object")
 
     mode = source.get("storage_mode")
     if not isinstance(mode, str) or not mode.strip():
@@ -41,6 +42,18 @@ def _validate_metadata_source(data: Mapping[str, Any], schema: SchemaKind) -> No
     schemas._validate_sha256(sha256, schema, "source.sha256")
 
 
+def _validate_current_workflow(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    workflow = data.get("workflow")
+    if not isinstance(workflow, Mapping):
+        raise schemas._field(schema, "workflow", "is required and must be an object")
+    if workflow.get("review_evidence") != _CURRENT_REVIEW_EVIDENCE:
+        raise schemas._field(
+            schema,
+            "workflow.review_evidence",
+            f"must equal {_CURRENT_REVIEW_EVIDENCE!r}",
+        )
+
+
 def _validate_manifest_source_extension(data: Mapping[str, Any], schema: SchemaKind) -> None:
     has_mode = "source_storage_mode" in data
     has_size = "source_size_bytes" in data
@@ -65,7 +78,7 @@ def _validate_manifest_source_extension(data: Mapping[str, Any], schema: SchemaK
 
 
 def install_source_schema_extensions() -> None:
-    """Install explicit-source validators exactly once at package import time."""
+    """Install current-workspace validators exactly once at package import time."""
 
     if getattr(schemas, "_explicit_source_v1_installed", False):
         return
@@ -76,6 +89,7 @@ def install_source_schema_extensions() -> None:
     def validate_metadata(data: Mapping[str, Any], schema: SchemaKind) -> None:
         metadata_validator(data, schema)
         _validate_metadata_source(data, schema)
+        _validate_current_workflow(data, schema)
 
     def validate_manifest(data: Mapping[str, Any], schema: SchemaKind) -> None:
         manifest_validator(data, schema)
