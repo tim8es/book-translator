@@ -158,7 +158,7 @@ class WorkflowV2ReviewValidationTests(unittest.TestCase):
         result = self.run_cli("validate", "sample", expect=1)
         self.assertIn("stale", result.stderr.lower())
 
-    def test_book_without_review_evidence_marker_keeps_legacy_validation_behavior(self):
+    def test_missing_review_evidence_marker_is_invalid_current_state(self):
         metadata_path = self.book / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         del metadata["workflow"]["review_evidence"]
@@ -167,7 +167,8 @@ class WorkflowV2ReviewValidationTests(unittest.TestCase):
         self.make_translation()
         self.mark_status("reviewed")
 
-        self.run_cli("validate", "sample")
+        result = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("review_evidence", result.stderr)
 
 
 if __name__ == "__main__":
