@@ -1,4 +1,4 @@
-"""Package-level Workflow v2 explicit-source schema extensions."""
+"""Current-workflow explicit-source schema requirements."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from .schemas import SchemaKind
 
 def _validate_metadata_source(data: Mapping[str, Any], schema: SchemaKind) -> None:
     if "source" not in data:
-        return
+        raise schemas._field(schema, "source", "is required")
     source = data.get("source")
     if not isinstance(source, Mapping):
         raise schemas._field(schema, "source", "must be an object")
@@ -42,13 +42,10 @@ def _validate_metadata_source(data: Mapping[str, Any], schema: SchemaKind) -> No
 
 
 def _validate_manifest_source_extension(data: Mapping[str, Any], schema: SchemaKind) -> None:
-    has_mode = "source_storage_mode" in data
-    has_size = "source_size_bytes" in data
-    if has_mode != has_size:
-        missing = "source_size_bytes" if has_mode else "source_storage_mode"
-        raise schemas._field(schema, missing, "is required with explicit source manifest identity")
-    if not has_mode:
-        return
+    if "source_storage_mode" not in data:
+        raise schemas._field(schema, "source_storage_mode", "is required")
+    if "source_size_bytes" not in data:
+        raise schemas._field(schema, "source_size_bytes", "is required")
 
     mode = data.get("source_storage_mode")
     if mode not in {"embedded", "private_external"}:
@@ -65,7 +62,7 @@ def _validate_manifest_source_extension(data: Mapping[str, Any], schema: SchemaK
 
 
 def install_source_schema_extensions() -> None:
-    """Install explicit-source validators exactly once at package import time."""
+    """Install current explicit-source validators exactly once at package import time."""
 
     if getattr(schemas, "_explicit_source_v1_installed", False):
         return
