@@ -124,8 +124,19 @@ class CorpusCliTests(unittest.TestCase):
         translation_path = book / progress["chapters"][0]["translation_path"]
         translation_path.parent.mkdir(parents=True, exist_ok=True)
         translation_path.write_text("# Первая\n\nПеревод.\n", encoding="utf-8")
-        progress["chapters"][0]["status"] = "translated"
-        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.run_cli(
+            "book.py", "claim", "sample", "1",
+            "--role", "translator", "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "book.py", "accept-translation", "sample", "1",
+            "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "book.py", "release", "sample", "1",
+            "--session-id", "translator-a", "--json"
+        )
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
 
         shutil.rmtree(book / "extracted")
         (book / "extracted").mkdir()
