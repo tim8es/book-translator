@@ -1,4 +1,4 @@
-"""Argparse integration for Workflow v2 machine review evidence."""
+"""Argparse integration for current machine review evidence."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _repository(root: Path, slug: str) -> tuple[Path, WorkflowStateRepository]:
 
 def _load_progress(repository: WorkflowStateRepository) -> tuple[dict[str, Any], str]:
     try:
-        loaded = repository.read("progress.json", SchemaKind.PROGRESS, allow_legacy=True)
+        loaded = repository.read("progress.json", SchemaKind.PROGRESS)
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise ReviewCliError(f"Invalid progress.json: {exc}") from exc
     return loaded.data, loaded.version
@@ -70,7 +70,7 @@ def _load_progress(repository: WorkflowStateRepository) -> tuple[dict[str, Any],
 
 def _load_metadata(repository: WorkflowStateRepository) -> dict[str, Any]:
     try:
-        return repository.read("metadata.json", SchemaKind.METADATA, allow_legacy=True).data
+        return repository.read("metadata.json", SchemaKind.METADATA).data
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise ReviewCliError(f"Invalid metadata.json: {exc}") from exc
 
@@ -383,9 +383,6 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
 
     register_status_commands(subparsers, root, error_factory=ReviewCliError)
 
-    # Lazy imports avoid registration cycles while extending the existing top-level parser.
     from .epub_cli import register_epub_commands
-    from .migrations_cli import register_migration_command
 
     register_epub_commands(subparsers, root, error_factory=ReviewCliError)
-    register_migration_command(subparsers, root, error_factory=ReviewCliError)
