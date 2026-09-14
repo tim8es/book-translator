@@ -61,8 +61,25 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
         translation = book / progress["chapters"][0]["translation_path"]
         translation.parent.mkdir(parents=True, exist_ok=True)
         translation.write_text("# Один\n\nАльфа.\n", encoding="utf-8")
-        progress["chapters"][0]["status"] = "translated"
-        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.run_cli(
+            "claim",
+            slug,
+            "1",
+            "--role",
+            "translator",
+            "--session-id",
+            "translator-a",
+            "--json",
+        )
+        self.run_cli(
+            "accept-translation",
+            slug,
+            "1",
+            "--session-id",
+            "translator-a",
+            "--json",
+        )
+        self.run_cli("release", slug, "1", "--session-id", "translator-a")
         return book, translation
 
     def claim_reviewer(self, slug="sample", *, session_id="reviewer-a", role="reviewer"):
@@ -191,7 +208,28 @@ class WorkflowV2ReviewCliTests(unittest.TestCase):
             "--json",
             expect=1,
         )
-        self.assertIn("resolved_revision", result.stderr)
+        self.assertIn("translation_acceptance", result.stderr)
+
+    def test_review_record_rejects_missing_translation_acceptance(self):
+        book, _ = self.initialize_book()
+        progress_path = book / "progress.json"
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        progress["chapters"][0].pop("translation_acceptance", None)
+        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.claim_reviewer()
+
+        result = self.run_cli(
+            "review-record",
+            "sample",
+            "1",
+            "--outcome",
+            "PASS",
+            "--session-id",
+            "reviewer-a",
+            "--json",
+            expect=1,
+        )
+        self.assertIn("translation_acceptance", result.stderr)
 
 
 if __name__ == "__main__":
