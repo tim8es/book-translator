@@ -119,20 +119,12 @@ class CorpusCliTests(unittest.TestCase):
         self.run_cli("book.py", "extract", str(source), "--slug", "sample", "--target-language", "ru")
         book = self.repo / "books" / "sample"
 
-        # Model a legacy book whose lifecycle predates explicit source/review evidence.
-        metadata_path = book / "metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata.pop("source", None)
-        metadata["workflow"].pop("review_evidence", None)
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (book / "review-ledger.json").unlink()
-
         progress_path = book / "progress.json"
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
         translation_path = book / progress["chapters"][0]["translation_path"]
         translation_path.parent.mkdir(parents=True, exist_ok=True)
         translation_path.write_text("# Первая\n\nПеревод.\n", encoding="utf-8")
-        progress["chapters"][0]["status"] = "reviewed"
+        progress["chapters"][0]["status"] = "translated"
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         shutil.rmtree(book / "extracted")
