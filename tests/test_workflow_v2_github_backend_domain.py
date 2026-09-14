@@ -8,7 +8,7 @@ from workflow_v2.github_storage import GitHubStorage
 from workflow_v2.repository import WorkflowStateRepository
 from workflow_v2.schemas import SchemaKind
 from workflow_v2.status import StatusResolver
-from workflow_v2.storage import StorageVersionConflict
+from workflow_v2.storage import StorageNotFound, StorageVersionConflict
 
 
 NOW = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
@@ -83,6 +83,12 @@ class WorkflowV2GitHubBackendDomainTests(unittest.TestCase):
             ),
         )
 
+    def read_artifact(self, path):
+        try:
+            return self.storage.read(path).content
+        except StorageNotFound as exc:
+            raise FileNotFoundError(path) from exc
+
     def test_claim_conflict_release_and_audit_match_backend_neutral_domain_behavior(self):
         manager = self.claim_manager(1)
         claims = manager.acquire(
@@ -130,7 +136,7 @@ class WorkflowV2GitHubBackendDomainTests(unittest.TestCase):
         self.client.mutations.clear()
         resolver = StatusResolver(
             self.repository,
-            artifact_reader=lambda path: self.storage.read(path).content,
+            artifact_reader=self.read_artifact,
         )
 
         status = resolver.status(corpus={"state": "verified", "storage_mode": "embedded"})
