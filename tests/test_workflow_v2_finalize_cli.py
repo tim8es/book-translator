@@ -144,15 +144,19 @@ class WorkflowV2FinalizeCliTests(unittest.TestCase):
         self.run_cli(*extract_args)
 
         book = self.repo / "books" / slug
-        progress_path = book / "progress.json"
-        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
         translation = book / progress["chapters"][0]["translation_path"]
         translation.parent.mkdir(parents=True, exist_ok=True)
         translation.write_text("# Один\n\nАльфа.\n", encoding="utf-8")
-        progress["chapters"][0]["status"] = "translated"
-        progress_path.write_text(
-            json.dumps(progress, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        self.run_cli(
+            "claim", slug, "1", "--role", "translator",
+            "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "accept-translation", slug, "1", "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "release", slug, "1", "--session-id", "translator-a", "--json"
         )
 
         self.run_cli(
