@@ -1,4 +1,4 @@
-"""Machine-verifiable Workflow v2 review evidence."""
+"""Machine-verifiable review evidence for the current workflow."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from .claims import canonical_unit_id
 from .coordination import FINALIZATION_PATH
-from .migration_journal import MigrationJournalError, load_migration_journal
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
@@ -434,19 +433,6 @@ class ReviewLedgerManager:
     ) -> AcceptReviewResult:
         if not isinstance(progress_revision, str) or not progress_revision.strip():
             raise ReviewEvidenceError("progress revision must be a non-empty string")
-
-        try:
-            load_migration_journal(self.repository.storage)
-        except StorageNotFound:
-            pass
-        except (MigrationJournalError, StorageError) as exc:
-            raise ReviewEvidenceError(
-                f"cannot verify migration admission state: {exc}"
-            ) from exc
-        else:
-            raise ReviewEvidenceError(
-                "review promotion is blocked while workflow migration recovery is active"
-            )
 
         try:
             self.repository.read(FINALIZATION_PATH, SchemaKind.FINALIZATION_LOCK)
