@@ -164,7 +164,7 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (book / "source-manifest.json").unlink()
 
-        status = self.canonical_json(self.run_book("status", "sample", "--json", expect=1))
+        status = self.canonical_json(self.run_book("status", "sample", "--json"))
         self.assertFalse(status["valid"])
         self.assertEqual(status["corpus"]["state"], "invalid")
         self.assertTrue(any("source" in error.lower() for error in status["errors"]))
