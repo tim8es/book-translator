@@ -156,7 +156,7 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "preflight_failed")
         self.assertTrue(any("source-manifest.json" in error for error in payload["errors"]))
 
-    def test_legacy_book_without_explicit_source_can_remain_unsealed(self):
+    def test_missing_explicit_source_is_invalid_current_state(self):
         book = self.initialize_book()
         metadata_path = book / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -164,9 +164,13 @@ class WorkflowV2StatusCliTests(unittest.TestCase):
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (book / "source-manifest.json").unlink()
 
-        status = self.canonical_json(self.run_book("status", "sample", "--json"))
-        self.assertTrue(status["valid"])
-        self.assertEqual(status["corpus"]["state"], "unsealed")
+        status = self.canonical_json(self.run_book("status", "sample", "--json", expect=1))
+        self.assertFalse(status["valid"])
+        self.assertEqual(status["corpus"]["state"], "invalid")
+        self.assertTrue(any("source" in error.lower() for error in status["errors"]))
+
+        resume = self.canonical_json(self.run_book("resume", "sample", "--json", expect=1))
+        self.assertEqual(resume["operation"], "blocked")
 
     def test_resume_blocks_on_real_corpus_hash_mismatch(self):
         book = self.initialize_book()
