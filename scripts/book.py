@@ -21,7 +21,7 @@ from typing import Iterable
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
-from workflow_v2 import (
+from workflow import (
     FilesystemStorage,
     RepositoryError,
     ReviewEvidenceError,
@@ -31,11 +31,11 @@ from workflow_v2 import (
     StorageError,
     WorkflowStateRepository,
 )
-from workflow_v2.claim_cli import ClaimCliError, register_claim_commands
-from workflow_v2.patch_cli import PatchCliError, register_patch_command
-from workflow_v2.review_cli import ReviewCliError, register_review_commands
-from workflow_v2.reviews import REVIEW_EVIDENCE_VERSION
-from workflow_v2.schemas import SCHEMA_VERSION
+from workflow.claim_cli import ClaimCliError, register_claim_commands
+from workflow.patch_cli import PatchCliError, register_patch_command
+from workflow.review_cli import ReviewCliError, register_review_commands
+from workflow.reviews import REVIEW_EVIDENCE_VERSION
+from workflow.schemas import SCHEMA_VERSION
 
 
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -518,13 +518,11 @@ def load_book(slug: str) -> tuple[Path, dict, dict]:
     try:
         metadata = repository.read(
             "metadata.json",
-            SchemaKind.METADATA,
-            allow_legacy=True,
+            SchemaKind.METADATA
         ).data
         progress = repository.read(
             "progress.json",
-            SchemaKind.PROGRESS,
-            allow_legacy=True,
+            SchemaKind.PROGRESS
         ).data
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise BookError(f"Invalid workflow state in books/{slug}: {exc}") from exc

@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import book
-from workflow_v2 import (
+from workflow import (
     LoadedDocument,
     RepositoryError,
     SchemaError,
@@ -29,8 +29,8 @@ from workflow_v2 import (
     StorageError,
     WorkflowStateRepository,
 )
-from workflow_v2.schemas import SCHEMA_VERSION, parse_document
-from workflow_v2.source_cli import normalize_structural_errors
+from workflow.schemas import SCHEMA_VERSION, parse_document
+from workflow.source_cli import normalize_structural_errors
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

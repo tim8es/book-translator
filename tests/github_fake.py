@@ -22,7 +22,7 @@ class FakeGitHubApiClient:
 
     @staticmethod
     def _types():
-        from workflow_v2.github_api import GitHubFile, GitHubMutation, GitHubTree, GitHubTreeEntry
+        from workflow.github_api import GitHubFile, GitHubMutation, GitHubTree, GitHubTreeEntry
 
         return GitHubFile, GitHubMutation, GitHubTree, GitHubTreeEntry
 
@@ -42,7 +42,7 @@ class FakeGitHubApiClient:
         self._maybe_error()
         GitHubFile, _, _, _ = self._types()
         if path not in self.files:
-            from workflow_v2.github_api import GitHubApiError
+            from workflow.github_api import GitHubApiError
 
             raise GitHubApiError(f"missing file: {path}", status=404)
         content = self.files[path]
@@ -65,7 +65,7 @@ class FakeGitHubApiClient:
             self.before_mutation("create", path)
         self._maybe_error()
         if path in self.files:
-            from workflow_v2.github_api import GitHubApiError
+            from workflow.github_api import GitHubApiError
 
             raise GitHubApiError(f"file already exists: {path}", status=422)
         self.files[path] = bytes(content)
@@ -89,7 +89,7 @@ class FakeGitHubApiClient:
             self.before_mutation("update", path)
         self._maybe_error()
         if path not in self.files or self._blob_sha(self.files[path]) != expected_blob_sha:
-            from workflow_v2.github_api import GitHubApiError
+            from workflow.github_api import GitHubApiError
 
             raise GitHubApiError(f"version conflict: {path}", status=409)
         self.files[path] = bytes(content)
@@ -112,7 +112,7 @@ class FakeGitHubApiClient:
             self.before_mutation("delete", path)
         self._maybe_error()
         if path not in self.files or self._blob_sha(self.files[path]) != expected_blob_sha:
-            from workflow_v2.github_api import GitHubApiError
+            from workflow.github_api import GitHubApiError
 
             raise GitHubApiError(f"version conflict: {path}", status=409)
         del self.files[path]

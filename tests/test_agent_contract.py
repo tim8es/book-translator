@@ -154,11 +154,11 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("Reviewer worker", setup)
         self.assertNotIn("target-language literary polish", setup)
 
-    def test_setup_runtime_set_includes_workflow_v2_package(self):
+    def test_setup_runtime_set_includes_workflow_package(self):
         setup = (PROJECT_ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
 
-        self.assertIn("`scripts/workflow_v2/`;", setup)
-        self.assertIn(".book-translator/scripts/workflow_v2/", setup)
+        self.assertIn("`scripts/workflow/`;", setup)
+        self.assertIn(".book-translator/scripts/workflow/", setup)
 
     def test_setup_contract_defines_persistent_multi_book_workspace_policy(self):
         setup = (PROJECT_ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8").lower()
