@@ -1,4 +1,4 @@
-from workflow_v2.storage import (
+from workflow.storage import (
     InvalidStoragePath,
     StorageAlreadyExists,
     StorageNotFound,

@@ -38,7 +38,7 @@ A bounded batch of mechanically identical changes may be grouped only when the b
 
 Git commit identity is useful provenance but is not the workflow database.
 
-For durable acceptance, prefer the machine evidence already stored by Workflow v2:
+For durable acceptance, prefer the machine evidence already stored by Workflow:
 
 - `translation_acceptance` binds source/translation SHA-256 values, claim identity, workflow revision, and shared-state revisions;
 - review-ledger records bind exact source/translation hashes, workflow/review-contract revision, reviewer session, state revision, and optional review commit;
@@ -62,7 +62,7 @@ For failed multi-step operations, preserve the recovery journal/marker or confli
 
 ## Branch and integration policy
 
-For Workflow v2 development, keep implementation work off `main`:
+For Workflow development, keep implementation work off `main`:
 
 1. create a feature/test/docs branch from the current integration or release base appropriate to the active project phase;
 2. keep RED tests and their minimal GREEN implementation in reviewable boundaries;

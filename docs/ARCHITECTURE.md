@@ -8,7 +8,7 @@ The current workflow is repository-authoritative and uses one durable state cont
 
 - `scripts/book.py` is the primary CLI entrypoint.
 - `scripts/corpus.py` owns source-corpus integrity and restore operations.
-- `scripts/workflow_v2/` is the internal workflow package. The `v2` suffix is an implementation-era module name, not a second supported workflow version.
+- `scripts/workflow/` is the single internal workflow package.
 - `docs/ORCHESTRATION.md` and `docs/TRANSLATION.md` are the canonical execution contracts.
 - Files under `books/<slug>/` are authoritative durable book state.
 

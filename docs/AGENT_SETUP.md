@@ -114,7 +114,7 @@ For a namespaced installation, examples include:
 .book-translator/docs/TRANSLATION.md
 .book-translator/scripts/book.py
 .book-translator/scripts/corpus.py
-.book-translator/scripts/workflow_v2/
+.book-translator/scripts/workflow/
 .book-translator/books/<book-slug>/
 ```
 
@@ -140,7 +140,7 @@ Relative to `install_root`, a normal runtime installation contains:
 - `docs/templates/`;
 - `scripts/book.py`;
 - `scripts/corpus.py`;
-- `scripts/workflow_v2/`;
+- `scripts/workflow/`;
 - `books/.gitkeep` for an empty book root.
 
 A development copy additionally contains repository-development files such as:
@@ -216,7 +216,7 @@ Then transition to the `orchestrator` context profile. Do not carry this setup d
 
 ## GitHub API storage capabilities
 
-GitHub API storage is available when the environment can address a concrete repository, branch, and optional book root prefix. The root prefix scopes logical Workflow v2 paths such as `progress.json` to the selected book without leaking repository-relative mechanics into domain code.
+GitHub API storage is available when the environment can address a concrete repository, branch, and optional book root prefix. The root prefix scopes logical Workflow paths such as `progress.json` to the selected book without leaking repository-relative mechanics into domain code.
 
 Read capability requires GitHub Contents metadata plus tree and blob reads. Mutable coordination additionally requires Contents write capability on the selected branch. A permission failure is a capability failure; do not substitute a different repository or branch silently.
 
