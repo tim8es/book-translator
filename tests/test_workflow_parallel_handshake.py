@@ -10,7 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 
 
 class WorkflowParallelHandshakeTests(unittest.TestCase):
@@ -20,13 +20,13 @@ class WorkflowParallelHandshakeTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
                     "canonical_repository": "https://github.com/tim8es/book-translator",
-                    "requested_ref": "refactor/workflow-engine-v2",
+                    "requested_ref": "main",
                     "resolved_revision": "0123456789abcdef",
                     "install_root": ".",
                 }
@@ -162,7 +162,7 @@ class WorkflowParallelHandshakeTests(unittest.TestCase):
         )
         self.assertFalse(claim_path.exists())
 
-    def test_sequential_resume_keeps_legacy_context_shape(self):
+    def test_sequential_resume_keeps_current_context_shape(self):
         payload = json.loads(self.run_cli("resume", "sample", "--json").stdout)
         self.assertEqual(payload["operation"], "translate")
         self.assertNotIn("base_commit", payload["context"])
