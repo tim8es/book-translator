@@ -103,6 +103,11 @@ class WorkflowStateRepository:
                 try:
                     artifact = self.storage.read(artifact_path)
                 except StorageNotFound:
+                    if path_key == "source_path":
+                        # Missing source corpus is a recoverable corpus-integrity condition.
+                        # Structural/corpus preflight still fails closed, while corpus restore
+                        # must be able to read schema-valid progress before recreating source bytes.
+                        continue
                     mismatches.append(f"{hash_key} cannot be verified because {artifact_path} is missing")
                     continue
                 actual = hashlib.sha256(artifact.content).hexdigest()
