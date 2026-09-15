@@ -1,0 +1,232 @@
+name: architecture-cleanup-bot
+
+on:
+  push:
+    branches:
+      - refactor/workflow-namespace-cleanup
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refactor/workflow-namespace-cleanup
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Apply deterministic cleanup
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+
+          root = Path('.')
+          old_runtime = root / 'scripts' / 'workflow_v2'
+          runtime = root / 'scripts' / 'workflow'
+          if not old_runtime.is_dir():
+              raise SystemExit('expected scripts/workflow_v2 at cleanup input')
+
+          shutil.rmtree(root / 'docs' / 'superpowers', ignore_errors=True)
+          subprocess.run(['git', 'mv', str(old_runtime), str(runtime)], check=True)
+
+          for old_test in sorted((root / 'tests').glob('test_workflow_v2_*.py')):
+              new_test = old_test.with_name(old_test.name.replace('test_workflow_v2_', 'test_workflow_', 1))
+              subprocess.run(['git', 'mv', str(old_test), str(new_test)], check=True)
+
+          skip = {
+              root / 'tests' / 'test_architecture_consolidation.py',
+              root / '.github' / 'workflows' / 'architecture-cleanup-bot.yml',
+          }
+          replacements = (
+              ('workflow_v2', 'workflow'),
+              ('WorkflowV2', 'Workflow'),
+              ('Workflow v2', 'Workflow'),
+              ('workflow-v2', 'workflow'),
+          )
+          for path in sorted(root.rglob('*')):
+              if not path.is_file() or '.git' in path.parts or path in skip:
+                  continue
+              if path.suffix not in {'.py', '.md', '.json', '.yml', '.yaml'}:
+                  continue
+              text = path.read_text(encoding='utf-8')
+              updated = text
+              for old, new in replacements:
+                  updated = updated.replace(old, new)
+              # Strict current-only call API: remove obsolete compatibility arguments.
+              if path.suffix == '.py':
+                  updated = re.sub(r',\s*allow_legacy\s*=\s*(?:True|False),?', '', updated)
+                  updated = re.sub(r',\s*legacy\s*=\s*False,?', '', updated)
+              if updated != text:
+                  path.write_text(updated, encoding='utf-8')
+
+          # Canonical schema: fold the source and parallel validators directly into schemas.py.
+          schemas_path = runtime / 'schemas.py'
+          source_ext_path = runtime / 'source_schema.py'
+          parallel_ext_path = runtime / 'parallel_schema.py'
+          schemas = schemas_path.read_text(encoding='utf-8')
+          source_ext = source_ext_path.read_text(encoding='utf-8')
+          parallel_ext = parallel_ext_path.read_text(encoding='utf-8')
+
+          source_helpers = source_ext[
+              source_ext.index('def _validate_metadata_source'):
+              source_ext.index('def install_source_schema_extensions')
+          ].rstrip()
+          source_helpers = source_helpers.replace('schemas.', '')
+
+          parallel_helpers = parallel_ext[
+              parallel_ext.index('_SHARED_STATE_KEYS'):
+              parallel_ext.index('def install_parallel_schema_extensions')
+          ].rstrip()
+          parallel_helpers = parallel_helpers.replace('schemas.', '')
+
+          schemas = re.sub(r'^LEGACY_COMPATIBLE_KINDS:.*\n', '', schemas, flags=re.M)
+          schemas = re.sub(
+              r'^LEGACY_COMPATIBLE_KINDS = \{SchemaKind\.METADATA, SchemaKind\.PROGRESS\}\n\n',
+              '',
+              schemas,
+              flags=re.M,
+          )
+          schemas = schemas.replace('    legacy: bool\n', '')
+
+          schemas = schemas.replace(
+              '\n\ndef _validate_progress(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              '\n    _validate_metadata_source(data, schema)\n\n\ndef _validate_progress(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              1,
+          )
+          schemas = schemas.replace(
+              '\n\ndef _validate_claim(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              '\n    for index, chapter in enumerate(chapters):\n'
+              '        if isinstance(chapter, Mapping):\n'
+              '            _validate_translation_acceptance(chapter, schema, index=index)\n\n\n'
+              'def _validate_claim(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              1,
+          )
+          schemas = schemas.replace(
+              '\n\ndef _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              '\n    _validate_claim_shared_state(data, schema)\n\n\ndef _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              1,
+          )
+          schemas = schemas.replace(
+              '\n\ndef _validate_generated_state(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              '\n    _validate_manifest_source_extension(data, schema)\n\n\ndef _validate_generated_state(data: Mapping[str, Any], schema: SchemaKind) -> None:',
+              1,
+          )
+          schemas = schemas.replace(
+              'if operation not in {"claim_admission", "finalize_admission", "workflow_upgrade"}:',
+              'if operation not in {"claim_admission", "finalize_admission", "proposal_reconcile", "translation_acceptance"}:',
+          )
+          schemas = schemas.replace(
+              '"must be claim_admission, finalize_admission, or workflow_upgrade",',
+              '"must be claim_admission, finalize_admission, proposal_reconcile, or translation_acceptance",',
+          )
+
+          helper_block = '\n\n' + source_helpers + '\n\n\n' + parallel_helpers + '\n\n'
+          schemas = schemas.replace('\n_VALIDATORS = {', helper_block + '\n_VALIDATORS = {', 1)
+
+          strict_parse = '''def parse_document(\n    schema: SchemaKind,\n    data: Mapping[str, Any],\n) -> ParsedDocument:\n    """Validate one current durable workflow document."""\n\n    if not isinstance(data, Mapping):\n        raise SchemaError(f"{schema.value}: document must be an object")\n\n    normalized = copy.deepcopy(dict(data))\n    if "schema_version" not in normalized:\n        raise _field(schema, "schema_version", "is required")\n\n    version = normalized.get("schema_version")\n    if type(version) is not int:\n        raise _field(schema, "schema_version", "must be an integer")\n    if version != SCHEMA_VERSION:\n        raise UnsupportedSchemaVersion(\n            f"{schema.value}.schema_version: unsupported version {version}; expected {SCHEMA_VERSION}"\n        )\n\n    _VALIDATORS[schema](normalized, schema)\n    return ParsedDocument(data=normalized)\n'''
+          schemas = re.sub(r'def parse_document\([\s\S]*\Z', strict_parse, schemas)
+          schemas_path.write_text(schemas, encoding='utf-8')
+          source_ext_path.unlink()
+          parallel_ext_path.unlink()
+
+          # Package init no longer mutates validators at import time.
+          init_path = runtime / '__init__.py'
+          init_text = init_path.read_text(encoding='utf-8')
+          init_text = re.sub(r'^from \.parallel_schema import install_parallel_schema_extensions\n', '', init_text, flags=re.M)
+          init_text = re.sub(r'^from \.source_schema import install_source_schema_extensions\n', '', init_text, flags=re.M)
+          init_text = re.sub(r'^install_source_schema_extensions\(\)\n', '', init_text, flags=re.M)
+          init_text = re.sub(r'^install_parallel_schema_extensions\(\)\n', '', init_text, flags=re.M)
+          init_path.write_text(init_text, encoding='utf-8')
+
+          # Repository API is current-only; no legacy marker or compatibility parameter remains.
+          repository_path = runtime / 'repository.py'
+          repository = repository_path.read_text(encoding='utf-8')
+          repository = repository.replace('    legacy: bool\n', '')
+          repository = repository.replace(
+              '        *,\n        allow_legacy: bool = False,\n',
+              '',
+          )
+          repository = repository.replace(
+              '        """Read a current-schema document.\n\n'
+              '        ``allow_legacy`` remains only as a temporary call-site compatibility parameter;\n'
+              '        it no longer enables normalization or acceptance of legacy documents.\n'
+              '        """\n',
+              '        """Read and validate a current-schema document."""\n',
+          )
+          repository = repository.replace('            legacy=False,\n', '')
+          repository_path.write_text(repository, encoding='utf-8')
+
+          # Currentize retained strict-schema tests rather than preserving compatibility behavior.
+          schema_test_path = root / 'tests' / 'test_workflow_schemas.py'
+          schema_test = schema_test_path.read_text(encoding='utf-8')
+          schema_test = schema_test.replace('import copy\n', '')
+          schema_test = re.sub(r'\n\s*self\.assertFalse\(parsed\.legacy\)', '', schema_test)
+          schema_test = re.sub(
+              r'    def test_legacy_metadata_and_progress_are_normalized_in_memory_only\(self\):[\s\S]*?\n    def test_missing_version_is_rejected_for_non_legacy_schema_kinds\(self\):[\s\S]*?(?=\n\nif __name__)',
+              '''    def test_missing_version_is_rejected_for_current_schema_kinds(self):\n        self.require_api()\n        for kind, original in (\n            (SchemaKind.METADATA, self.valid_metadata()),\n            (SchemaKind.PROGRESS, self.valid_progress()),\n            (SchemaKind.CLAIM, self.valid_claim()),\n        ):\n            with self.subTest(kind=kind):\n                current = dict(original)\n                del current["schema_version"]\n                with self.assertRaises(SchemaError):\n                    parse_document(kind, current)''',
+              schema_test,
+          )
+          schema_test_path.write_text(schema_test, encoding='utf-8')
+
+          repository_test_path = root / 'tests' / 'test_workflow_repository.py'
+          repository_test = repository_test_path.read_text(encoding='utf-8')
+          repository_test = repository_test.replace(
+              'test_read_rejects_unversioned_state_even_with_former_compatibility_flag',
+              'test_read_rejects_unversioned_state',
+          )
+          repository_test_path.write_text(repository_test, encoding='utf-8')
+
+          # Architecture doc no longer needs to explain a version-era namespace.
+          architecture_path = root / 'docs' / 'ARCHITECTURE.md'
+          architecture = architecture_path.read_text(encoding='utf-8')
+          architecture = architecture.replace(
+              '- `scripts/workflow/` is the internal workflow package. The `v2` suffix is an implementation-era module name, not a second supported workflow version.',
+              '- `scripts/workflow/` is the single internal workflow package.',
+          )
+          architecture_path.write_text(architecture, encoding='utf-8')
+
+          # Remove the one-shot workflow itself from the resulting branch.
+          bot_path = root / '.github' / 'workflows' / 'architecture-cleanup-bot.yml'
+          bot_path.unlink()
+
+          # Fail before commit if compatibility/runtime naming leaked into production source.
+          forbidden_runtime = (
+              'workflow_v2',
+              'WorkflowV2',
+              'Workflow v2',
+              'LEGACY_COMPATIBLE_KINDS',
+              'allow_legacy',
+              'legacy: bool',
+              'install_source_schema_extensions',
+              'install_parallel_schema_extensions',
+              'workflow_upgrade',
+          )
+          production_text = '\n'.join(
+              p.read_text(encoding='utf-8')
+              for base in (root / 'scripts', root / 'docs')
+              for p in sorted(base.rglob('*'))
+              if p.is_file() and p.suffix in {'.py', '.md', '.json'}
+          )
+          leaked = [token for token in forbidden_runtime if token in production_text]
+          if leaked:
+              raise SystemExit(f'forbidden current-runtime tokens remain: {leaked}')
+          PY
+
+          git diff --check
+          git status --short
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "refactor: use one unversioned workflow runtime"
+          git push origin HEAD:refactor/workflow-namespace-cleanup
+      - name: Run full suite on transformed tree
+        run: python -m unittest discover -s tests -v
