@@ -14,6 +14,7 @@ BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
 WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow_v2"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
+REVISION = "0123456789abcdef"
 
 
 class CorpusCliTests(unittest.TestCase):
@@ -27,6 +28,19 @@ class CorpusCliTests(unittest.TestCase):
         shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow_v2")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
+        (self.repo / ".book-translator-install.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "canonical_repository": "https://github.com/tim8es/book-translator",
+                    "requested_ref": "refactor/workflow-engine-v2",
+                    "resolved_revision": REVISION,
+                    "install_root": ".",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
