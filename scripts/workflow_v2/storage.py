@@ -10,7 +10,7 @@ class StorageError(RuntimeError):
     """Base error for storage backend failures."""
 
 
-class StorageNotFound(StorageError):
+class StorageNotFound(StorageError, FileNotFoundError):
     """The requested logical path does not exist."""
 
 

@@ -182,18 +182,25 @@ class WorkflowV2Phase1ReliabilityTests(unittest.TestCase):
 
     def mark_translated(self, book, text="# Один\n\nАльфа.\n"):
         translation = self.write_translation(book, text)
-        repository = self.book_repository(book)
-        loaded = repository.read("progress.json", SchemaKind.PROGRESS)
-        updated = dict(loaded.data)
-        updated["chapters"] = [dict(chapter) for chapter in loaded.data["chapters"]]
-        updated["chapters"][0]["status"] = "translated"
-        revision = repository.write_if_version(
-            "progress.json",
-            SchemaKind.PROGRESS,
-            updated,
-            loaded.version,
+        claim_path = book / ".workflow" / "claims" / "chapter-000001.json"
+        created_claim = not claim_path.is_file()
+        if created_claim:
+            session_id = "translator-helper"
+            self.run_book(
+                "claim", "sample", "1", "--role", "translator",
+                "--session-id", session_id, "--json"
+            )
+        else:
+            claim = json.loads(claim_path.read_text(encoding="utf-8"))
+            session_id = claim["session_id"]
+        accepted = self.canonical_json(
+            self.run_book(
+                "accept-translation", "sample", "1", "--session-id", session_id, "--json"
+            )
         )
-        return translation, revision
+        if created_claim:
+            self.release_claim(session_id)
+        return translation, accepted["progress_revision"]
 
     def claim_reviewer(self, session_id="reviewer-crashed"):
         return self.run_book(
@@ -474,14 +481,24 @@ class WorkflowV2Phase1ReliabilityTests(unittest.TestCase):
         self.record_pass("reviewer-a")
         self.release_claim("reviewer-a")
 
+        self.run_book(
+            "claim", "sample", "1", "--role", "translator",
+            "--session-id", "translator-correction", "--json"
+        )
         translation.write_text("# Один\n\nИзменённая Альфа.\n", encoding="utf-8")
+        self.run_book(
+            "accept-translation", "sample", "1",
+            "--session-id", "translator-correction", "--json"
+        )
+        self.release_claim("translator-correction")
+
         status = self.canonical_json(self.run_book("status", "sample", "--json"))
         self.assertTrue(status["valid"])
         self.assertEqual(status["reviews"]["stale"], 1)
         resumed = self.canonical_json(self.run_book("resume", "sample", "--json"))
         self.assertEqual(resumed["operation"], "review")
 
-    def test_stale_pass_on_reviewed_unit_fails_closed(self):
+    def test_tampered_reviewed_translation_fails_closed(self):
         book = self.initialize_book()
         translation, _ = self.mark_translated(book)
         self.claim_reviewer("reviewer-a")
@@ -493,17 +510,11 @@ class WorkflowV2Phase1ReliabilityTests(unittest.TestCase):
         self.assertTrue(accepted["changed"])
 
         translation.write_text("# Один\n\nИзменённая Альфа.\n", encoding="utf-8")
-        status = self.canonical_json(self.run_book("status", "sample", "--json"))
-        self.assertFalse(status["valid"])
-        self.assertEqual(status["reviews"]["stale"], 1)
-        self.assertTrue(
-            any("reviewed without current PASS evidence" in error for error in status["errors"])
-        )
-        resumed = self.canonical_json(
-            self.run_book("resume", "sample", "--json", expect=1)
-        )
-        self.assertEqual(resumed["operation"], "blocked")
-        self.assertEqual(resumed["reason"], "preflight_failed")
+        status = self.run_book("status", "sample", "--json", expect=1)
+        self.assertIn("translation_acceptance", status.stderr)
+        self.assertIn("sha256 mismatch", status.stderr)
+        resumed = self.run_book("resume", "sample", "--json", expect=1)
+        self.assertIn("translation_acceptance", resumed.stderr)
 
     def test_concurrent_glossary_cas_rejects_stale_writer_without_lost_update(self):
         book = self.initialize_book()

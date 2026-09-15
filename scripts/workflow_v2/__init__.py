@@ -1,4 +1,4 @@
-"""Public internal API for Workflow v2 state infrastructure."""
+"""Public internal API for the Book Translator workflow runtime."""
 
 from .claims import (
     ActiveClaim,
@@ -24,21 +24,6 @@ from .github_api import (
     GitHubTreeEntry,
 )
 from .github_storage import GitHubStorage
-from .migration_journal import (
-    MIGRATION_PATH,
-    MigrationJournalError,
-    load_migration_journal,
-    serialize_migration_journal,
-    validate_migration_journal,
-)
-from .migrations import (
-    MigratedDocument,
-    MigrationCompatibilityError,
-    MigrationConflict,
-    MigrationError,
-    detect_schema_version,
-    migrate_document,
-)
 from .parallel_schema import install_parallel_schema_extensions
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .reviews import (
@@ -95,12 +80,6 @@ __all__ = [
     "InvalidClaimSelector",
     "InvalidStoragePath",
     "LoadedDocument",
-    "MIGRATION_PATH",
-    "MigratedDocument",
-    "MigrationCompatibilityError",
-    "MigrationConflict",
-    "MigrationError",
-    "MigrationJournalError",
     "ParsedDocument",
     "RepositoryError",
     "ReviewClaimError",
@@ -123,12 +102,7 @@ __all__ = [
     "UnsupportedSchemaVersion",
     "WorkflowStateRepository",
     "canonical_unit_id",
-    "detect_schema_version",
-    "load_migration_journal",
-    "migrate_document",
     "parse_document",
     "patch_text",
     "resolve_selector",
-    "serialize_migration_journal",
-    "validate_migration_journal",
 ]

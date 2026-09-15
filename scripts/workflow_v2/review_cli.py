@@ -1,4 +1,4 @@
-"""Argparse integration for Workflow v2 machine review evidence."""
+"""Argparse integration for current machine review evidence."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _repository(root: Path, slug: str) -> tuple[Path, WorkflowStateRepository]:
 
 def _load_progress(repository: WorkflowStateRepository) -> tuple[dict[str, Any], str]:
     try:
-        loaded = repository.read("progress.json", SchemaKind.PROGRESS, allow_legacy=True)
+        loaded = repository.read("progress.json", SchemaKind.PROGRESS)
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise ReviewCliError(f"Invalid progress.json: {exc}") from exc
     return loaded.data, loaded.version
@@ -70,7 +70,7 @@ def _load_progress(repository: WorkflowStateRepository) -> tuple[dict[str, Any],
 
 def _load_metadata(repository: WorkflowStateRepository) -> dict[str, Any]:
     try:
-        return repository.read("metadata.json", SchemaKind.METADATA, allow_legacy=True).data
+        return repository.read("metadata.json", SchemaKind.METADATA).data
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise ReviewCliError(f"Invalid metadata.json: {exc}") from exc
 
@@ -119,6 +119,56 @@ def _translation_manager(
         repository,
         artifact_reader=_artifact_reader(book_dir),
     )
+
+
+def _require_current_translation_acceptance(
+    progress: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    chapter_number: int,
+) -> None:
+    """Keep Reviewer operations behind the durable Translator acceptance gate."""
+
+    chapters = progress.get("chapters")
+    if not isinstance(chapters, list):
+        raise ReviewCliError("progress state must contain a chapters array")
+    chapter = next(
+        (
+            item
+            for item in chapters
+            if isinstance(item, Mapping) and item.get("number") == chapter_number
+        ),
+        None,
+    )
+    if chapter is None:
+        raise ReviewCliError(f"progress does not contain chapter {chapter_number}")
+    evidence = chapter.get("translation_acceptance")
+    if not isinstance(evidence, Mapping):
+        raise ReviewCliError(
+            f"chapter {chapter_number} requires current translation_acceptance evidence before review"
+        )
+    expected_unit = f"chapter-{chapter_number:06d}"
+    if evidence.get("unit_id") != expected_unit:
+        raise ReviewCliError(
+            f"chapter {chapter_number} translation_acceptance unit identity is invalid"
+        )
+    if evidence.get("role") != "translator":
+        raise ReviewCliError(
+            f"chapter {chapter_number} translation_acceptance role must be translator"
+        )
+    workflow = metadata.get("workflow")
+    workflow_revision = None
+    if isinstance(workflow, Mapping):
+        for key in ("resolved_revision", "requested_ref"):
+            value = workflow.get(key)
+            if isinstance(value, str) and value.strip():
+                workflow_revision = value
+                break
+    if workflow_revision is None:
+        raise ReviewCliError("metadata workflow revision is unavailable")
+    if evidence.get("workflow_revision") != workflow_revision:
+        raise ReviewCliError(
+            f"chapter {chapter_number} translation_acceptance uses another workflow revision"
+        )
 
 
 def _print_json(payload: Mapping[str, Any]) -> None:
@@ -193,6 +243,7 @@ def review_record_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
     metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
     manager = _manager(book_dir, repository)
     review_commit = args.review_commit if args.review_commit is not None else _git_head(root)
     try:
@@ -298,6 +349,7 @@ def accept_review_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
     metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
     manager = _manager(book_dir, repository)
     try:
         result = manager.accept_review(progress, progress_revision, metadata, args.chapter)
@@ -383,9 +435,6 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
 
     register_status_commands(subparsers, root, error_factory=ReviewCliError)
 
-    # Lazy imports avoid registration cycles while extending the existing top-level parser.
     from .epub_cli import register_epub_commands
-    from .migrations_cli import register_migration_command
 
     register_epub_commands(subparsers, root, error_factory=ReviewCliError)
-    register_migration_command(subparsers, root, error_factory=ReviewCliError)

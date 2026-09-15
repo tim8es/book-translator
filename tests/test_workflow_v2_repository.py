@@ -70,19 +70,16 @@ class WorkflowV2RepositoryTests(unittest.TestCase):
 
         self.assertEqual(self.storage.list(), [])
 
-    def test_read_returns_revision_and_legacy_flag_without_rewriting(self):
+    def test_read_rejects_unversioned_state_even_with_former_compatibility_flag(self):
         repo = self.repo()
-        legacy = self.metadata()
-        del legacy["schema_version"]
-        original = (json.dumps(legacy, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        version = self.storage.create_if_absent("metadata.json", original)
+        unversioned = self.metadata()
+        del unversioned["schema_version"]
+        original = (json.dumps(unversioned, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        self.storage.create_if_absent("metadata.json", original)
 
-        loaded = repo.read("metadata.json", SchemaKind.METADATA, allow_legacy=True)
+        with self.assertRaises(SchemaError):
+            repo.read("metadata.json", SchemaKind.METADATA, allow_legacy=True)
 
-        self.assertIsInstance(loaded, LoadedDocument)
-        self.assertTrue(loaded.legacy)
-        self.assertEqual(loaded.version, version)
-        self.assertEqual(loaded.data["schema_version"], 1)
         self.assertEqual(self.storage.read("metadata.json").content, original)
 
     def test_stale_repository_write_propagates_conflict_without_mutation(self):

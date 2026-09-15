@@ -1,4 +1,4 @@
-"""Schema-aware JSON repository for Workflow v2 durable state."""
+"""Schema-aware JSON repository for the current durable workflow state."""
 
 from __future__ import annotations
 
@@ -103,6 +103,11 @@ class WorkflowStateRepository:
                 try:
                     artifact = self.storage.read(artifact_path)
                 except StorageNotFound:
+                    if path_key == "source_path":
+                        # Missing source corpus is a recoverable corpus-integrity condition.
+                        # Structural/corpus preflight still fails closed, while corpus restore
+                        # must be able to read schema-valid progress before recreating source bytes.
+                        continue
                     mismatches.append(f"{hash_key} cannot be verified because {artifact_path} is missing")
                     continue
                 actual = hashlib.sha256(artifact.content).hexdigest()
@@ -127,6 +132,12 @@ class WorkflowStateRepository:
         *,
         allow_legacy: bool = False,
     ) -> LoadedDocument:
+        """Read a current-schema document.
+
+        ``allow_legacy`` remains only as a temporary call-site compatibility parameter;
+        it no longer enables normalization or acceptance of legacy documents.
+        """
+
         stored = self.storage.read(path)
         try:
             text = stored.content.decode("utf-8")
@@ -137,13 +148,13 @@ class WorkflowStateRepository:
         except json.JSONDecodeError as exc:
             raise RepositoryError(f"{path}: invalid JSON: {exc}") from exc
 
-        parsed = parse_document(schema, raw, allow_legacy=allow_legacy)
+        parsed = parse_document(schema, raw)
         if schema == SchemaKind.PROGRESS:
             self._verify_translation_acceptance_integrity(parsed.data)
         return LoadedDocument(
             data=parsed.data,
             version=stored.version,
-            legacy=parsed.legacy,
+            legacy=False,
         )
 
     def create(

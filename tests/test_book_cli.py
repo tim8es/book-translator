@@ -101,7 +101,7 @@ class BookCliSmokeTests(unittest.TestCase):
             },
         )
 
-    def test_build_requires_reviewed_by_default(self):
+    def test_build_rejects_translated_or_reviewed_state_without_translation_acceptance(self):
         source = self.repo / "sample.txt"
         source.write_text(
             "Chapter 1\n\nOriginal one.\n\nChapter 2\n\nOriginal two.\n",
@@ -128,23 +128,43 @@ class BookCliSmokeTests(unittest.TestCase):
             chapter["status"] = "translated"
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-        self.run_cli("validate", "sample-book")
-        self.run_cli("build", "sample-book", expect=1)
-        self.run_cli("build", "sample-book", "--allow-unreviewed")
-
-        # This smoke test predates machine review evidence and only verifies the
-        # build command's lifecycle-state filter, so keep its final state legacy.
-        metadata_path = book / "metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["workflow"].pop("review_evidence", None)
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (book / "review-ledger.json").unlink()
+        validate = self.run_cli("validate", "sample-book", expect=1)
+        self.assertIn("translation_acceptance", validate.stderr)
+        preview = self.run_cli("build", "sample-book", "--allow-unreviewed", expect=1)
+        self.assertIn("translation_acceptance", preview.stderr)
 
         for chapter in progress["chapters"]:
             chapter["status"] = "reviewed"
         progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.run_cli("build", "sample-book")
-        self.assertTrue((book / "output" / "sample-book.md").is_file())
+        final = self.run_cli("build", "sample-book", expect=1)
+        self.assertIn("translation_acceptance", final.stderr)
+
+    def test_validate_and_build_reject_tampered_preserved_source(self):
+        source = self.repo / "sample.md"
+        source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+
+        preserved = self.repo / "books" / "sample" / "source" / "sample.md"
+        preserved.write_text(preserved.read_text(encoding="utf-8") + "\nTAMPERED\n", encoding="utf-8")
+
+        validate = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("source hash mismatch", validate.stderr.lower())
+        build = self.run_cli("build", "sample", "--allow-unreviewed", expect=1)
+        self.assertIn("source hash mismatch", build.stderr.lower())
+
+    def test_validate_and_build_reject_tampered_extracted_artifact(self):
+        source = self.repo / "sample.md"
+        source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+        book = self.repo / "books" / "sample"
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        extracted = book / progress["chapters"][0]["source_path"]
+        extracted.write_text(extracted.read_text(encoding="utf-8") + "\nTAMPERED\n", encoding="utf-8")
+
+        validate = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("extracted artifact hash mismatch", validate.stderr.lower())
+        build = self.run_cli("build", "sample", "--allow-unreviewed", expect=1)
+        self.assertIn("extracted artifact hash mismatch", build.stderr.lower())
 
     def test_validate_requires_style_guide(self):
         source = self.repo / "sample.md"
@@ -167,7 +187,7 @@ class BookCliSmokeTests(unittest.TestCase):
         result = self.run_cli("validate", "sample", expect=1)
         self.assertIn("unsupported version 2", result.stderr)
 
-    def test_validate_accepts_legacy_state_without_rewriting(self):
+    def test_validate_rejects_unversioned_state_without_rewriting(self):
         source = self.repo / "sample.md"
         source.write_text("# A\n\nOne.\n\n# B\n\nTwo.\n", encoding="utf-8")
         self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
@@ -182,7 +202,8 @@ class BookCliSmokeTests(unittest.TestCase):
             path.write_bytes(content)
             original_bytes[path.name] = content
 
-        self.run_cli("validate", "sample")
+        result = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("schema_version", result.stderr)
 
         for path in paths:
             self.assertEqual(path.read_bytes(), original_bytes[path.name])

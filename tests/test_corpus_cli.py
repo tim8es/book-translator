@@ -14,6 +14,7 @@ BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
 WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow_v2"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
+REVISION = "0123456789abcdef"
 
 
 class CorpusCliTests(unittest.TestCase):
@@ -27,6 +28,19 @@ class CorpusCliTests(unittest.TestCase):
         shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow_v2")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
+        (self.repo / ".book-translator-install.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "canonical_repository": "https://github.com/tim8es/book-translator",
+                    "requested_ref": "refactor/workflow-engine-v2",
+                    "resolved_revision": REVISION,
+                    "install_root": ".",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -119,21 +133,24 @@ class CorpusCliTests(unittest.TestCase):
         self.run_cli("book.py", "extract", str(source), "--slug", "sample", "--target-language", "ru")
         book = self.repo / "books" / "sample"
 
-        # Model a legacy book whose lifecycle predates explicit source/review evidence.
-        metadata_path = book / "metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata.pop("source", None)
-        metadata["workflow"].pop("review_evidence", None)
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (book / "review-ledger.json").unlink()
-
         progress_path = book / "progress.json"
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
         translation_path = book / progress["chapters"][0]["translation_path"]
         translation_path.parent.mkdir(parents=True, exist_ok=True)
         translation_path.write_text("# Первая\n\nПеревод.\n", encoding="utf-8")
-        progress["chapters"][0]["status"] = "reviewed"
-        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.run_cli(
+            "book.py", "claim", "sample", "1",
+            "--role", "translator", "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "book.py", "accept-translation", "sample", "1",
+            "--session-id", "translator-a", "--json"
+        )
+        self.run_cli(
+            "book.py", "release", "sample", "1",
+            "--session-id", "translator-a", "--json"
+        )
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
 
         shutil.rmtree(book / "extracted")
         (book / "extracted").mkdir()

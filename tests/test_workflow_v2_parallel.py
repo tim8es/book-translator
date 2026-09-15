@@ -35,6 +35,7 @@ class WorkflowV2ParallelSliceTests(unittest.TestCase):
             "workflow": {
                 "requested_ref": "refactor/workflow-engine-v2",
                 "resolved_revision": "workflow-revision",
+                "review_evidence": "review-ledger-v1",
             },
         }
         self.progress = {
@@ -56,6 +57,21 @@ class WorkflowV2ParallelSliceTests(unittest.TestCase):
         self.progress_revision = self.repository.create(
             "progress.json", SchemaKind.PROGRESS, self.progress
         )
+        self.repository.create(
+            "review-ledger.json",
+            SchemaKind.REVIEW_LEDGER,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "book_slug": "demo",
+                "next_sequence": 1,
+                "records": [],
+            },
+        )
+        for number in (1, 2, 3):
+            self.storage.create_if_absent(
+                f"extracted/chapter-{number:04d}.md",
+                f"# Chapter {number}\n\nSource {number}.\n".encode(),
+            )
         self.glossary_revision = self.storage.create_if_absent(
             "glossary.md", b"# Glossary\n"
         )
@@ -217,6 +233,7 @@ class WorkflowV2ParallelSliceTests(unittest.TestCase):
         subparsers = parser.add_subparsers(dest="command")
         subparsers.add_parser("extract")
         subparsers.add_parser("validate")
+        subparsers.add_parser("build")
         register_status_commands(
             subparsers,
             self.root,

@@ -79,21 +79,27 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
             "ru",
         )
         book = self.repo / "books" / slug
-        progress_path = book / "progress.json"
-        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
         self.assertEqual(len(progress["chapters"]), chapters)
         for chapter in progress["chapters"]:
+            number = chapter["number"]
             translation = book / chapter["translation_path"]
             translation.parent.mkdir(parents=True, exist_ok=True)
             translation.write_text(
-                f"# Глава {chapter['number']}\n\nПеревод {chapter['number']}.\n",
+                f"# Глава {number}\n\nПеревод {number}.\n",
                 encoding="utf-8",
             )
-            chapter["status"] = "translated"
-        progress_path.write_text(
-            json.dumps(progress, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+            session = f"translator-{number}"
+            self.run_cli(
+                "claim", slug, str(number), "--role", "translator",
+                "--session-id", session, "--json"
+            )
+            self.run_cli(
+                "accept-translation", slug, str(number), "--session-id", session, "--json"
+            )
+            self.run_cli(
+                "release", slug, str(number), "--session-id", session, "--json"
+            )
         return book
 
     def initialize_final_book(self, slug="sample", *, chapters=1):
@@ -261,8 +267,8 @@ class WorkflowV2EpubReliabilityTests(unittest.TestCase):
                     )
                     self.run_cli("release", slug, "1", "--session-id", "reviewer-change", "--json")
 
-                changed = self.status(slug)
-                self.assertEqual(changed["state"], "stale", changed)
+                changed = self.status(slug, expect=1 if case == "translation" else 0)
+                self.assertEqual(changed["state"], "invalid" if case == "translation" else "stale", changed)
 
     def test_semantically_duplicate_pass_evidence_does_not_make_output_stale(self):
         self.initialize_final_book()

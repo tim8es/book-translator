@@ -1,4 +1,4 @@
-"""Read-only Workflow v2 status and resume resolution."""
+"""Read-only status and resume resolution for the current workflow."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from typing import Any
 
 from .claims import ClaimManager, canonical_unit_id
 from .coordination import FINALIZATION_PATH
-from .migration_journal import MIGRATION_PATH, MigrationJournalError, load_migration_journal
 from .repository import RepositoryError, WorkflowStateRepository
 from .reviews import REVIEW_EVIDENCE_VERSION, ReviewEvidenceError, ReviewLedgerManager
 from .schemas import SchemaError, SchemaKind
@@ -47,16 +46,8 @@ class StatusResolver:
         structural_errors: Sequence[str] = (),
         corpus: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        metadata_doc = self.repository.read(
-            "metadata.json",
-            SchemaKind.METADATA,
-            allow_legacy=True,
-        )
-        progress_doc = self.repository.read(
-            "progress.json",
-            SchemaKind.PROGRESS,
-            allow_legacy=True,
-        )
+        metadata_doc = self.repository.read("metadata.json", SchemaKind.METADATA)
+        progress_doc = self.repository.read("progress.json", SchemaKind.PROGRESS)
         metadata = metadata_doc.data
         progress = progress_doc.data
 
@@ -73,32 +64,18 @@ class StatusResolver:
         errors = [str(error) for error in structural_errors if str(error)]
         if workflow_revision is None:
             errors.append("workflow revision is unavailable")
+        if not isinstance(workflow, Mapping) or workflow.get("review_evidence") != REVIEW_EVIDENCE_VERSION:
+            errors.append(
+                f"workflow review evidence must be {REVIEW_EVIDENCE_VERSION!r}"
+            )
 
-        corpus_data = dict(corpus or {"state": "unsealed"})
+        corpus_data = dict(corpus or {"state": "invalid", "error": "source corpus preflight was not provided"})
         corpus_state = corpus_data.get("state")
-        if corpus_state not in {"verified", "unsealed", "invalid"}:
+        if corpus_state not in {"verified", "invalid"}:
             errors.append(f"unsupported corpus state: {corpus_state!r}")
         elif corpus_state == "invalid":
             detail = corpus_data.get("error")
             errors.append(str(detail) if detail else "source corpus integrity is invalid")
-
-        migration: dict[str, Any] = {"active": False}
-        try:
-            journal, _ = load_migration_journal(self.repository.storage)
-        except StorageNotFound:
-            pass
-        except (MigrationJournalError, StorageError) as exc:
-            errors.append(f"migration state is unavailable or invalid: {exc}")
-        else:
-            migration = {
-                "active": True,
-                "phase": journal["phase"],
-                "from_revision": journal["from_revision"],
-                "to_revision": journal["to_revision"],
-                "document_count": len(journal["documents"]),
-            }
-            if journal["book_slug"] != progress.get("book_slug"):
-                errors.append("migration journal book_slug does not match progress")
 
         finalization: dict[str, Any] = {"active": False}
         try:
@@ -133,32 +110,19 @@ class StatusResolver:
 
         review_states_by_number: dict[int, str] = {}
         review_ledger_revision: str | None = None
-        review_mode = "legacy_lifecycle"
-        if isinstance(workflow, Mapping) and workflow.get("review_evidence") == REVIEW_EVIDENCE_VERSION:
-            review_mode = REVIEW_EVIDENCE_VERSION
-            try:
-                review_ledger_revision = self.repository.read(
-                    "review-ledger.json",
-                    SchemaKind.REVIEW_LEDGER,
-                ).version
-                review_manager = ReviewLedgerManager(
-                    self.repository,
-                    artifact_reader=self._artifact_reader,
-                )
-                for resolution in review_manager.resolve_all(progress, metadata):
-                    review_states_by_number[resolution.chapter_number] = resolution.state
-            except (ReviewEvidenceError, StorageError, StorageNotFound) as exc:
-                errors.append(f"review evidence is unavailable or invalid: {exc}")
-        else:
-            for chapter in chapters:
-                number = chapter.get("number")
-                lifecycle_state = chapter.get("status")
-                if lifecycle_state == "reviewed":
-                    review_states_by_number[number] = "pass"
-                elif lifecycle_state == "translated":
-                    review_states_by_number[number] = "missing"
-                else:
-                    review_states_by_number[number] = "untranslated"
+        try:
+            review_ledger_revision = self.repository.read(
+                "review-ledger.json",
+                SchemaKind.REVIEW_LEDGER,
+            ).version
+            review_manager = ReviewLedgerManager(
+                self.repository,
+                artifact_reader=self._artifact_reader,
+            )
+            for resolution in review_manager.resolve_all(progress, metadata):
+                review_states_by_number[resolution.chapter_number] = resolution.state
+        except (ReviewEvidenceError, RepositoryError, SchemaError, StorageError, StorageNotFound) as exc:
+            errors.append(f"review evidence is unavailable or invalid: {exc}")
 
         reviews = {state: 0 for state in _REVIEW_STATES}
         units: list[dict[str, Any]] = []
@@ -228,14 +192,13 @@ class StatusResolver:
             "schema_version": STATUS_SCHEMA_VERSION,
             "book_slug": progress.get("book_slug"),
             "workflow_revision": workflow_revision,
-            "review_mode": review_mode,
+            "review_mode": REVIEW_EVIDENCE_VERSION,
             "valid": not errors,
             "errors": errors,
             "lifecycle": lifecycle,
             "reviews": reviews,
             "claims": claims,
             "corpus": corpus_data,
-            "migration": migration,
             "finalization": finalization,
             "units": units,
             "state_revisions": revisions,
@@ -260,14 +223,6 @@ class StatusResolver:
                 "reason": "preflight_failed",
                 "errors": list(status.get("errors") or ()),
                 "context": self._context("blocked", None, status),
-            }
-
-        migration = status.get("migration")
-        if isinstance(migration, Mapping) and migration.get("active") is True:
-            return {
-                "schema_version": STATUS_SCHEMA_VERSION,
-                "operation": "workflow_upgrade",
-                "context": self._context("workflow_upgrade", None, status),
             }
 
         finalization = status.get("finalization")
@@ -438,8 +393,6 @@ class StatusResolver:
             files.append("review-ledger.json")
         if operation == "finalize":
             files.append(FINALIZATION_PATH)
-        if operation == "workflow_upgrade":
-            files.append(MIGRATION_PATH)
 
         return {
             "role": role,
