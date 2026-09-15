@@ -1,10 +1,9 @@
 import hashlib
-import json
 import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -12,23 +11,56 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from workflow.claims import ClaimManager
 from workflow.filesystem import FilesystemStorage
 from workflow.repository import WorkflowStateRepository
-from workflow.reviews import ReviewConflict, ReviewEvidenceError, ReviewLedgerManager
 from workflow.schemas import SchemaKind
 
+try:
+    from workflow.reviews import (
+        ReviewClaimError,
+        ReviewConflict,
+        ReviewEvidenceError,
+        ReviewLedgerManager,
+    )
+except (ImportError, ModuleNotFoundError):
+    ReviewClaimError = None
+    ReviewConflict = None
+    ReviewEvidenceError = None
+    ReviewLedgerManager = None
 
-NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+NOW = datetime(2026, 9, 6, 0, 0, 0, tzinfo=timezone.utc)
+WORKFLOW_REVISION = "0123456789abcdef"
 
 
 class WorkflowReviewTests(unittest.TestCase):
     def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.root = Path(self.tempdir.name)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
         self.storage = FilesystemStorage(self.root)
         self.repository = WorkflowStateRepository(self.storage)
+        self.artifacts = {
+            "extracted/001-one.md": b"# One\n\nSource.\n",
+            "translated/001-one.md": "# Один\n\nПеревод.\n".encode("utf-8"),
+            "extracted/002-two.md": b"# Two\n\nSource two.\n",
+        }
+        self.metadata = {
+            "schema_version": 1,
+            "title": "Example",
+            "author": "Author",
+            "source_language": "en",
+            "target_language": "ru",
+            "source_format": "markdown",
+            "source_file": "example.md",
+            "chapter_count": 2,
+            "imported_at": "2026-09-05T20:00:00Z",
+            "workflow": {
+                "repository": "https://github.com/tim8es/book-translator",
+                "requested_ref": "refactor/workflow-engine-v2",
+                "resolved_revision": WORKFLOW_REVISION,
+                "review_evidence": "review-ledger-v1",
+            },
+        }
         self.progress = {
             "schema_version": 1,
             "book_slug": "example",
@@ -40,227 +72,179 @@ class WorkflowReviewTests(unittest.TestCase):
                     "source_path": "extracted/001-one.md",
                     "translation_path": "translated/001-one.md",
                     "status": "translated",
-                }
+                },
+                {
+                    "number": 2,
+                    "title": "Two",
+                    "slug": "two",
+                    "source_path": "extracted/002-two.md",
+                    "translation_path": "translated/002-two.md",
+                    "status": "extracted",
+                },
             ],
         }
-        self.metadata = {
-            "schema_version": 1,
-            "title": "Example",
-            "target_language": "ru",
-            "source_format": "markdown",
-            "source_file": "example.md",
-            "chapter_count": 1,
-            "workflow": {
-                "repository": "https://github.com/tim8es/book-translator",
-                "requested_ref": "main",
-                "resolved_revision": "workflow-rev-1",
-                "review_evidence": "review-ledger-v1",
-            },
-        }
-        self.source = b"Source chapter\n"
-        self.translation = b"Translated chapter\n"
-        self.storage.create_if_absent("extracted/001-one.md", self.source)
-        self.storage.create_if_absent("translated/001-one.md", self.translation)
-        self.repository.create("progress.json", SchemaKind.PROGRESS, self.progress)
-        self.repository.create("metadata.json", SchemaKind.METADATA, self.metadata)
+        self.progress_revision = self.repository.create("progress.json", SchemaKind.PROGRESS, self.progress)
         self.repository.create(
             "review-ledger.json",
             SchemaKind.REVIEW_LEDGER,
-            {
-                "schema_version": 1,
-                "book_slug": "example",
-                "next_sequence": 1,
-                "records": [],
-            },
+            {"schema_version": 1, "book_slug": "example", "next_sequence": 1, "records": []},
         )
-        self.claim_manager = ClaimManager(
-            self.repository,
-            now=lambda: NOW,
-            id_factory=lambda: "a" * 32,
-        )
+        self.ids = iter(f"{value:032x}" for value in range(100, 200))
 
-    def artifact_reader(self, relative_path):
-        return self.storage.read(relative_path).content
+    def tearDown(self):
+        self.tmp.cleanup()
 
-    def manager(self, repository=None, *, record_ids=None):
-        ids = iter(record_ids or ["b" * 32, "c" * 32, "d" * 32, "e" * 32])
+    def require_api(self):
+        self.assertIsNotNone(ReviewLedgerManager, "workflow.reviews ReviewLedgerManager is not implemented")
+        self.assertIsNotNone(ReviewEvidenceError, "workflow.reviews ReviewEvidenceError is not implemented")
+        self.assertIsNotNone(ReviewClaimError, "workflow.reviews ReviewClaimError is not implemented")
+        self.assertIsNotNone(ReviewConflict, "workflow.reviews ReviewConflict is not implemented")
+
+    def artifact_reader(self, path):
+        if path not in self.artifacts:
+            raise FileNotFoundError(path)
+        return self.artifacts[path]
+
+    def manager(self, *, repository=None, id_factory=None):
+        self.require_api()
         return ReviewLedgerManager(
             repository or self.repository,
             artifact_reader=self.artifact_reader,
             now=lambda: NOW,
-            id_factory=lambda: next(ids),
+            id_factory=id_factory or (lambda: next(self.ids)),
         )
 
-    def claim(self, *, session_id="reviewer-session", role="reviewer", expires=None):
-        return self.claim_manager.acquire(
-            self.progress,
-            "1",
-            role=role,
-            session_id=session_id,
-            workflow_revision="workflow-rev-1",
-            ttl=expires or timedelta(minutes=30),
-        )[0]
+    def claim(self, *, role="reviewer", session_id="reviewer-a", workflow_revision=WORKFLOW_REVISION, expired=False):
+        claimed_at = "2026-09-05T22:00:00Z" if expired else "2026-09-05T23:30:00Z"
+        expires_at = "2026-09-05T23:00:00Z" if expired else "2026-09-06T01:00:00Z"
+        claim = {
+            "schema_version": 1,
+            "claim_id": "c" * 32,
+            "unit_id": "chapter-000001",
+            "role": role,
+            "session_id": session_id,
+            "base_revision": self.progress_revision,
+            "base_commit": None,
+            "workflow_revision": workflow_revision,
+            "claimed_at": claimed_at,
+            "expires_at": expires_at,
+        }
+        return self.repository.create(
+            ".workflow/claims/chapter-000001.json",
+            SchemaKind.CLAIM,
+            claim,
+        )
 
-    def record(self, manager, outcome, *, session_id="reviewer-session"):
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
+    def record(self, manager, outcome="PASS", session_id="reviewer-a"):
         return manager.record(
             self.progress,
+            self.progress_revision,
             self.metadata,
             1,
             outcome=outcome,
             reviewer_session_id=session_id,
-            progress_revision=progress.version,
+            review_commit=None,
         )
-
-    def test_record_requires_live_matching_reviewer_claim(self):
-        manager = self.manager()
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
-        with self.assertRaises(ReviewEvidenceError):
-            manager.record(
-                self.progress,
-                self.metadata,
-                1,
-                outcome="PASS",
-                reviewer_session_id="reviewer-session",
-                progress_revision=progress.version,
-            )
-
-    def test_record_rejects_foreign_expired_or_wrong_workflow_reviewer_claim(self):
-        manager = self.manager()
-
-        self.claim(session_id="foreign")
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
-        with self.assertRaises(ReviewEvidenceError):
-            manager.record(
-                self.progress,
-                self.metadata,
-                1,
-                outcome="PASS",
-                reviewer_session_id="reviewer-session",
-                progress_revision=progress.version,
-            )
-        active = self.claim_manager.list_active()
-        self.claim_manager.release(active[0].claim["unit_id"], session_id="foreign")
-
-        self.claim(expires=timedelta(seconds=1))
-        expired_manager = ReviewLedgerManager(
-            self.repository,
-            artifact_reader=self.artifact_reader,
-            now=lambda: NOW + timedelta(seconds=2),
-            id_factory=lambda: "f" * 32,
-        )
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
-        with self.assertRaises(ReviewEvidenceError):
-            expired_manager.record(
-                self.progress,
-                self.metadata,
-                1,
-                outcome="PASS",
-                reviewer_session_id="reviewer-session",
-                progress_revision=progress.version,
-            )
-
-        self.storage.delete_if_version(
-            active[0].claim_path if active else "claims/chapter-000001.json",
-            self.storage.read("claims/chapter-000001.json").version,
-        )
-        claim = self.claim()
-        path = claim.claim_path
-        loaded = self.repository.read(path, SchemaKind.CLAIM)
-        bad = dict(loaded.data)
-        bad["workflow_revision"] = "wrong-workflow"
-        self.repository.write_if_version(path, SchemaKind.CLAIM, bad, loaded.version)
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
-        with self.assertRaises(ReviewEvidenceError):
-            manager.record(
-                self.progress,
-                self.metadata,
-                1,
-                outcome="PASS",
-                reviewer_session_id="reviewer-session",
-                progress_revision=progress.version,
-            )
-
-    def test_record_requires_immutable_resolved_workflow_provenance(self):
-        self.claim()
-        manager = self.manager()
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
-
-        for workflow in (
-            {},
-            {"resolved_revision": ""},
-        ):
-            metadata = dict(self.metadata)
-            metadata["workflow"] = workflow
-            with self.assertRaises(ReviewEvidenceError):
-                manager.record(
-                    self.progress,
-                    metadata,
-                    1,
-                    outcome="PASS",
-                    reviewer_session_id="reviewer-session",
-                    progress_revision=progress.version,
-                )
-
-    def test_record_refuses_missing_or_empty_translation(self):
-        self.claim()
-        manager = self.manager()
-        progress = self.repository.read("progress.json", SchemaKind.PROGRESS)
-        self.storage.delete_if_version(
-            "translated/001-one.md",
-            self.storage.read("translated/001-one.md").version,
-        )
-        with self.assertRaises(ReviewEvidenceError):
-            manager.record(
-                self.progress,
-                self.metadata,
-                1,
-                outcome="PASS",
-                reviewer_session_id="reviewer-session",
-                progress_revision=progress.version,
-            )
-
-        self.storage.create_if_absent("translated/001-one.md", b"")
-        with self.assertRaises(ReviewEvidenceError):
-            manager.record(
-                self.progress,
-                self.metadata,
-                1,
-                outcome="PASS",
-                reviewer_session_id="reviewer-session",
-                progress_revision=progress.version,
-            )
 
     def test_pass_binds_exact_source_and_translation_bytes_and_restores_when_bytes_restore(self):
         self.claim()
         manager = self.manager()
-        result = self.record(manager, "PASS")
+        result = self.record(manager)
+
         resolution = manager.resolve_unit(self.progress, self.metadata, 1)
         self.assertEqual(resolution.state, "pass")
-        self.assertEqual(result.record["source_sha256"], hashlib.sha256(self.source).hexdigest())
-        self.assertEqual(result.record["translation_sha256"], hashlib.sha256(self.translation).hexdigest())
+        self.assertEqual(resolution.current_record["record_id"], result.record["record_id"])
+        self.assertEqual(
+            resolution.source_sha256,
+            hashlib.sha256(self.artifacts["extracted/001-one.md"]).hexdigest(),
+        )
+        original_translation = self.artifacts["translated/001-one.md"]
+        expected_translation_hash = hashlib.sha256(original_translation).hexdigest()
+        self.assertEqual(resolution.translation_sha256, expected_translation_hash)
 
-        translation = self.storage.read("translated/001-one.md")
-        self.storage.write_if_version("translated/001-one.md", b"changed\n", translation.version)
+        self.artifacts["translated/001-one.md"] = original_translation + b"changed"
         self.assertEqual(manager.resolve_unit(self.progress, self.metadata, 1).state, "stale")
-        translation = self.storage.read("translated/001-one.md")
-        self.storage.write_if_version("translated/001-one.md", self.translation, translation.version)
-        self.assertEqual(manager.resolve_unit(self.progress, self.metadata, 1).state, "pass")
+
+        self.artifacts["translated/001-one.md"] = original_translation
+        restored = manager.resolve_unit(self.progress, self.metadata, 1)
+        self.assertEqual(restored.state, "pass")
+        self.assertEqual(restored.translation_sha256, expected_translation_hash)
 
     def test_source_or_workflow_change_makes_existing_review_stale(self):
         self.claim()
-        manager = self.manager(record_ids=["b" * 32])
-        self.record(manager, "PASS")
+        manager = self.manager()
+        self.record(manager)
 
-        source = self.storage.read("extracted/001-one.md")
-        self.storage.write_if_version("extracted/001-one.md", b"changed source\n", source.version)
+        original_source = self.artifacts["extracted/001-one.md"]
+        self.artifacts["extracted/001-one.md"] = original_source + b"changed"
         self.assertEqual(manager.resolve_unit(self.progress, self.metadata, 1).state, "stale")
+        self.artifacts["extracted/001-one.md"] = original_source
 
-        source = self.storage.read("extracted/001-one.md")
-        self.storage.write_if_version("extracted/001-one.md", self.source, source.version)
-        changed_metadata = json.loads(json.dumps(self.metadata))
-        changed_metadata["workflow"]["resolved_revision"] = "workflow-rev-2"
+        changed_metadata = {**self.metadata, "workflow": {**self.metadata["workflow"], "resolved_revision": "fedcba9876543210"}}
         self.assertEqual(manager.resolve_unit(self.progress, changed_metadata, 1).state, "stale")
+
+    def test_resolution_reports_missing_and_untranslated_without_fabricating_evidence(self):
+        manager = self.manager()
+        self.assertEqual(manager.resolve_unit(self.progress, self.metadata, 1).state, "missing")
+        chapter_two = manager.resolve_unit(self.progress, self.metadata, 2)
+        self.assertEqual(chapter_two.state, "untranslated")
+        self.assertIsNone(chapter_two.translation_sha256)
+
+        self.artifacts["translated/001-one.md"] = b""
+        self.assertEqual(manager.resolve_unit(self.progress, self.metadata, 1).state, "untranslated")
+
+    def test_record_requires_immutable_resolved_workflow_provenance(self):
+        self.claim()
+        manager = self.manager()
+        metadata = {**self.metadata, "workflow": {**self.metadata["workflow"], "resolved_revision": None}}
+        with self.assertRaises(ReviewEvidenceError):
+            manager.record(
+                self.progress,
+                self.progress_revision,
+                metadata,
+                1,
+                outcome="PASS",
+                reviewer_session_id="reviewer-a",
+            )
+
+    def test_record_requires_live_matching_reviewer_claim(self):
+        manager = self.manager()
+        with self.assertRaises(ReviewClaimError):
+            self.record(manager)
+
+        self.claim(role="translator")
+        with self.assertRaises(ReviewClaimError):
+            self.record(manager)
+
+    def test_record_rejects_foreign_expired_or_wrong_workflow_reviewer_claim(self):
+        manager = self.manager()
+        self.claim(session_id="someone-else")
+        with self.assertRaises(ReviewClaimError):
+            self.record(manager)
+
+        loaded = self.repository.read(".workflow/claims/chapter-000001.json", SchemaKind.CLAIM)
+        self.repository.delete_if_version(".workflow/claims/chapter-000001.json", SchemaKind.CLAIM, loaded.version)
+        self.claim(expired=True)
+        with self.assertRaises(ReviewClaimError):
+            self.record(manager)
+        self.assertTrue(self.storage.read(".workflow/claims/chapter-000001.json").content)
+
+        loaded = self.repository.read(".workflow/claims/chapter-000001.json", SchemaKind.CLAIM)
+        self.repository.delete_if_version(".workflow/claims/chapter-000001.json", SchemaKind.CLAIM, loaded.version)
+        self.claim(workflow_revision="other-workflow")
+        with self.assertRaises(ReviewClaimError):
+            self.record(manager)
+
+    def test_record_refuses_missing_or_empty_translation(self):
+        self.claim()
+        manager = self.manager()
+        original = self.artifacts.pop("translated/001-one.md")
+        with self.assertRaises(ReviewEvidenceError):
+            self.record(manager)
+        self.artifacts["translated/001-one.md"] = b""
+        with self.assertRaises(ReviewEvidenceError):
+            self.record(manager)
+        self.artifacts["translated/001-one.md"] = original
 
     def test_correction_rounds_and_supersession_are_deterministic(self):
         self.claim()
@@ -324,18 +308,19 @@ class WorkflowReviewTests(unittest.TestCase):
                 outcomes.append(result)
 
         threads = [
-            threading.Thread(target=worker, args=("c" * 32,)),
-            threading.Thread(target=worker, args=("d" * 32,)),
+            threading.Thread(target=worker, args=("a" * 32,)),
+            threading.Thread(target=worker, args=("b" * 32,)),
         ]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "review ledger writer deadlocked")
 
-        self.assertFalse(any(thread.is_alive() for thread in threads))
-        self.assertCountEqual(outcomes, ["success", "conflict"])
+        self.assertEqual(sorted(outcomes), ["conflict", "success"])
         ledger = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER).data
         self.assertEqual(len(ledger["records"]), 1)
+        self.assertEqual(ledger["next_sequence"], 2)
 
 
 if __name__ == "__main__":
