@@ -1,0 +1,60 @@
+name: naming-cleanup-bot
+
+on:
+  push:
+    branches:
+      - refactor/workflow-namespace-cleanup
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refactor/workflow-namespace-cleanup
+          fetch-depth: 0
+      - name: Remove version-era test identifiers
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          for path in sorted((root / 'tests').glob('*.py')):
+              if path.name == 'test_architecture_consolidation.py':
+                  continue
+              text = path.read_text(encoding='utf-8')
+              updated = text.replace('WORKFLOW_V2', 'WORKFLOW')
+              updated = updated.replace('test_sequential_resume_keeps_legacy_context_shape', 'test_sequential_resume_keeps_current_context_shape')
+              updated = updated.replace('test_sequential_legacy_claim_can_use_translation_acceptance_without_snapshot', 'test_sequential_claim_can_use_translation_acceptance_without_snapshot')
+              updated = updated.replace('test_validate_rejects_unknown_review_evidence_mode_instead_of_falling_back_to_legacy', 'test_validate_rejects_unknown_review_evidence_mode_fail_closed')
+              updated = updated.replace('test_default_markdown_build_remains_backward_compatible', 'test_default_markdown_build_succeeds_for_current_reviewed_workspace')
+              if updated != text:
+                  path.write_text(updated, encoding='utf-8')
+
+          schemas = root / 'scripts' / 'workflow' / 'schemas.py'
+          text = schemas.read_text(encoding='utf-8')
+          text = text.replace('_validate_manifest_source_extension', '_validate_manifest_source_identity')
+          schemas.write_text(text, encoding='utf-8')
+
+          architecture_test = root / 'tests' / 'test_architecture_consolidation.py'
+          text = architecture_test.read_text(encoding='utf-8')
+          anchor = '    def test_canonical_contract_does_not_offer_legacy_or_upgrade_runtime(self):\n'
+          addition = '''    def test_retained_tests_use_current_workflow_names(self):\n        source = "\\n".join(\n            path.read_text(encoding="utf-8")\n            for path in sorted((ROOT / "tests").glob("*.py"))\n            if path != Path(__file__)\n        )\n        for forbidden in ("WORKFLOW_V2", "WorkflowV2", "workflow_v2"):\n            self.assertNotIn(forbidden, source)\n\n'''
+          if addition not in text:
+              text = text.replace(anchor, addition + anchor)
+          architecture_test.write_text(text, encoding='utf-8')
+
+          bot = root / '.github' / 'workflows' / 'naming-cleanup-bot.yml'
+          bot.unlink()
+          PY
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "test: remove remaining version-era identifiers"
+          git push origin HEAD:refactor/workflow-namespace-cleanup
