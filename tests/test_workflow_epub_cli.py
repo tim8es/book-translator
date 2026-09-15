@@ -10,7 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 SCRIPTS = PROJECT_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -28,7 +28,7 @@ class WorkflowEpubCliTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {
@@ -174,7 +174,7 @@ class WorkflowEpubCliTests(unittest.TestCase):
         self.assertEqual(status["state"], "current")
         self.assertEqual(status["artifact_path"], "output/sample.epub")
 
-    def test_default_markdown_build_remains_backward_compatible(self):
+    def test_default_markdown_build_succeeds_for_current_reviewed_workspace(self):
         book = self.initialize_final_book()
         self.run_cli("build", "sample")
         self.assertTrue((book / "output" / "sample.md").is_file())

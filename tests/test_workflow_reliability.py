@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 SCRIPTS = PROJECT_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -32,7 +32,7 @@ class WorkflowPhase1ReliabilityTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {

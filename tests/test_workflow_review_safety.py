@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = PROJECT_ROOT / "scripts"
 BOOK_SCRIPT = SCRIPTS / "book.py"
-WORKFLOW_V2 = SCRIPTS / "workflow"
+WORKFLOW = SCRIPTS / "workflow"
 sys.path.insert(0, str(SCRIPTS))
 
 from workflow.filesystem import FilesystemStorage
@@ -129,7 +129,7 @@ class ReviewEvidenceMarkerSafetyTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {
@@ -160,7 +160,7 @@ class ReviewEvidenceMarkerSafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, expect, msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
 
-    def test_validate_rejects_unknown_review_evidence_mode_instead_of_falling_back_to_legacy(self):
+    def test_validate_rejects_unknown_review_evidence_mode_fail_closed(self):
         metadata_path = self.repo / "books" / "sample" / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["workflow"]["review_evidence"] = "review-ledger-v99"

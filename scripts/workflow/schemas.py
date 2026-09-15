@@ -381,7 +381,7 @@ def _validate_source_manifest(data: Mapping[str, Any], schema: SchemaKind) -> No
         sha256 = _require_nonempty_string(item, "sha256", schema, path=f"{prefix}.sha256")
         _validate_sha256(sha256, schema, f"{prefix}.sha256")
 
-    _validate_manifest_source_extension(data, schema)
+    _validate_manifest_source_identity(data, schema)
 
 
 def _validate_generated_state(data: Mapping[str, Any], schema: SchemaKind) -> None:
@@ -467,7 +467,7 @@ def _validate_metadata_source(data: Mapping[str, Any], schema: SchemaKind) -> No
     _validate_sha256(sha256, schema, "source.sha256")
 
 
-def _validate_manifest_source_extension(data: Mapping[str, Any], schema: SchemaKind) -> None:
+def _validate_manifest_source_identity(data: Mapping[str, Any], schema: SchemaKind) -> None:
     has_mode = "source_storage_mode" in data
     has_size = "source_size_bytes" in data
     if has_mode != has_size:

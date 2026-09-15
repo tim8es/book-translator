@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 BOOK_SCRIPT = SCRIPTS / "book.py"
 CORPUS_SCRIPT = SCRIPTS / "corpus.py"
-WORKFLOW_V2 = SCRIPTS / "workflow"
+WORKFLOW = SCRIPTS / "workflow"
 
 
 class WorkflowTranslationAcceptanceReliabilityTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class WorkflowTranslationAcceptanceReliabilityTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {

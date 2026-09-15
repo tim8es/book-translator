@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
 
 
@@ -22,7 +22,7 @@ class WorkflowPrivateSourceTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
 

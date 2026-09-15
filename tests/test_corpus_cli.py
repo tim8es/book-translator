@@ -12,7 +12,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
 CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
 REVISION = "0123456789abcdef"
 
@@ -25,7 +25,7 @@ class CorpusCliTests(unittest.TestCase):
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         self.assertTrue(CORPUS_SCRIPT.is_file(), "scripts/corpus.py must provide source-corpus integrity tooling")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
         (self.repo / ".book-translator-install.json").write_text(

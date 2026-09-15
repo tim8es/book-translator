@@ -9,7 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 TEMPLATES = PROJECT_ROOT / "docs" / "templates"
 
 
@@ -19,7 +19,7 @@ class WorkflowReviewInitializationTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / "book.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         if TEMPLATES.exists():
             shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
 

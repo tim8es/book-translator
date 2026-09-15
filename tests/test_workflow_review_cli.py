@@ -9,7 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
-WORKFLOW_V2 = PROJECT_ROOT / "scripts" / "workflow"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
 REVISION = "0123456789abcdef"
 
 
@@ -19,7 +19,7 @@ class WorkflowReviewCliTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / "book.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {

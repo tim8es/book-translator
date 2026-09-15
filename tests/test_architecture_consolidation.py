@@ -43,6 +43,15 @@ class ArchitectureConsolidationTests(unittest.TestCase):
             self.assertNotIn("workflow_v2", text)
             self.assertNotIn("Workflow v2", text)
 
+    def test_retained_tests_use_current_workflow_names(self):
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / "tests").glob("*.py"))
+            if path != Path(__file__)
+        )
+        for forbidden in ("WORKFLOW_V2", "WorkflowV2", "workflow_v2"):
+            self.assertNotIn(forbidden, source)
+
     def test_canonical_contract_does_not_offer_legacy_or_upgrade_runtime(self):
         orchestration = (ROOT / "docs" / "ORCHESTRATION.md").read_text(encoding="utf-8")
         self.assertNotIn("legacy contract", orchestration.lower())

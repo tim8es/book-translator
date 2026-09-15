@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 BOOK_SCRIPT = SCRIPTS / "book.py"
 CORPUS_SCRIPT = SCRIPTS / "corpus.py"
-WORKFLOW_V2 = SCRIPTS / "workflow"
+WORKFLOW = SCRIPTS / "workflow"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -292,7 +292,7 @@ class ParallelHumanContractReleaseTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
-        shutil.copytree(WORKFLOW_V2, self.repo / "scripts" / "workflow")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {
@@ -501,7 +501,7 @@ class ParallelHumanContractReleaseTests(unittest.TestCase):
         self.assertIn("coordination", result.stderr.lower())
         self.assertEqual(progress_path.read_bytes(), before)
 
-    def test_sequential_legacy_claim_can_use_translation_acceptance_without_snapshot(self):
+    def test_sequential_claim_can_use_translation_acceptance_without_snapshot(self):
         claim = json.loads(
             self.run_cli(
                 "claim",
