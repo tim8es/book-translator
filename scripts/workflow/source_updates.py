@@ -415,6 +415,7 @@ def source_revision_integrity_errors(
     if source.get("revision_id") != active:
         errors.append("metadata.json source.revision_id disagrees with source-revisions.json active_revision")
     active_entry: Mapping[str, Any] | None = None
+    active_snapshot_cache: Mapping[str, Any] | None = None
     for entry in catalog.get("revisions", []):
         if isinstance(entry, Mapping) and entry.get("revision_id") == active:
             active_entry = entry
@@ -452,6 +453,8 @@ def source_revision_integrity_errors(
         if snapshot.get("revision_id") != revision_id:
             errors.append(f"{revision_id}: immutable snapshot revision identity mismatch")
             continue
+        if revision_id == active:
+            active_snapshot_cache = snapshot
 
         snapshot_manifest = snapshot.get("source_manifest")
         snapshot_units = snapshot.get("units")
@@ -525,10 +528,12 @@ def source_revision_integrity_errors(
                             errors.append(f"{revision_id}: immutable source binary identity mismatch")
 
     if active_entry is not None:
-        try:
-            active_snapshot = _read_json(repository, str(active_entry.get("snapshot_path")))
-        except SourceRevisionError:
-            active_snapshot = None
+        active_snapshot = active_snapshot_cache
+        if active_snapshot is None:
+            try:
+                active_snapshot = _read_json(repository, str(active_entry.get("snapshot_path")))
+            except SourceRevisionError:
+                active_snapshot = None
         if isinstance(active_snapshot, Mapping):
             snapshot_manifest = active_snapshot.get("source_manifest")
             snapshot_items = (
