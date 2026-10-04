@@ -43,6 +43,7 @@ Optional:
 - BOOK_TRANSLATOR_REVIEW_MODEL, default same as translation model
 - BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN, default 20
 - BOOK_TRANSLATOR_MAX_SOURCE_WORDS, default 500000
+- BOOK_TRANSLATOR_MAX_SOURCE_BYTES, default 50000000
 - BOOK_TRANSLATOR_MAX_CHAPTER_CHARS, default 60000
 - BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS, default 2
 - BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS, default 300
@@ -76,6 +77,7 @@ The summary records model, role, input/output tokens when available, and estimat
 ## Current deliberate constraints
 
 - one book per Actor run;
+- remote file inputs are size-limited and private/link-local network destinations are rejected;
 - EPUB, HTML/XHTML, Markdown, and TXT use the existing automatic extractor;
 - DOCX and PDF are not yet accepted by the automatic Actor path;
 - Translator and Reviewer are sequential and logically independent;
