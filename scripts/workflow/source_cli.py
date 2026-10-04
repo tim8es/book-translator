@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .claims import unit_id_for_chapter
 from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
@@ -213,7 +214,7 @@ def translation_acceptance_errors(
                 f"Chapter {number}: status={chapter.get('status')} requires current translation_acceptance evidence"
             )
             continue
-        expected_unit = f"chapter-{int(number):06d}" if type(number) is int and number > 0 else None
+        expected_unit = unit_id_for_chapter(chapter)
         if expected_unit is not None and evidence.get("unit_id") != expected_unit:
             errors.append(f"Chapter {number}: translation_acceptance unit identity is invalid")
         if evidence.get("role") != "translator":
