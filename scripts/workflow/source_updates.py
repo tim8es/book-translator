@@ -392,6 +392,49 @@ class SourceRevisionManager:
             )
         return None
 
+    def _verify_active_corpus(
+        self,
+        metadata: Mapping[str, Any],
+        progress: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+    ) -> None:
+        source = _source_identity(metadata)
+        expected = {
+            "source_file": metadata.get("source_file"),
+            "source_format": metadata.get("source_format"),
+            "source_sha256": source.get("sha256"),
+            "source_storage_mode": source.get("storage_mode"),
+            "source_size_bytes": source.get("size_bytes"),
+        }
+        for key, value in expected.items():
+            if manifest.get(key) != value:
+                raise SourceRevisionError(
+                    f"active source-manifest {key} disagrees with metadata source identity"
+                )
+
+        current = _manifest_by_unit(progress, manifest)
+        for item in current:
+            path = str(item["chapter"]["source_path"])
+            try:
+                raw = self.repository.storage.read(path).content
+            except StorageNotFound as exc:
+                raise SourceRevisionError(f"active extracted artifact is missing: {path}") from exc
+            if _sha256(raw) != item["sha256"]:
+                raise SourceRevisionError(
+                    f"active extracted artifact hash mismatch before source update: {path}"
+                )
+
+        if source.get("storage_mode") == "embedded":
+            path = f"source/{metadata.get('source_file')}"
+            try:
+                raw = self.repository.storage.read(path).content
+            except StorageNotFound as exc:
+                raise SourceRevisionError(f"active embedded source binary is missing: {path}") from exc
+            if len(raw) != source.get("size_bytes") or _sha256(raw) != source.get("sha256"):
+                raise SourceRevisionError(
+                    "active embedded source binary identity mismatch before source update"
+                )
+
     @staticmethod
     def _candidate_units(units: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -500,6 +543,7 @@ class SourceRevisionManager:
             raise SourceRevisionError(f"current source state is invalid: {exc}") from exc
         catalog_doc = self.catalog()
         catalog = copy.deepcopy(catalog_doc.data)
+        self._verify_active_corpus(metadata_doc.data, progress_doc.data, manifest_doc.data)
         source = _source_identity(metadata_doc.data)
         if source.get("revision_id") != catalog.get("active_revision"):
             raise SourceRevisionError("metadata active source revision disagrees with source-revisions.json")
@@ -509,6 +553,18 @@ class SourceRevisionManager:
                 "revision_id": catalog["active_revision"],
                 "delta": {"unchanged": len(progress_doc.data["chapters"]), "changed": 0, "new": 0, "deleted": 0},
             }
+
+        if self._promotion_marker() is not None:
+            raise SourceRevisionConflict(
+                "cannot stage a source update while source promotion recovery is pending"
+            )
+        if self._coordination.finalization_active():
+            raise SourceRevisionConflict("cannot stage a source update while finalization is active")
+        active_claims = ClaimManager(self.repository).list_active()
+        if active_claims:
+            raise SourceRevisionConflict(
+                "cannot stage a source update while literary claims are active"
+            )
 
         existing_staged = self._ensure_no_other_staged(catalog, source_sha256)
         if existing_staged is not None:
