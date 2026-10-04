@@ -430,11 +430,9 @@ def source_revision_integrity_errors(
             errors.append("active source revision filename disagrees with metadata.json")
 
     try:
-        active_manifest_units = _manifest_by_unit(progress, manifest)
+        _manifest_by_unit(progress, manifest)
     except SourceRevisionError as exc:
         errors.append(str(exc))
-        active_manifest_units = []
-    active_by_unit = {item["unit_id"]: item for item in active_manifest_units}
 
     for entry in catalog.get("revisions", []):
         if not isinstance(entry, Mapping) or entry.get("state") == "discarded":
