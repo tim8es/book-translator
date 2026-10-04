@@ -34,10 +34,12 @@ books/<book-slug>/
 ├── extracted/
 ├── translated/
 ├── output/
+├── source-revisions/
 ├── metadata.json
 ├── progress.json
 ├── review-ledger.json
 ├── source-manifest.json
+├── source-revisions.json
 ├── glossary.md
 └── style-guide.md
 ```
@@ -51,7 +53,7 @@ python scripts/book.py extract <source-file> --slug <book-slug> --target-languag
 python scripts/corpus.py seal <book-slug>
 ```
 
-Initialization preserves the supplied source, real reading order, stable chapter paths, `metadata.json.workflow`, an empty review ledger, glossary/style state, and source identity.
+Initialization preserves the supplied source, real reading order, stable unit identities, `metadata.json.workflow`, an empty review ledger, glossary/style state, sealed source identity, and the immutable initial source revision `source-000001`.
 
 ## Corpus preflight
 
@@ -71,6 +73,24 @@ python scripts/corpus.py restore <book-slug> <source-file>
 ```
 
 Do not repair missing extracted chapters one at a time. Do not substitute a later edition or same-named source whose identity differs. After restore, run structural validation and `python scripts/corpus.py verify <book-slug>` before dispatching literary work.
+
+## Source-edition updates
+
+When a user supplies a later edition of an existing book, do not run initial extraction again and do not overwrite the active source. Load the Orchestrator's `docs/SOURCE_UPDATES.md` contract and use the source revision lifecycle.
+
+The normal command is:
+
+```bash
+python scripts/book.py update-source <book-slug> <new-source> --json
+```
+
+The update path compares the complete candidate corpus with the active sealed corpus, preserves stable `unit_id` values for proven matches, reuses exact unchanged translation/review state, invalidates changed/new units, and creates an immutable source revision snapshot before promotion.
+
+A deletion is a destructive edition change and stays staged until explicitly allowed. A persistent `.workflow/source-promotion.json` marker is a recovery barrier: while it exists, do not dispatch literary work, finalize, or build output. Recover the recorded promotion first.
+
+Source unit `number` is current reading order only. Claims and evidence bind to stable `unit_id`; never derive identity from a shifted chapter number after a source update.
+
+Frontmatter, summaries, author notes, afterwords, and other auxiliary reading-order units follow the same source revision, translation, review, and output rules.
 
 ## Lifecycle
 
@@ -182,10 +202,11 @@ python scripts/book.py accept-review <book-slug> <chapter>
 Repository state is authoritative, not chat history. For every resumed run:
 
 1. identify the book deterministically;
-2. read current-schema `metadata.json` and `progress.json`;
-3. run corpus preflight;
-4. inspect claims and machine review evidence;
-5. continue from the first valid non-reviewed operation unless the user requested another bounded scope.
+2. read current-schema `metadata.json`, `progress.json`, and `source-revisions.json`;
+3. verify the active source revision agrees with `metadata.json.source.revision_id`;
+4. run corpus preflight;
+5. inspect claims and machine review evidence;
+6. continue from the first valid non-reviewed operation unless the user requested another bounded scope.
 
 Do not silently infer an old workspace into a supported shape. Invalid or incomplete durable state blocks mutation and must be converted or repaired explicitly outside the runtime.
 
@@ -195,6 +216,8 @@ Do not silently infer an old workspace into a supported shape. Invalid or incomp
 - `CORRECTIONS_REQUIRED` or missing/stale review evidence leaves the unit `translated`.
 - Corpus or structural failure blocks literary work.
 - A source identity mismatch is never repaired by substituting different bytes.
+- A later source edition is never copied over the active source; stage and promote a source revision instead.
+- A source-promotion recovery marker blocks literary mutation and output until the recorded transition is recovered.
 - A rejected compare-and-swap is replanned from a fresh read; never blindly retry a mutation.
 - Finalization and build operations must be idempotent or fail closed around ambiguous partial state.
 
@@ -208,7 +231,7 @@ Default Markdown build:
 python scripts/book.py build <book-slug>
 ```
 
-An unreviewed preview is allowed only when explicitly requested and clearly identified as such. EPUB/final output must be built only from canonical durable state and verified before claiming completion.
+An unreviewed preview is allowed only when explicitly requested and clearly identified as such. EPUB/final output must be built only from canonical durable state and verified before claiming completion. Build is a pure projection: it must never translate, reconstruct missing chapters, or consult a legacy repository. Output identity includes the active source revision, so promotion makes prior output stale even when every literary unit was safely reused.
 
 `STATE.md`, `FINAL_QUALITY_GATES.md`, and `REVIEW_REPORT.md` are generated projections; authoritative state remains the machine-readable records and current artifact bytes.
 
