@@ -270,6 +270,7 @@ def _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:
 def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None:
     _require_nonempty_string(data, "book_slug", schema)
     next_sequence = _require_int(data, "next_sequence", schema, minimum=1)
+    _require_int(data, "next_unit_sequence", schema, minimum=1)
     records = _require_list(data, "records", schema)
 
     record_ids: set[str] = set()
