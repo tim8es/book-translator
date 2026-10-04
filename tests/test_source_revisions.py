@@ -337,5 +337,22 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertIn("source promotion recovery is pending", (validation.stdout + validation.stderr).lower())
 
 
+    def test_unique_hash_reorder_reuses_existing_units(self):
+        book = self.initialize()
+        before = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        ids = {item["title"]: item["unit_id"] for item in before["chapters"]}
+
+        updated = self.make_source("book-v2.md", [("Two", "Beta."), ("One", "Alpha.")])
+        payload = json.loads(
+            self.run_cli("update-source", "sample", str(updated), "--json").stdout
+        )
+        self.assertEqual(payload["delta"], {"changed": 0, "deleted": 0, "new": 0, "unchanged": 2})
+
+        after = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["title"] for item in after["chapters"]], ["Two", "One"])
+        self.assertEqual(after["chapters"][0]["unit_id"], ids["Two"])
+        self.assertEqual(after["chapters"][1]["unit_id"], ids["One"])
+
+
 if __name__ == "__main__":
     unittest.main()
