@@ -530,15 +530,33 @@ def source_revision_integrity_errors(
         except SourceRevisionError:
             active_snapshot = None
         if isinstance(active_snapshot, Mapping):
-            units = active_snapshot.get("units")
-            if isinstance(units, list):
-                snapshot_ids = {
-                    str(unit.get("unit_id"))
-                    for unit in units
-                    if isinstance(unit, Mapping) and isinstance(unit.get("unit_id"), str)
-                }
-                if snapshot_ids != set(active_by_unit):
-                    errors.append("active immutable source snapshot unit identities disagree with current corpus")
+            snapshot_manifest = active_snapshot.get("source_manifest")
+            snapshot_items = (
+                snapshot_manifest.get("extracted")
+                if isinstance(snapshot_manifest, Mapping)
+                else None
+            )
+            current_items = manifest.get("extracted")
+            if isinstance(snapshot_items, list) and isinstance(current_items, list):
+                def identity_rows(items: list[Any]) -> list[tuple[Any, ...]]:
+                    return [
+                        (
+                            item.get("unit_id"),
+                            item.get("number"),
+                            item.get("title"),
+                            item.get("path"),
+                            item.get("sha256"),
+                        )
+                        for item in items
+                        if isinstance(item, Mapping)
+                    ]
+
+                if identity_rows(snapshot_items) != identity_rows(current_items):
+                    errors.append(
+                        "active immutable source snapshot reading order/identity disagrees with current corpus"
+                    )
+            else:
+                errors.append("active immutable source snapshot manifest is invalid")
 
     return errors
 
