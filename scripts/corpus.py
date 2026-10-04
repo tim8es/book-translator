@@ -498,6 +498,7 @@ def restore_command(args: argparse.Namespace) -> int:
                 )
             manifest_items.append(
                 {
+                    "unit_id": unit_id_for_chapter(record),
                     "number": record.get("number"),
                     "title": record.get("title"),
                     "path": rel.as_posix(),
