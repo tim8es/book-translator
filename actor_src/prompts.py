@@ -52,7 +52,13 @@ def reviewer_messages(
             "content": (
                 "You are the independent Reviewer role in Book Translator. Follow the contract below. "
                 "Compare source against translation. Return ONLY JSON with this exact shape: "
-                '{"outcome":"PASS|CORRECTIONS_REQUIRED","issues":[{"source":"...","problem":"...","required_fix":"..."}]}. '
+                '{"outcome":"PASS|CORRECTIONS_REQUIRED",'
+                '"issues":[{"source":"...","problem":"...","required_fix":"..."}],'
+                '"glossary_additions":[{"original":"...","translation":"...","type":"...","notes":"..."}],'
+                '"style_observations":["..."]}. '
+                "On PASS, include only durable terminology and style observations that are useful "
+                "for later chapters; do not invent facts. On CORRECTIONS_REQUIRED, memory proposals "
+                "may be empty because they are applied only after a PASS. "
                 "Use PASS only when the current artifact truly satisfies the contract.\n\n"
                 + translation_contract()
             ),
