@@ -63,7 +63,7 @@ The runtime currently targets an OpenAI-compatible chat-completions endpoint so 
 The code emits two PPE event names:
 
 - book-started: one event after source validation and full-run budget preflight, before the first LLM call;
-- translation-1k-words: one event per 1,000 source words (rounded up per chapter), charged only after that chapter has current PASS evidence and its reviewed translation has been saved as a run artifact.
+- translation-1k-words: one event per 1,000 source words (rounded up per chapter), charged one event at a time only after that chapter has current PASS evidence and its reviewed translation has been saved as a run artifact.
 
 Prices are intentionally not hard-coded. They must be configured in Apify Console after unit economics are finalized.
 
