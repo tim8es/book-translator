@@ -390,6 +390,9 @@ def _validate_source_manifest(data: Mapping[str, Any], schema: SchemaKind) -> No
         if not isinstance(item, Mapping):
             raise _field(schema, prefix, "must be an object")
         _require_int(item, "number", schema, minimum=1, path=f"{prefix}.number")
+        if "unit_id" in item:
+            unit_id = _require_nonempty_string(item, "unit_id", schema, path=f"{prefix}.unit_id")
+            _validate_unit_id(unit_id, schema, f"{prefix}.unit_id")
         _require_nonempty_string(item, "title", schema, path=f"{prefix}.title")
         path = _require_nonempty_string(item, "path", schema, path=f"{prefix}.path")
         _validate_relative_path(path, schema, f"{prefix}.path")
