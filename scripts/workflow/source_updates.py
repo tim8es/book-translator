@@ -678,6 +678,26 @@ class SourceRevisionManager:
                 used_old.add(old_index)
                 used_new.add(new_index)
 
+        old_unmatched_hashes: dict[str, list[int]] = {}
+        new_unmatched_hashes: dict[str, list[int]] = {}
+        for index, item in enumerate(current):
+            if index not in used_old:
+                old_unmatched_hashes.setdefault(str(item["sha256"]), []).append(index)
+        for index, item in enumerate(candidate):
+            if index not in used_new:
+                new_unmatched_hashes.setdefault(str(item["sha256"]), []).append(index)
+
+        for digest in sorted(set(old_unmatched_hashes) & set(new_unmatched_hashes)):
+            old_indexes = old_unmatched_hashes[digest]
+            new_indexes = new_unmatched_hashes[digest]
+            if len(old_indexes) != 1 or len(new_indexes) != 1:
+                continue
+            old_index = old_indexes[0]
+            new_index = new_indexes[0]
+            unchanged[new_index] = old_index
+            used_old.add(old_index)
+            used_new.add(new_index)
+
         def norm(title: str) -> str:
             return re.sub(r"\s+", " ", title).strip().casefold()
 
