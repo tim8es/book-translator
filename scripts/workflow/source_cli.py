@@ -16,7 +16,12 @@ from .claims import unit_id_for_chapter
 from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
-from .source_updates import SOURCE_PROMOTION_PATH, SOURCE_REVISIONS_PATH, initialize_source_revisions
+from .source_updates import (
+    SOURCE_PROMOTION_PATH,
+    SOURCE_REVISIONS_PATH,
+    initialize_source_revisions,
+    source_revision_integrity_errors,
+)
 from .storage import StorageError
 
 
@@ -264,6 +269,12 @@ def _current_workspace_errors(book_module: Any, slug: str) -> list[str]:
     repository = book_module.state_repository(book_dir)
     errors.extend(manifest_structure_errors(book_dir, metadata, repository))
     errors.extend(manifest_integrity_errors(book_dir, metadata, progress, repository))
+    if (book_dir / SOURCE_REVISIONS_PATH).is_file():
+        try:
+            manifest = repository.read("source-manifest.json", SchemaKind.SOURCE_MANIFEST).data
+        except (SchemaError, RepositoryError, StorageError):
+            manifest = {}
+        errors.extend(source_revision_integrity_errors(repository, metadata, progress, manifest))
     errors.extend(translation_acceptance_errors(metadata, progress))
     return errors
 
