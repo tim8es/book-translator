@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+
+import httpx
+
+from .config import Settings
+
+
+class LlmError(RuntimeError):
+    pass
+
+
+class LlmBudgetExceeded(LlmError):
+    pass
+
+
+@dataclass
+class LlmUsage:
+    model: str
+    role: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+class ManagedLlm:
+    def __init__(self, settings: Settings, run_limit_usd: float) -> None:
+        self.settings = settings
+        self.limit_usd = min(settings.max_llm_cost_usd, run_limit_usd)
+        self.spent_usd = 0.0
+        self.usage: list[LlmUsage] = []
+        self.client = httpx.AsyncClient(
+            timeout=settings.request_timeout_seconds,
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    def _prices(self, role: str) -> tuple[float, float]:
+        if role == "translation":
+            return (
+                self.settings.translation_input_usd_per_m,
+                self.settings.translation_output_usd_per_m,
+            )
+        return (
+            self.settings.review_input_usd_per_m,
+            self.settings.review_output_usd_per_m,
+        )
+
+    def _estimate_request_cost(self, messages: list[dict[str, str]], role: str, max_tokens: int) -> float:
+        text_chars = sum(len(item.get("content", "")) for item in messages)
+        estimated_input_tokens = max(1, text_chars // 4)
+        input_price, output_price = self._prices(role)
+        return (
+            estimated_input_tokens * input_price / 1_000_000
+            + max_tokens * output_price / 1_000_000
+        )
+
+    async def complete(
+        self,
+        *,
+        role: str,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float = 0.2,
+    ) -> str:
+        estimated = self._estimate_request_cost(messages, role, max_tokens)
+        if self.spent_usd + estimated > self.limit_usd:
+            raise LlmBudgetExceeded(
+                f"LLM safety ceiling would be exceeded: spent=${self.spent_usd:.4f}, "
+                f"estimated next request=${estimated:.4f}, ceiling=${self.limit_usd:.4f}"
+            )
+
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self.client.post(
+                    f"{self.settings.base_url}/chat/completions", json=body
+                )
+                response.raise_for_status()
+                payload = response.json()
+                content = payload["choices"][0]["message"]["content"]
+                usage = payload.get("usage") or {}
+                input_tokens = int(
+                    usage.get("prompt_tokens")
+                    or usage.get("input_tokens")
+                    or 0
+                )
+                output_tokens = int(
+                    usage.get("completion_tokens")
+                    or usage.get("output_tokens")
+                    or 0
+                )
+                input_price, output_price = self._prices(role)
+                cost = (
+                    input_tokens * input_price / 1_000_000
+                    + output_tokens * output_price / 1_000_000
+                )
+                self.spent_usd += cost
+                self.usage.append(
+                    LlmUsage(
+                        model=model,
+                        role=role,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=cost,
+                    )
+                )
+                if self.spent_usd > self.limit_usd:
+                    raise LlmBudgetExceeded(
+                        f"Provider-reported usage crossed LLM safety ceiling: "
+                        f"${self.spent_usd:.4f} > ${self.limit_usd:.4f}"
+                    )
+                if not isinstance(content, str) or not content.strip():
+                    raise LlmError("LLM returned empty content")
+                return content.strip()
+            except (httpx.HTTPError, KeyError, TypeError, ValueError, LlmError) as exc:
+                last_error = exc
+                if attempt == 2:
+                    break
+                await asyncio.sleep(2 ** attempt)
+        raise LlmError(f"LLM request failed after retries: {last_error}")
+
+    async def translation(self, messages: list[dict[str, str]], max_tokens: int = 16000) -> str:
+        return await self.complete(
+            role="translation",
+            model=self.settings.translation_model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0.2,
+        )
+
+    async def review_json(self, messages: list[dict[str, str]], max_tokens: int = 8000) -> dict:
+        raw = await self.complete(
+            role="review",
+            model=self.settings.review_model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        cleaned = raw.strip()
+        fence = chr(96) * 3
+        if cleaned.startswith(fence):
+            cleaned = cleaned.strip(chr(96))
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].lstrip()
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise LlmError(f"Reviewer did not return valid JSON: {exc}") from exc
+        if parsed.get("outcome") not in {"PASS", "CORRECTIONS_REQUIRED"}:
+            raise LlmError("Reviewer JSON must contain outcome PASS or CORRECTIONS_REQUIRED")
+        issues = parsed.get("issues", [])
+        if not isinstance(issues, list):
+            raise LlmError("Reviewer JSON issues must be an array")
+        return {"outcome": parsed["outcome"], "issues": issues}
