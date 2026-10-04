@@ -270,7 +270,6 @@ def _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:
 def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None:
     _require_nonempty_string(data, "book_slug", schema)
     next_sequence = _require_int(data, "next_sequence", schema, minimum=1)
-    _require_int(data, "next_unit_sequence", schema, minimum=1)
     records = _require_list(data, "records", schema)
 
     record_ids: set[str] = set()
@@ -725,6 +724,7 @@ def _validate_source_revisions(data: Mapping[str, Any], schema: SchemaKind) -> N
     active = _require_nonempty_string(data, "active_revision", schema)
     _validate_source_revision_id(active, schema, "active_revision")
     next_sequence = _require_int(data, "next_sequence", schema, minimum=1)
+    _require_int(data, "next_unit_sequence", schema, minimum=1)
     revisions = _require_list(data, "revisions", schema)
     if not revisions:
         raise _field(schema, "revisions", "must contain at least one source revision")
