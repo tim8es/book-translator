@@ -41,6 +41,8 @@ class Settings:
     base_url: str
     translation_model: str
     review_model: str
+    max_tokens_parameter: str
+    reasoning_effort: str | None
     translation_input_usd_per_m: float
     translation_output_usd_per_m: float
     review_input_usd_per_m: float
@@ -57,11 +59,21 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         translation_model = _required("BOOK_TRANSLATOR_TRANSLATION_MODEL")
+        max_tokens_parameter = os.getenv(
+            "BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER", "max_completion_tokens"
+        ).strip()
+        if max_tokens_parameter not in {"max_completion_tokens", "max_tokens"}:
+            raise ConfigError(
+                "BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER must be max_completion_tokens or max_tokens"
+            )
+        reasoning_effort = os.getenv("BOOK_TRANSLATOR_REASONING_EFFORT", "").strip() or None
         return cls(
             api_key=_required("BOOK_TRANSLATOR_LLM_API_KEY"),
             base_url=os.getenv("BOOK_TRANSLATOR_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             translation_model=translation_model,
             review_model=os.getenv("BOOK_TRANSLATOR_REVIEW_MODEL", translation_model).strip() or translation_model,
+            max_tokens_parameter=max_tokens_parameter,
+            reasoning_effort=reasoning_effort,
             translation_input_usd_per_m=_float("BOOK_TRANSLATOR_TRANSLATION_INPUT_USD_PER_1M", 0.0),
             translation_output_usd_per_m=_float("BOOK_TRANSLATOR_TRANSLATION_OUTPUT_USD_PER_1M", 0.0),
             review_input_usd_per_m=_float("BOOK_TRANSLATOR_REVIEW_INPUT_USD_PER_1M", 0.0),
