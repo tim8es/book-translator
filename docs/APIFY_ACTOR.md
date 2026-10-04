@@ -28,37 +28,58 @@ Runtime flow:
 
 ## Owner-only configuration
 
-Set these as Actor environment variables in Apify Console. The API key must be marked Secret.
+Set the API key as an Actor environment variable in Apify Console and mark it Secret.
 
 Required:
 
-- BOOK_TRANSLATOR_LLM_API_KEY
-- BOOK_TRANSLATOR_TRANSLATION_MODEL
-- BOOK_TRANSLATOR_TRANSLATION_INPUT_USD_PER_1M
-- BOOK_TRANSLATOR_TRANSLATION_CACHED_INPUT_USD_PER_1M
-- BOOK_TRANSLATOR_TRANSLATION_OUTPUT_USD_PER_1M
-- BOOK_TRANSLATOR_REVIEW_INPUT_USD_PER_1M
-- BOOK_TRANSLATOR_REVIEW_CACHED_INPUT_USD_PER_1M
-- BOOK_TRANSLATOR_REVIEW_OUTPUT_USD_PER_1M
+- `BOOK_TRANSLATOR_LLM_API_KEY`
 
-Optional:
+Private-MVP defaults are intentionally usable without additional model configuration:
 
-- BOOK_TRANSLATOR_LLM_BASE_URL, default https://api.openai.com/v1
-- BOOK_TRANSLATOR_REVIEW_MODEL, default same as translation model
-- BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER, default max_completion_tokens; set max_tokens for older OpenAI-compatible gateways
-- BOOK_TRANSLATOR_REASONING_EFFORT, optional; forwarded as reasoning_effort when configured
-- BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN, default 20
-- BOOK_TRANSLATOR_MAX_SOURCE_WORDS, default 500000
-- BOOK_TRANSLATOR_MAX_SOURCE_BYTES, default 50000000
-- BOOK_TRANSLATOR_MAX_CHAPTER_CHARS, default 60000
-- BOOK_TRANSLATOR_TRANSLATION_MAX_TOKENS, default 32000
-- BOOK_TRANSLATOR_REVIEW_MAX_TOKENS, default 8000
-- BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS, default 2
-- BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS, default 300
-- BOOK_TRANSLATOR_WORKFLOW_REVISION, default apify-managed-llm-mvp
-- BOOK_TRANSLATOR_SKIP_CHARGING=true for local/development tests only
+- Translator model: `gpt-6-luna`
+- Reviewer model: `gpt-6.1-sol`
+- reasoning effort: `high`
+- LLM base URL: `https://api.openai.com/v1`
+- output-token parameter: `max_completion_tokens`
+- Translator max completion budget: 64000
+- Reviewer max completion budget: 16000
+- owner LLM ceiling: $20/run
+- end-user PPE charging: disabled by default on this private branch
 
-The runtime currently targets an OpenAI-compatible chat-completions endpoint so the model provider can be changed without exposing that choice to the user. It does not send temperature by default, which keeps it compatible with modern reasoning models. The output-token parameter is owner-configurable because current providers differ between max_completion_tokens and legacy max_tokens.
+Current short-context metering defaults:
+
+- GPT-6 Luna: input $0.10/M, cached input $0.01/M, cache write $0.125/M, output $0.50/M
+- GPT-6.1 Sol: input $2.00/M, cached input $0.10/M, cache write $2.50/M, output $10.00/M
+
+Every default can be overridden through owner-only environment variables:
+
+- `BOOK_TRANSLATOR_LLM_BASE_URL`
+- `BOOK_TRANSLATOR_TRANSLATION_MODEL`
+- `BOOK_TRANSLATOR_REVIEW_MODEL`
+- `BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER`
+- `BOOK_TRANSLATOR_REASONING_EFFORT`
+- `BOOK_TRANSLATOR_TRANSLATION_INPUT_USD_PER_1M`
+- `BOOK_TRANSLATOR_TRANSLATION_CACHED_INPUT_USD_PER_1M`
+- `BOOK_TRANSLATOR_TRANSLATION_CACHE_WRITE_USD_PER_1M`
+- `BOOK_TRANSLATOR_TRANSLATION_OUTPUT_USD_PER_1M`
+- `BOOK_TRANSLATOR_REVIEW_INPUT_USD_PER_1M`
+- `BOOK_TRANSLATOR_REVIEW_CACHED_INPUT_USD_PER_1M`
+- `BOOK_TRANSLATOR_REVIEW_CACHE_WRITE_USD_PER_1M`
+- `BOOK_TRANSLATOR_REVIEW_OUTPUT_USD_PER_1M`
+- `BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN`
+- `BOOK_TRANSLATOR_MAX_SOURCE_WORDS`
+- `BOOK_TRANSLATOR_MAX_SOURCE_BYTES`
+- `BOOK_TRANSLATOR_MAX_CHAPTER_CHARS`
+- `BOOK_TRANSLATOR_TRANSLATION_MAX_TOKENS`
+- `BOOK_TRANSLATOR_REVIEW_MAX_TOKENS`
+- `BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS`
+- `BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS`
+- `BOOK_TRANSLATOR_WORKFLOW_REVISION`
+- `BOOK_TRANSLATOR_SKIP_CHARGING`
+
+Before a paid/public release, `BOOK_TRANSLATOR_SKIP_CHARGING` must be explicitly set to `false` after PPE prices are configured and validated.
+
+The runtime currently targets the OpenAI Chat Completions endpoint. It deliberately does not send temperature. Both selected models support `reasoning_effort=high`, and the runtime records provider-reported input, cached-input, cache-write, output, and total calculated owner cost.
 
 ## Apify monetization contract
 
@@ -80,7 +101,7 @@ There are two independent limits:
 
 The LLM budget check estimates the next request before it is sent. After the response, provider-reported token usage is converted to cost. If a compatible gateway omits token usage, the conservative pre-request estimate is booked instead of assuming zero cost. Any non-success finish reason (for example an output-length truncation) fails closed and is never blindly retried, so an incomplete chapter cannot enter durable translation state and the same doomed request is not paid for repeatedly.
 
-The summary records model, role, input/cached-input/output tokens when available, and estimated/measured LLM cost. Cached input is charged using its configured cached-token rate; pre-request guards still assume full input pricing. It never records the API key.
+The summary records model, role, input/cached-input/cache-write/output tokens when available, and estimated/measured LLM cost. Cached input and cache writes use their configured rates; pre-request guards remain conservative and assume full uncached input pricing. It never records the API key.
 
 ## Current deliberate constraints
 
