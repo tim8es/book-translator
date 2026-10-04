@@ -590,7 +590,9 @@ async def main() -> None:
                     f"Translation failed after {len(completed_results)} reviewed chapter(s)",
                     is_terminal=True,
                 )
-            finally:
-                raise
+            except Exception:
+                # Failure reporting must never hide the original processing error.
+                pass
+            raise
         finally:
             await llm.close()
