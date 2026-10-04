@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from .claims import canonical_unit_id
+from .claims import unit_id_for_chapter
 
 
 BUILD_CONTRACT = "epub-build-v1"
@@ -163,7 +163,7 @@ def build_input_snapshot(
         translation = _read_bytes(artifact_reader, translation_path, kind="translation artifact")
         status = _nonempty_string(chapter.get("status"), f"chapter {number} status")
         unit = {
-            "unit_id": canonical_unit_id(number),
+            "unit_id": unit_id_for_chapter(chapter),
             "number": number,
             "title": _nonempty_string(chapter.get("title"), f"chapter {number} title"),
             "slug": _nonempty_string(chapter.get("slug"), f"chapter {number} slug"),
