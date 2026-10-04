@@ -35,8 +35,10 @@ Required:
 - BOOK_TRANSLATOR_LLM_API_KEY
 - BOOK_TRANSLATOR_TRANSLATION_MODEL
 - BOOK_TRANSLATOR_TRANSLATION_INPUT_USD_PER_1M
+- BOOK_TRANSLATOR_TRANSLATION_CACHED_INPUT_USD_PER_1M
 - BOOK_TRANSLATOR_TRANSLATION_OUTPUT_USD_PER_1M
 - BOOK_TRANSLATOR_REVIEW_INPUT_USD_PER_1M
+- BOOK_TRANSLATOR_REVIEW_CACHED_INPUT_USD_PER_1M
 - BOOK_TRANSLATOR_REVIEW_OUTPUT_USD_PER_1M
 
 Optional:
@@ -78,7 +80,7 @@ There are two independent limits:
 
 The LLM budget check estimates the next request before it is sent. After the response, provider-reported token usage is converted to cost. If a compatible gateway omits token usage, the conservative pre-request estimate is booked instead of assuming zero cost. Any non-success finish reason (for example an output-length truncation) fails closed and is never blindly retried, so an incomplete chapter cannot enter durable translation state and the same doomed request is not paid for repeatedly.
 
-The summary records model, role, input/output tokens when available, and estimated/measured LLM cost. It never records the API key.
+The summary records model, role, input/cached-input/output tokens when available, and estimated/measured LLM cost. Cached input is charged using its configured cached-token rate; pre-request guards still assume full input pricing. It never records the API key.
 
 ## Current deliberate constraints
 
