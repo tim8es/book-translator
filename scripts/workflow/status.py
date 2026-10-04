@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from .claims import ClaimManager, canonical_unit_id
+from .claims import ClaimManager, unit_id_for_chapter
 from .coordination import FINALIZATION_PATH
 from .repository import RepositoryError, WorkflowStateRepository
 from .reviews import REVIEW_EVIDENCE_VERSION, ReviewEvidenceError, ReviewLedgerManager
@@ -148,7 +148,7 @@ class StatusResolver:
 
             units.append(
                 {
-                    "unit_id": canonical_unit_id(number),
+                    "unit_id": unit_id_for_chapter(chapter),
                     "chapter_number": number,
                     "lifecycle": lifecycle_state,
                     "review": review_state,

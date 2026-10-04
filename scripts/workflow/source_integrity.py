@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .claims import unit_id_for_chapter
 from .schemas import SCHEMA_VERSION
 
 
@@ -62,6 +63,7 @@ def _extracted_entries(
             )
         extracted.append(
             {
+                "unit_id": unit_id_for_chapter(record),
                 "number": record.get("number"),
                 "title": record.get("title"),
                 "path": rel.as_posix(),

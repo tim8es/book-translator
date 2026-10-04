@@ -149,6 +149,21 @@ class WorkflowEpubOutputIdentityTests(unittest.TestCase):
         )
         self.assertNotEqual(self.fingerprint(with_cover), baseline)
 
+    def test_source_revision_change_changes_fingerprint(self):
+        metadata = copy.deepcopy(self.metadata)
+        metadata["source"] = {
+            "storage_mode": "embedded",
+            "filename": "sample.md",
+            "original_filename": "sample.md",
+            "size_bytes": 10,
+            "sha256": "3" * 64,
+            "revision_id": "source-000001",
+        }
+        baseline = self.fingerprint(self.snapshot(metadata=metadata))
+        metadata["source"]["revision_id"] = "source-000002"
+        metadata["source"]["sha256"] = "4" * 64
+        self.assertNotEqual(self.fingerprint(self.snapshot(metadata=metadata)), baseline)
+
     def test_preview_fingerprint_does_not_require_review_identity(self):
         progress = copy.deepcopy(self.progress)
         progress["chapters"][0]["status"] = "translated"

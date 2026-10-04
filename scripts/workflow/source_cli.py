@@ -12,9 +12,16 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .claims import unit_id_for_chapter
 from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
+from .source_updates import (
+    SOURCE_PROMOTION_PATH,
+    SOURCE_REVISIONS_PATH,
+    initialize_source_revisions,
+    source_revision_integrity_errors,
+)
 from .storage import StorageError
 
 
@@ -64,6 +71,14 @@ def normalize_structural_errors(
             message = "Missing source-manifest.json for current workflow book"
             if message not in result:
                 result.append(message)
+        if not (book_dir / SOURCE_REVISIONS_PATH).is_file():
+            message = "Missing source-revisions.json for current workflow book"
+            if message not in result:
+                result.append(message)
+        if (book_dir / SOURCE_PROMOTION_PATH).is_file():
+            result.append(
+                "Source promotion recovery is pending; finish promote-source-update before literary work or output"
+            )
 
     workflow = metadata.get("workflow")
     if not isinstance(workflow, Mapping) or workflow.get("review_evidence") != CURRENT_REVIEW_EVIDENCE:
@@ -160,6 +175,8 @@ def manifest_integrity_errors(
                 f"Manifest path mismatch for chapter {chapter.get('number')}: expected {source_rel}, got {item.get('path')!r}"
             )
             continue
+        if item.get("unit_id") is not None and item.get("unit_id") != unit_id_for_chapter(chapter):
+            errors.append(f"Manifest unit identity mismatch for {source_rel}")
         if item.get("number") != chapter.get("number"):
             errors.append(f"Manifest chapter number mismatch for {source_rel}")
         if item.get("title") != chapter.get("title"):
@@ -213,7 +230,7 @@ def translation_acceptance_errors(
                 f"Chapter {number}: status={chapter.get('status')} requires current translation_acceptance evidence"
             )
             continue
-        expected_unit = f"chapter-{int(number):06d}" if type(number) is int and number > 0 else None
+        expected_unit = unit_id_for_chapter(chapter)
         if expected_unit is not None and evidence.get("unit_id") != expected_unit:
             errors.append(f"Chapter {number}: translation_acceptance unit identity is invalid")
         if evidence.get("role") != "translator":
@@ -252,6 +269,12 @@ def _current_workspace_errors(book_module: Any, slug: str) -> list[str]:
     repository = book_module.state_repository(book_dir)
     errors.extend(manifest_structure_errors(book_dir, metadata, repository))
     errors.extend(manifest_integrity_errors(book_dir, metadata, progress, repository))
+    if (book_dir / SOURCE_REVISIONS_PATH).is_file():
+        try:
+            manifest = repository.read("source-manifest.json", SchemaKind.SOURCE_MANIFEST).data
+        except (SchemaError, RepositoryError, StorageError):
+            manifest = {}
+        errors.extend(source_revision_integrity_errors(repository, metadata, progress, manifest))
     errors.extend(translation_acceptance_errors(metadata, progress))
     return errors
 
@@ -291,6 +314,7 @@ def source_extract_command(
         stored_source = book_dir / "source" / identity["filename"]
         manifest = build_source_manifest(book_dir, metadata, progress_doc.data, stored_source)
         repository.create("source-manifest.json", SchemaKind.SOURCE_MANIFEST, manifest)
+        initialize_source_revisions(repository)
 
         if identity["storage_mode"] == "private_external" and stored_source.is_file():
             stored_source.unlink()

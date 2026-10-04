@@ -22,6 +22,7 @@ ALLOWED_PROGRESS_STATUSES = {"pending", "extracted", "translated", "reviewed"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CLAIM_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 UNIT_ID_RE = re.compile(r"^chapter-[0-9]{6}$")
+SOURCE_REVISION_ID_RE = re.compile(r"^source-[0-9]{6}$")
 UTC_TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
 )
@@ -42,6 +43,8 @@ class SchemaKind(str, Enum):
     CLAIM_EVENT = "claim_event"
     REVIEW_LEDGER = "review_ledger"
     SOURCE_MANIFEST = "source_manifest"
+    SOURCE_REVISIONS = "source_revisions"
+    SOURCE_PROMOTION = "source_promotion"
     GENERATED_STATE = "generated_state"
     COORDINATION_LOCK = "coordination_lock"
     FINALIZATION_LOCK = "finalization_lock"
@@ -132,6 +135,11 @@ def _validate_unit_id(value: str, schema: SchemaKind, path: str) -> None:
         raise _field(schema, path, "must match chapter-[0-9]{6}")
 
 
+def _validate_source_revision_id(value: str, schema: SchemaKind, path: str) -> None:
+    if not SOURCE_REVISION_ID_RE.fullmatch(value):
+        raise _field(schema, path, "must match source-[0-9]{6}")
+
+
 def _parse_utc_timestamp(value: str, schema: SchemaKind, path: str) -> datetime:
     if not UTC_TIMESTAMP_RE.fullmatch(value):
         raise _field(schema, path, "must be an RFC 3339 UTC timestamp")
@@ -170,6 +178,7 @@ def _validate_metadata(data: Mapping[str, Any], schema: SchemaKind) -> None:
 def _validate_progress(data: Mapping[str, Any], schema: SchemaKind) -> None:
     _require_nonempty_string(data, "book_slug", schema)
     chapters = _require_list(data, "chapters", schema)
+    seen_unit_ids: set[str] = set()
     for index, chapter in enumerate(chapters):
         prefix = f"chapters[{index}]"
         if not isinstance(chapter, Mapping):
@@ -177,6 +186,12 @@ def _validate_progress(data: Mapping[str, Any], schema: SchemaKind) -> None:
         _require_int(chapter, "number", schema, minimum=1, path=f"{prefix}.number")
         _require_nonempty_string(chapter, "title", schema, path=f"{prefix}.title")
         _require_nonempty_string(chapter, "slug", schema, path=f"{prefix}.slug")
+        if "unit_id" in chapter:
+            unit_id = _require_nonempty_string(chapter, "unit_id", schema, path=f"{prefix}.unit_id")
+            _validate_unit_id(unit_id, schema, f"{prefix}.unit_id")
+            if unit_id in seen_unit_ids:
+                raise _field(schema, f"{prefix}.unit_id", "must be unique within progress")
+            seen_unit_ids.add(unit_id)
         source_path = _require_nonempty_string(chapter, "source_path", schema, path=f"{prefix}.source_path")
         translation_path = _require_nonempty_string(
             chapter,
@@ -375,6 +390,9 @@ def _validate_source_manifest(data: Mapping[str, Any], schema: SchemaKind) -> No
         if not isinstance(item, Mapping):
             raise _field(schema, prefix, "must be an object")
         _require_int(item, "number", schema, minimum=1, path=f"{prefix}.number")
+        if "unit_id" in item:
+            unit_id = _require_nonempty_string(item, "unit_id", schema, path=f"{prefix}.unit_id")
+            _validate_unit_id(unit_id, schema, f"{prefix}.unit_id")
         _require_nonempty_string(item, "title", schema, path=f"{prefix}.title")
         path = _require_nonempty_string(item, "path", schema, path=f"{prefix}.path")
         _validate_relative_path(path, schema, f"{prefix}.path")
@@ -395,11 +413,11 @@ def _validate_coordination_lock(data: Mapping[str, Any], schema: SchemaKind) -> 
     lock_id = _require_nonempty_string(data, "lock_id", schema)
     _validate_hex_id(lock_id, schema, "lock_id")
     operation = _require_nonempty_string(data, "operation", schema)
-    if operation not in {"claim_admission", "finalize_admission", "proposal_reconcile", "translation_acceptance"}:
+    if operation not in {"claim_admission", "finalize_admission", "proposal_reconcile", "translation_acceptance", "source_promotion"}:
         raise _field(
             schema,
             "operation",
-            "must be claim_admission, finalize_admission, proposal_reconcile, or translation_acceptance",
+            "must be claim_admission, finalize_admission, proposal_reconcile, translation_acceptance, or source_promotion",
         )
     _require_nonempty_string(data, "session_id", schema)
     acquired_at = _require_nonempty_string(data, "acquired_at", schema)
@@ -465,6 +483,17 @@ def _validate_metadata_source(data: Mapping[str, Any], schema: SchemaKind) -> No
     if not isinstance(sha256, str) or not sha256.strip():
         raise _field(schema, "source.sha256", "must be a non-empty string")
     _validate_sha256(sha256, schema, "source.sha256")
+
+    revision_id = source.get("revision_id")
+    if revision_id is not None:
+        if not isinstance(revision_id, str) or not revision_id.strip():
+            raise _field(schema, "source.revision_id", "must be a non-empty string when present")
+        _validate_source_revision_id(revision_id, schema, "source.revision_id")
+    original_filename = source.get("original_filename")
+    if original_filename is not None:
+        if not isinstance(original_filename, str) or not original_filename.strip():
+            raise _field(schema, "source.original_filename", "must be a non-empty string when present")
+        _validate_basename(original_filename, schema, "source.original_filename")
 
 
 def _validate_manifest_source_identity(data: Mapping[str, Any], schema: SchemaKind) -> None:
@@ -589,7 +618,8 @@ def _validate_translation_acceptance(
         schema,
         path=f"{prefix}.unit_id",
     )
-    expected_unit_id = f"chapter-{number:06d}" if type(number) is int else None
+    explicit_unit_id = chapter.get("unit_id")
+    expected_unit_id = explicit_unit_id if isinstance(explicit_unit_id, str) else (f"chapter-{number:06d}" if type(number) is int else None)
     if unit_id != expected_unit_id:
         raise _field(
             schema,
@@ -672,6 +702,122 @@ def _validate_translation_acceptance(
         )
 
 
+
+_SOURCE_REVISION_STATES = {"active", "superseded", "staged", "discarded"}
+_SOURCE_REVISION_ENTRY_KEYS = {
+    "revision_id",
+    "parent_revision_id",
+    "state",
+    "created_at",
+    "source_file",
+    "source_format",
+    "source_sha256",
+    "source_storage_mode",
+    "source_size_bytes",
+    "snapshot_path",
+    "delta_path",
+}
+
+
+def _validate_source_revisions(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    _require_nonempty_string(data, "book_slug", schema)
+    active = _require_nonempty_string(data, "active_revision", schema)
+    _validate_source_revision_id(active, schema, "active_revision")
+    next_sequence = _require_int(data, "next_sequence", schema, minimum=1)
+    _require_int(data, "next_unit_sequence", schema, minimum=1)
+    revisions = _require_list(data, "revisions", schema)
+    if not revisions:
+        raise _field(schema, "revisions", "must contain at least one source revision")
+
+    seen: set[str] = set()
+    active_count = 0
+    max_sequence = 0
+    for index, revision in enumerate(revisions):
+        prefix = f"revisions[{index}]"
+        if not isinstance(revision, Mapping):
+            raise _field(schema, prefix, "must be an object")
+        actual = set(revision)
+        missing = sorted(_SOURCE_REVISION_ENTRY_KEYS - actual)
+        extra = sorted(actual - _SOURCE_REVISION_ENTRY_KEYS)
+        if missing:
+            raise _field(schema, prefix, f"missing field(s): {', '.join(missing)}")
+        if extra:
+            raise _field(schema, prefix, f"has unsupported field(s): {', '.join(extra)}")
+
+        revision_id = _require_nonempty_string(revision, "revision_id", schema, path=f"{prefix}.revision_id")
+        _validate_source_revision_id(revision_id, schema, f"{prefix}.revision_id")
+        if revision_id in seen:
+            raise _field(schema, f"{prefix}.revision_id", "must be unique")
+        seen.add(revision_id)
+        max_sequence = max(max_sequence, int(revision_id.split("-")[1]))
+
+        parent = revision.get("parent_revision_id")
+        if parent is not None:
+            if not isinstance(parent, str) or not parent.strip():
+                raise _field(schema, f"{prefix}.parent_revision_id", "must be null or a source revision id")
+            _validate_source_revision_id(parent, schema, f"{prefix}.parent_revision_id")
+
+        state = _require_nonempty_string(revision, "state", schema, path=f"{prefix}.state")
+        if state not in _SOURCE_REVISION_STATES:
+            raise _field(schema, f"{prefix}.state", "must be active, superseded, staged, or discarded")
+        if state == "active":
+            active_count += 1
+            if revision_id != active:
+                raise _field(schema, f"{prefix}.state", "active state must match active_revision")
+
+        created_at = _require_nonempty_string(revision, "created_at", schema, path=f"{prefix}.created_at")
+        _parse_utc_timestamp(created_at, schema, f"{prefix}.created_at")
+        source_file = _require_nonempty_string(revision, "source_file", schema, path=f"{prefix}.source_file")
+        _validate_basename(source_file, schema, f"{prefix}.source_file")
+        _require_nonempty_string(revision, "source_format", schema, path=f"{prefix}.source_format")
+        digest = _require_nonempty_string(revision, "source_sha256", schema, path=f"{prefix}.source_sha256")
+        _validate_sha256(digest, schema, f"{prefix}.source_sha256")
+        mode = _require_nonempty_string(revision, "source_storage_mode", schema, path=f"{prefix}.source_storage_mode")
+        if mode not in {"embedded", "private_external"}:
+            raise _field(schema, f"{prefix}.source_storage_mode", "must be embedded or private_external")
+        _require_int(revision, "source_size_bytes", schema, minimum=0, path=f"{prefix}.source_size_bytes")
+        snapshot = _require_nonempty_string(revision, "snapshot_path", schema, path=f"{prefix}.snapshot_path")
+        _validate_relative_path(snapshot, schema, f"{prefix}.snapshot_path")
+        delta = revision.get("delta_path")
+        if delta is not None:
+            if not isinstance(delta, str) or not delta.strip():
+                raise _field(schema, f"{prefix}.delta_path", "must be null or a relative path")
+            _validate_relative_path(delta, schema, f"{prefix}.delta_path")
+
+    if active_count != 1:
+        raise _field(schema, "revisions", "must contain exactly one active revision")
+    if active not in seen:
+        raise _field(schema, "active_revision", "must reference a revision entry")
+    if next_sequence <= max_sequence:
+        raise _field(schema, "next_sequence", "must be greater than every stored source revision sequence")
+
+
+_SOURCE_PROMOTION_DOC_KEYS = {"metadata", "progress", "source_manifest", "source_revisions"}
+
+
+def _validate_source_promotion(data: Mapping[str, Any], schema: SchemaKind) -> None:
+    _require_nonempty_string(data, "book_slug", schema)
+    revision_id = _require_nonempty_string(data, "revision_id", schema)
+    _validate_source_revision_id(revision_id, schema, "revision_id")
+    parent = _require_nonempty_string(data, "parent_revision_id", schema)
+    _validate_source_revision_id(parent, schema, "parent_revision_id")
+    phase = _require_nonempty_string(data, "phase", schema)
+    if phase not in {"preparing", "promoted"}:
+        raise _field(schema, "phase", "must be preparing or promoted")
+    _require_nonempty_string(data, "session_id", schema)
+    started_at = _require_nonempty_string(data, "started_at", schema)
+    _parse_utc_timestamp(started_at, schema, "started_at")
+
+    for key in ("base_revisions", "target_sha256"):
+        value = _require_mapping(data, key, schema)
+        if set(value) != _SOURCE_PROMOTION_DOC_KEYS:
+            raise _field(schema, key, "must contain metadata, progress, source_manifest and source_revisions")
+        for item in sorted(_SOURCE_PROMOTION_DOC_KEYS):
+            raw = _require_nonempty_string(value, item, schema, path=f"{key}.{item}")
+            if key == "target_sha256":
+                _validate_sha256(raw, schema, f"{key}.{item}")
+
+
 _VALIDATORS = {
     SchemaKind.METADATA: _validate_metadata,
     SchemaKind.PROGRESS: _validate_progress,
@@ -679,6 +825,8 @@ _VALIDATORS = {
     SchemaKind.CLAIM_EVENT: _validate_claim_event,
     SchemaKind.REVIEW_LEDGER: _validate_review_ledger,
     SchemaKind.SOURCE_MANIFEST: _validate_source_manifest,
+    SchemaKind.SOURCE_REVISIONS: _validate_source_revisions,
+    SchemaKind.SOURCE_PROMOTION: _validate_source_promotion,
     SchemaKind.GENERATED_STATE: _validate_generated_state,
     SchemaKind.COORDINATION_LOCK: _validate_coordination_lock,
     SchemaKind.FINALIZATION_LOCK: _validate_finalization_lock,

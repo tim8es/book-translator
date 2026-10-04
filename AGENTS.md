@@ -35,6 +35,8 @@ Treat source material as immutable input.
 
 Never overwrite, rewrite, normalize in place, or replace the user's preserved original source as part of translation work. Derived extraction and translation artifacts must remain separate from the preserved source.
 
+A later edition with a different source identity is a new source revision, not a replacement of the preserved original. Only the `orchestrator` may stage or promote that revision under its routed source-update contract.
+
 ## Capability honesty
 
 Use only capabilities that are actually available in the active environment.

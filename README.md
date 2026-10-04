@@ -167,7 +167,9 @@ books/<book-slug>/
 ├── output/              # assembled deliverables
 ├── metadata.json        # book metadata + workflow provenance
 ├── progress.json        # durable chapter queue
-├── source-manifest.json # source/extraction integrity when sealed
+├── source-manifest.json # active source/extraction integrity
+├── source-revisions.json# immutable source-edition history
+├── source-revisions/    # archived source/corpus revision evidence
 ├── glossary.md          # recurring terminology/continuity decisions
 └── style-guide.md       # evidence-based literary observations
 ```
@@ -263,6 +265,10 @@ Yes **when the book state is stored in a persistent workspace** such as a privat
 
 Yes, if it can access the same Book Translator workflow revision and the durable book state. The workflow is designed not to require previous chat history for resume, including books pinned to older supported workflow revisions.
 
+### What if the author/source book gets a new edition?
+
+Give the later source to the agent. Current workflow editions are compared against the active source revision: hash-identical units can keep their accepted translation/review state, while changed or new units return to the translation/review queue. Deletions require an explicit safety decision. The preserved earlier source revision is not overwritten.
+
 ### Can I use PDF or DOCX?
 
 Potentially. EPUB, HTML/XHTML, Markdown, and TXT have automatic support in the included standard-library helper. PDF and DOCX depend on whether the active agent/environment can read or extract them reliably.
@@ -291,7 +297,7 @@ Book Translator therefore routes each role to a focused instruction set:
 agent-manifest.json
        │
        ├─ bootstrap    → AGENTS.md + docs/AGENT_SETUP.md
-       ├─ orchestrator → AGENTS.md + docs/ORCHESTRATION.md
+       ├─ orchestrator → AGENTS.md + docs/ORCHESTRATION.md + docs/SOURCE_UPDATES.md
        ├─ translator   → AGENTS.md + docs/TRANSLATION.md
        └─ reviewer     → AGENTS.md + docs/TRANSLATION.md
 ```
@@ -309,6 +315,7 @@ Existing books keep the workflow revision recorded in `metadata.json.workflow`. 
 | `AGENTS.md` | Small global invariant layer safe to auto-load. |
 | `docs/AGENT_SETUP.md` | Ref/version resolution, capabilities, workspace/install selection, collisions, and installation provenance. |
 | `docs/ORCHESTRATION.md` | Book initialization/resume, role dispatch, bounded context, chapter state, single-writer persistence, validation, corpus preflight, and completion sequencing. |
+| `docs/SOURCE_UPDATES.md` | Later source-edition revisions, stable unit identity, delta reuse/invalidation, safe promotion, and recovery. |
 | `docs/TRANSLATION.md` | Authoritative literary translation and independent source-comparison review contract. |
 
 README remains human-facing; normative execution behavior lives in those contracts.
@@ -357,7 +364,8 @@ Typical commands:
 ```bash
 python scripts/book.py extract /path/to/book.epub --target-language ru
 python scripts/book.py validate <book-slug>
-python scripts/book.py build <book-slug>
+python scripts/book.py update-source <book-slug> /path/to/later-edition.epub --json
+python scripts/book.py build <book-slug> --format epub
 ```
 
 Source-corpus integrity/recovery helpers include:
@@ -381,6 +389,7 @@ The helpers use the Python standard library.
 ├── docs/
 │   ├── AGENT_SETUP.md        # technical setup authority
 │   ├── ORCHESTRATION.md      # execution/state authority
+│   ├── SOURCE_UPDATES.md      # later source-edition authority
 │   ├── TRANSLATION.md        # literary translation/review authority
 │   └── templates/            # state templates
 ├── scripts/

@@ -74,6 +74,8 @@ class WorkflowPrivateSourceTests(unittest.TestCase):
                 "filename": "sample.md",
                 "size_bytes": len(source_bytes),
                 "sha256": expected_sha,
+                "original_filename": "sample.md",
+                "revision_id": "source-000001",
             },
         )
         self.assertEqual(manifest["source_storage_mode"], "embedded")

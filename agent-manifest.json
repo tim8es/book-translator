@@ -13,7 +13,8 @@
     "global": "AGENTS.md",
     "setup": "docs/AGENT_SETUP.md",
     "orchestration": "docs/ORCHESTRATION.md",
-    "translation": "docs/TRANSLATION.md"
+    "translation": "docs/TRANSLATION.md",
+    "source_updates": "docs/SOURCE_UPDATES.md"
   },
   "context_profiles": {
     "bootstrap": [
@@ -22,7 +23,8 @@
     ],
     "orchestrator": [
       "global",
-      "orchestration"
+      "orchestration",
+      "source_updates"
     ],
     "translator": [
       "global",

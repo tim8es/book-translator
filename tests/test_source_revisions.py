@@ -1,0 +1,418 @@
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BOOK_SCRIPT = PROJECT_ROOT / "scripts" / "book.py"
+CORPUS_SCRIPT = PROJECT_ROOT / "scripts" / "corpus.py"
+WORKFLOW = PROJECT_ROOT / "scripts" / "workflow"
+TEMPLATES = PROJECT_ROOT / "docs" / "templates"
+
+
+class SourceRevisionWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"
+        (self.repo / "scripts").mkdir(parents=True)
+        shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
+        shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
+        shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
+        if TEMPLATES.exists():
+            shutil.copytree(TEMPLATES, self.repo / "docs" / "templates")
+        (self.repo / ".book-translator-install.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "canonical_repository": "https://github.com/tim8es/book-translator",
+                    "requested_ref": "feature/source-revisions-durable-update",
+                    "resolved_revision": "source-revision-test",
+                    "install_root": ".",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, expect=0):
+        result = subprocess.run(
+            [sys.executable, str(self.repo / "scripts" / "book.py"), *args],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            expect,
+            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        return result
+
+    def make_source(self, name, chapters):
+        path = self.repo / name
+        text = "\n\n".join(f"# {title}\n\n{body}" for title, body in chapters) + "\n"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def make_epub(self, name, chapters):
+        path = self.repo / name
+        manifest = "\n".join(
+            f'<item id="c{i}" href="chapter{i}.xhtml" media-type="application/xhtml+xml"/>'
+            for i in range(1, len(chapters) + 1)
+        )
+        spine = "\n".join(f'<itemref idref="c{i}"/>' for i in range(1, len(chapters) + 1))
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr(
+                "META-INF/container.xml",
+                '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                'media-type="application/oebps-package+xml"/></rootfiles></container>',
+            )
+            zf.writestr(
+                "OEBPS/content.opf",
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                '<dc:title>Revision Test</dc:title><dc:creator>Author</dc:creator>'
+                '<dc:language>en</dc:language></metadata>'
+                f'<manifest>{manifest}</manifest><spine>{spine}</spine></package>',
+            )
+            for i, (title, body) in enumerate(chapters, 1):
+                zf.writestr(
+                    f"OEBPS/chapter{i}.xhtml",
+                    f'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                    f'<h1>{title}</h1><p>{body}</p></body></html>',
+                )
+        return path
+
+
+    def initialize(self):
+        source = self.make_source("book.md", [("One", "Alpha."), ("Two", "Beta.")])
+        self.run_cli(
+            "extract",
+            str(source),
+            "--slug",
+            "sample",
+            "--target-language",
+            "ru",
+        )
+        return self.repo / "books" / "sample"
+
+    def translate_and_review(self, chapter):
+        book = self.repo / "books" / "sample"
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        record = progress["chapters"][chapter - 1]
+        target = book / record["translation_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# RU {chapter}\n\nПеревод {chapter}.\n", encoding="utf-8")
+
+        translator = f"translator-{chapter}"
+        reviewer = f"reviewer-{chapter}"
+        self.run_cli("claim", "sample", str(chapter), "--role", "translator", "--session-id", translator, "--json")
+        self.run_cli("accept-translation", "sample", str(chapter), "--session-id", translator, "--json")
+        self.run_cli("release", "sample", str(chapter), "--session-id", translator, "--json")
+        self.run_cli(
+            "claim",
+            "sample",
+            str(chapter),
+            "--role",
+            "reviewer",
+            "--session-id",
+            reviewer,
+            "--base-commit",
+            f"review-{chapter}",
+            "--json",
+        )
+        self.run_cli(
+            "review-record",
+            "sample",
+            str(chapter),
+            "--outcome",
+            "PASS",
+            "--session-id",
+            reviewer,
+            "--review-commit",
+            f"review-{chapter}",
+            "--json",
+        )
+        self.run_cli("release", "sample", str(chapter), "--session-id", reviewer, "--json")
+        self.run_cli("accept-review", "sample", str(chapter), "--json")
+
+    def test_extract_creates_initial_source_revision_and_stable_unit_ids(self):
+        book = self.initialize()
+        progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        metadata = json.loads((book / "metadata.json").read_text(encoding="utf-8"))
+        revisions = json.loads((book / "source-revisions.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([c["unit_id"] for c in progress["chapters"]], ["chapter-000001", "chapter-000002"])
+        self.assertEqual(metadata["source"]["revision_id"], "source-000001")
+        self.assertEqual(revisions["active_revision"], "source-000001")
+        self.assertEqual(revisions["next_sequence"], 2)
+        snapshot = book / revisions["revisions"][0]["snapshot_path"]
+        self.assertTrue(snapshot.is_file())
+
+    def test_inserted_unit_reuses_unchanged_translation_and_review_evidence(self):
+        book = self.initialize()
+        self.translate_and_review(1)
+        self.translate_and_review(2)
+        before = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        before_by_title = {c["title"]: c for c in before["chapters"]}
+
+        updated = self.make_source(
+            "book-v2.md",
+            [("One", "Alpha."), ("New", "Gamma."), ("Two", "Beta.")],
+        )
+        result = self.run_cli("update-source", "sample", str(updated), "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["state"], "promoted")
+        self.assertEqual(payload["delta"]["unchanged"], 2)
+        self.assertEqual(payload["delta"]["new"], 1)
+
+        after = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        by_title = {c["title"]: c for c in after["chapters"]}
+        self.assertEqual([c["number"] for c in after["chapters"]], [1, 2, 3])
+        self.assertEqual(by_title["One"]["unit_id"], before_by_title["One"]["unit_id"])
+        self.assertEqual(by_title["Two"]["unit_id"], before_by_title["Two"]["unit_id"])
+        self.assertEqual(by_title["One"]["translation_path"], before_by_title["One"]["translation_path"])
+        self.assertEqual(by_title["Two"]["translation_path"], before_by_title["Two"]["translation_path"])
+        self.assertEqual(by_title["One"]["status"], "reviewed")
+        self.assertEqual(by_title["Two"]["status"], "reviewed")
+        self.assertIn("translation_acceptance", by_title["One"])
+        self.assertIn("translation_acceptance", by_title["Two"])
+        self.assertEqual(by_title["New"]["status"], "extracted")
+        self.assertNotIn("translation_acceptance", by_title["New"])
+
+        reviews = json.loads(self.run_cli("reviews", "sample", "--json").stdout)
+        states = {item["chapter_number"]: item["state"] for item in reviews["reviews"]}
+        self.assertEqual(states[1], "pass")
+        self.assertEqual(states[3], "pass")
+
+    def test_changed_unit_keeps_identity_but_invalidates_translation_and_review(self):
+        book = self.initialize()
+        self.translate_and_review(1)
+        self.translate_and_review(2)
+        before = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        old_one = before["chapters"][0]
+        old_translation = book / old_one["translation_path"]
+        old_translation_bytes = old_translation.read_bytes()
+
+        updated = self.make_source(
+            "book-v2.md",
+            [("One", "Alpha changed."), ("Two", "Beta.")],
+        )
+        self.run_cli("update-source", "sample", str(updated), "--json")
+
+        after = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        one, two = after["chapters"]
+        self.assertEqual(one["unit_id"], old_one["unit_id"])
+        self.assertEqual(one["status"], "extracted")
+        self.assertNotIn("translation_acceptance", one)
+        self.assertNotEqual(one["source_path"], old_one["source_path"])
+        self.assertNotEqual(one["translation_path"], old_one["translation_path"])
+        self.assertEqual(old_translation.read_bytes(), old_translation_bytes)
+        self.assertEqual(two["status"], "reviewed")
+        self.assertTrue((book / one["source_path"]).is_file())
+
+    def test_deletion_is_staged_and_requires_explicit_promotion(self):
+        book = self.initialize()
+        before = (book / "progress.json").read_bytes()
+        updated = self.make_source("book-v2.md", [("One", "Alpha.")])
+
+        result = self.run_cli("update-source", "sample", str(updated), "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["state"], "staged_requires_decision")
+        self.assertEqual(payload["delta"]["deleted"], 1)
+        self.assertEqual((book / "progress.json").read_bytes(), before)
+
+        revision_id = payload["revision_id"]
+        blocked = self.run_cli(
+            "promote-source-update",
+            "sample",
+            revision_id,
+            "--json",
+            expect=1,
+        )
+        self.assertIn("--allow-deletions", blocked.stderr)
+
+        promoted = self.run_cli(
+            "promote-source-update",
+            "sample",
+            revision_id,
+            "--allow-deletions",
+            "--json",
+        )
+        self.assertEqual(json.loads(promoted.stdout)["state"], "promoted")
+        after = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(after["chapters"]), 1)
+
+    def test_promote_is_idempotent_after_success(self):
+        self.initialize()
+        updated = self.make_source(
+            "book-v2.md",
+            [("One", "Alpha."), ("Two", "Beta."), ("Three", "Gamma.")],
+        )
+        first = json.loads(self.run_cli("update-source", "sample", str(updated), "--json").stdout)
+        revision_id = first["revision_id"]
+        second = json.loads(
+            self.run_cli("promote-source-update", "sample", revision_id, "--json").stdout
+        )
+        self.assertEqual(second["state"], "already_active")
+
+    def test_source_revision_status_is_machine_readable(self):
+        self.initialize()
+        result = self.run_cli("source-revisions", "sample", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["active_revision"], "source-000001")
+        self.assertEqual(len(payload["revisions"]), 1)
+
+
+    def test_auxiliary_units_follow_same_delta_lifecycle(self):
+        source = self.make_source(
+            "aux.md",
+            [("Preface", "Intro."), ("Chapter", "Body."), ("Afterword", "Thanks.")],
+        )
+        self.run_cli(
+            "extract",
+            str(source),
+            "--slug",
+            "sample",
+            "--target-language",
+            "ru",
+        )
+        before = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        ids = {item["title"]: item["unit_id"] for item in before["chapters"]}
+
+        updated = self.make_source(
+            "aux-v2.md",
+            [("Preface", "Intro."), ("Chapter", "Body."), ("Afterword", "Updated thanks.")],
+        )
+        payload = json.loads(
+            self.run_cli("update-source", "sample", str(updated), "--json").stdout
+        )
+        self.assertEqual(payload["delta"], {"changed": 1, "deleted": 0, "new": 0, "unchanged": 2})
+
+        after = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        by_title = {item["title"]: item for item in after["chapters"]}
+        self.assertEqual(by_title["Preface"]["unit_id"], ids["Preface"])
+        self.assertEqual(by_title["Afterword"]["unit_id"], ids["Afterword"])
+        self.assertEqual(by_title["Afterword"]["status"], "extracted")
+        self.assertIn("source-000002", by_title["Afterword"]["source_path"])
+
+    def test_immutable_revision_archive_tamper_blocks_validation(self):
+        book = self.initialize()
+        catalog = json.loads((book / "source-revisions.json").read_text(encoding="utf-8"))
+        snapshot_path = book / catalog["revisions"][0]["snapshot_path"]
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        archive = book / snapshot["units"][0]["staged_path"]
+        self.assertTrue(archive.is_file())
+        archive.write_text("# One\n\nTampered.\n", encoding="utf-8")
+
+        self.run_cli("validate", "sample")
+        result = self.run_cli("source-revisions", "sample", "--verify", "--json", expect=1)
+        self.assertIn("immutable corpus archive hash mismatch", result.stdout + result.stderr)
+
+
+    def test_source_promotion_marker_fails_closed_for_literary_work(self):
+        book = self.initialize()
+        marker = {
+            "schema_version": 1,
+            "book_slug": "sample",
+            "revision_id": "source-000002",
+            "parent_revision_id": "source-000001",
+            "phase": "preparing",
+            "session_id": "promotion-test",
+            "started_at": "2026-10-04T00:00:00Z",
+            "base_revisions": {
+                "metadata": "m",
+                "progress": "p",
+                "source_manifest": "s",
+                "source_revisions": "r",
+            },
+            "target_sha256": {
+                "metadata": "1" * 64,
+                "progress": "2" * 64,
+                "source_manifest": "3" * 64,
+                "source_revisions": "4" * 64,
+            },
+        }
+        workflow_dir = book / ".workflow"
+        workflow_dir.mkdir(exist_ok=True)
+        (workflow_dir / "source-promotion.json").write_text(
+            json.dumps(marker) + "\n",
+            encoding="utf-8",
+        )
+
+        claim = self.run_cli(
+            "claim",
+            "sample",
+            "1",
+            "--role",
+            "translator",
+            "--session-id",
+            "translator-blocked",
+            "--json",
+            expect=1,
+        )
+        self.assertIn("source promotion is active", claim.stderr.lower())
+
+        validation = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("source promotion recovery is pending", (validation.stdout + validation.stderr).lower())
+
+
+    def test_unique_hash_reorder_reuses_existing_units(self):
+        book = self.initialize()
+        before = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        ids = {item["title"]: item["unit_id"] for item in before["chapters"]}
+
+        updated = self.make_source("book-v2.md", [("Two", "Beta."), ("One", "Alpha.")])
+        payload = json.loads(
+            self.run_cli("update-source", "sample", str(updated), "--json").stdout
+        )
+        self.assertEqual(payload["delta"], {"changed": 0, "deleted": 0, "new": 0, "unchanged": 2})
+
+        after = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["title"] for item in after["chapters"]], ["Two", "One"])
+        self.assertEqual(after["chapters"][0]["unit_id"], ids["Two"])
+        self.assertEqual(after["chapters"][1]["unit_id"], ids["One"])
+
+
+    def test_epub_later_edition_reuses_unchanged_spine_units(self):
+        source = self.make_epub("book.epub", [("One", "Alpha."), ("Two", "Beta.")])
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+        before = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        ids = {item["title"]: item["unit_id"] for item in before["chapters"]}
+
+        updated = self.make_epub(
+            "book-v2.epub",
+            [("One", "Alpha."), ("Two", "Beta."), ("Three", "Gamma.")],
+        )
+        payload = json.loads(
+            self.run_cli("update-source", "sample", str(updated), "--json").stdout
+        )
+        self.assertEqual(payload["delta"], {"changed": 0, "deleted": 0, "new": 1, "unchanged": 2})
+
+        after = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(after["chapters"][0]["unit_id"], ids["One"])
+        self.assertEqual(after["chapters"][1]["unit_id"], ids["Two"])
+        self.assertEqual(after["chapters"][2]["status"], "extracted")
+
+
+if __name__ == "__main__":
+    unittest.main()

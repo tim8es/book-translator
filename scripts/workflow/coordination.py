@@ -21,6 +21,7 @@ from .storage import (
 
 COORDINATION_PATH = ".workflow/coordination-lock.json"
 FINALIZATION_PATH = ".workflow/finalization.json"
+SOURCE_PROMOTION_PATH = ".workflow/source-promotion.json"
 HEX_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -93,15 +94,21 @@ class BookCoordinationManager:
             "finalize_admission",
             "proposal_reconcile",
             "translation_acceptance",
+            "source_promotion",
         }
         if operation not in allowed:
             raise CoordinationError(
-                "operation must be claim_admission, finalize_admission, proposal_reconcile, or translation_acceptance"
+                "operation must be claim_admission, finalize_admission, proposal_reconcile, translation_acceptance, or source_promotion"
             )
         if not isinstance(session_id, str) or not session_id.strip():
             raise CoordinationError("session_id must be a non-empty string")
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise CoordinationError("lease_seconds must be a positive integer")
+
+        if operation != "source_promotion" and self.source_promotion_active():
+            raise CoordinationConflict(
+                "book admission is blocked while source promotion is active; recover or finish the promotion first"
+            )
 
         now = self._now()
         document = {
@@ -235,4 +242,13 @@ class BookCoordinationManager:
             return False
         except (StorageError, RepositoryError, SchemaError) as exc:
             raise CoordinationError(f"finalization marker is invalid or unavailable: {exc}") from exc
+        return True
+
+    def source_promotion_active(self) -> bool:
+        try:
+            self.repository.read(SOURCE_PROMOTION_PATH, SchemaKind.SOURCE_PROMOTION)
+        except StorageNotFound:
+            return False
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise CoordinationError(f"source promotion marker is invalid or unavailable: {exc}") from exc
         return True

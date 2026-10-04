@@ -28,6 +28,7 @@ from workflow import (
     SchemaKind,
     StorageError,
     WorkflowStateRepository,
+    unit_id_for_chapter,
 )
 from workflow.schemas import SCHEMA_VERSION, parse_document
 from workflow.source_cli import normalize_structural_errors
@@ -149,9 +150,11 @@ def _assert_source_matches_metadata(source: Path, metadata: dict) -> tuple[str, 
         return actual_sha, None, None
 
     expected_filename = explicit.get("filename")
-    if source.name != expected_filename:
+    original_filename = explicit.get("original_filename")
+    allowed_names = {name for name in (expected_filename, original_filename) if isinstance(name, str)}
+    if source.name not in allowed_names:
         raise book.BookError(
-            f"Source filename mismatch: expected {expected_filename!r}, got {source.name!r}"
+            f"Source filename mismatch: expected one of {sorted(allowed_names)!r}, got {source.name!r}"
         )
     expected_sha = normalized_expected_sha(
         explicit.get("sha256") if isinstance(explicit.get("sha256"), str) else None,
@@ -177,9 +180,11 @@ def _trusted_restore_identity(
     explicit = _explicit_source(metadata)
     if explicit is not None:
         expected_filename = explicit.get("filename")
-        if source.name != expected_filename:
+        original_filename = explicit.get("original_filename")
+        allowed_names = {name for name in (expected_filename, original_filename) if isinstance(name, str)}
+        if source.name not in allowed_names:
             raise book.BookError(
-                f"Source filename mismatch: expected {expected_filename!r}, got {source.name!r}"
+                f"Source filename mismatch: expected one of {sorted(allowed_names)!r}, got {source.name!r}"
             )
         expected_sha = normalized_expected_sha(
             explicit.get("sha256") if isinstance(explicit.get("sha256"), str) else None,
@@ -249,6 +254,7 @@ def build_manifest(book_dir: Path, metadata: dict, progress: dict, source: Path)
             raise book.BookError(f"Cannot seal incomplete corpus; missing {rel.as_posix()}")
         extracted.append(
             {
+                "unit_id": unit_id_for_chapter(record),
                 "number": record.get("number"),
                 "title": record.get("title"),
                 "path": rel.as_posix(),
@@ -347,6 +353,8 @@ def verify_manifest(book_dir: Path, metadata: dict, progress: dict, data: dict) 
             raise book.BookError(
                 f"Manifest path mismatch for chapter {record.get('number')}: expected {rel_text}, got {item.get('path')!r}"
             )
+        if item.get("unit_id") is not None and item.get("unit_id") != unit_id_for_chapter(record):
+            raise book.BookError(f"Manifest unit identity mismatch for {rel_text}")
         if item.get("number") != record.get("number"):
             raise book.BookError(f"Manifest chapter number mismatch for {rel_text}")
         if item.get("title") != record.get("title"):
@@ -490,6 +498,7 @@ def restore_command(args: argparse.Namespace) -> int:
                 )
             manifest_items.append(
                 {
+                    "unit_id": unit_id_for_chapter(record),
                     "number": record.get("number"),
                     "title": record.get("title"),
                     "path": rel.as_posix(),

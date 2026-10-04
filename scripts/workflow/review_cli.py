@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .claims import unit_id_for_chapter
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
 from .review_report import build_review_report_snapshot, render_review_report_markdown
@@ -146,7 +147,7 @@ def _require_current_translation_acceptance(
         raise ReviewCliError(
             f"chapter {chapter_number} requires current translation_acceptance evidence before review"
         )
-    expected_unit = f"chapter-{chapter_number:06d}"
+    expected_unit = unit_id_for_chapter(chapter)
     if evidence.get("unit_id") != expected_unit:
         raise ReviewCliError(
             f"chapter {chapter_number} translation_acceptance unit identity is invalid"

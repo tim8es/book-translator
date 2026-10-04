@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .claims import canonical_unit_id
+from .claims import unit_id_for_chapter
 from .coordination import BookCoordinationManager, CoordinationError
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError, SchemaKind
@@ -200,7 +200,7 @@ class TranslationAcceptanceManager:
             raise TranslationAcceptanceError(
                 f"chapter {chapter_number} is already {chapter.get('status')} without machine translation acceptance evidence"
             )
-        unit_id = canonical_unit_id(chapter_number)
+        unit_id = unit_id_for_chapter(chapter)
         workflow_revision = self._workflow_revision(metadata)
         if evidence.get("unit_id") != unit_id:
             raise TranslationAcceptanceError(
@@ -306,7 +306,7 @@ class TranslationAcceptanceManager:
                 )
 
             workflow_revision = self._workflow_revision(metadata)
-            unit_id = canonical_unit_id(chapter_number)
+            unit_id = unit_id_for_chapter(chapter)
             claim_doc = self._claim(
                 unit_id,
                 session_id=session_id,
