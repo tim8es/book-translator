@@ -276,13 +276,16 @@ def ensure_chapter_charge_capacity(settings: Settings, source_words: int) -> int
 async def charge_completed_chapter(settings: Settings, units: int) -> None:
     if settings.skip_charging:
         return
-    result = await Actor.charge(event_name="translation-1k-words", count=units)
-    charged = int(getattr(result, "charged_count", 0))
-    if charged < units:
-        raise ActorRunError(
-            f"Reviewed chapter was saved but only {charged}/{units} billing units "
-            "could be charged; stopping to prevent unpaid additional work"
-        )
+    charged = 0
+    for _ in range(units):
+        result = await Actor.charge(event_name="translation-1k-words")
+        charged_now = int(getattr(result, "charged_count", 0))
+        if charged_now < 1:
+            raise ActorRunError(
+                f"Reviewed chapter was saved but only {charged}/{units} billing units "
+                "could be charged; stopping to prevent unpaid additional work"
+            )
+        charged += charged_now
 
 
 async def translate_once(
