@@ -19,6 +19,7 @@ from .source_updates import (
     SourceRevisionError,
     SourceRevisionManager,
     initialize_source_revisions,
+    source_revision_integrity_errors,
 )
 from .storage import StorageError, StorageNotFound
 
@@ -71,8 +72,31 @@ def source_revisions_command(args: argparse.Namespace, root: Path) -> int:
         catalog = SourceRevisionManager(repository).catalog().data
     except SourceRevisionError as exc:
         raise SourceUpdateCliError(str(exc)) from exc
+
+    integrity_errors: list[str] = []
+    if args.verify:
+        try:
+            metadata = repository.read("metadata.json", SchemaKind.METADATA).data
+            progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+            manifest = repository.read("source-manifest.json", SchemaKind.SOURCE_MANIFEST).data
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise SourceUpdateCliError(f"cannot load active source state for deep verification: {exc}") from exc
+        integrity_errors = source_revision_integrity_errors(
+            repository,
+            metadata,
+            progress,
+            manifest,
+            deep=True,
+        )
+
+    payload = dict(catalog)
+    if args.verify:
+        payload["integrity"] = {
+            "state": "verified" if not integrity_errors else "invalid",
+            "errors": integrity_errors,
+        }
     if args.json:
-        _print_json(catalog)
+        _print_json(payload)
     else:
         print(f"active source revision: {catalog['active_revision']}")
         for entry in catalog["revisions"]:
@@ -80,7 +104,11 @@ def source_revisions_command(args: argparse.Namespace, root: Path) -> int:
                 f"- {entry['revision_id']} {entry['state']} "
                 f"sha256={entry['source_sha256']} file={entry['source_file']}"
             )
-    return 0
+        if args.verify:
+            print("revision archive integrity: " + ("verified" if not integrity_errors else "invalid"))
+            for error in integrity_errors:
+                print(f"- {error}")
+    return 1 if integrity_errors else 0
 
 
 def update_source_command(args: argparse.Namespace, root: Path) -> int:
@@ -246,6 +274,11 @@ def register_source_update_commands(
     )
     revisions.add_argument("slug", help="Book slug under books/.")
     revisions.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
+    revisions.add_argument(
+        "--verify",
+        action="store_true",
+        help="Deep-verify immutable corpus/source archives for every retained revision.",
+    )
     revisions.set_defaults(
         func=_adapt(lambda args: source_revisions_command(args, root), error_factory)
     )
