@@ -136,6 +136,9 @@ def build_input_snapshot(
     if author is not None and not isinstance(author, str):
         raise EpubOutputError("metadata author must be a string or null")
     workflow_revision = _workflow_revision(metadata)
+    source = metadata.get("source")
+    source_revision_id = source.get("revision_id") if isinstance(source, Mapping) else None
+    source_sha256 = source.get("sha256") if isinstance(source, Mapping) else None
 
     chapters = progress.get("chapters")
     if not isinstance(chapters, list):
@@ -212,6 +215,8 @@ def build_input_snapshot(
             "author": author,
             "target_language": target_language,
             "cover_path": cover_path,
+            "source_revision_id": source_revision_id,
+            "source_sha256": source_sha256,
         },
         "workflow_revision": workflow_revision,
         "units": units,
