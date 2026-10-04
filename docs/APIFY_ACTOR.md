@@ -43,6 +43,7 @@ Optional:
 - BOOK_TRANSLATOR_REVIEW_MODEL, default same as translation model
 - BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN, default 20
 - BOOK_TRANSLATOR_MAX_SOURCE_WORDS, default 500000
+- BOOK_TRANSLATOR_MAX_CHAPTER_CHARS, default 60000
 - BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS, default 2
 - BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS, default 300
 - BOOK_TRANSLATOR_WORKFLOW_REVISION, default apify-managed-llm-mvp
@@ -79,7 +80,7 @@ The summary records model, role, input/output tokens when available, and estimat
 - DOCX and PDF are not yet accepted by the automatic Actor path;
 - Translator and Reviewer are sequential and logically independent;
 - glossary/style files are read as shared context but automatic durable literary-memory updates are not implemented yet;
-- very large individual chapters still need explicit chunking before Store release;
+- chapters above the owner context limit are rejected before charging; explicit chunking is still needed before Store release;
 - no resume-from-previous-Apify-run contract yet;
 - pricing values are not final;
 - no production deployment has been smoke-tested from this branch yet.
