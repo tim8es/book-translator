@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .claims import unit_id_for_chapter
-from .coordination import FINALIZATION_PATH
+from .coordination import FINALIZATION_PATH, SOURCE_PROMOTION_PATH
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
@@ -433,6 +433,19 @@ class ReviewLedgerManager:
     ) -> AcceptReviewResult:
         if not isinstance(progress_revision, str) or not progress_revision.strip():
             raise ReviewEvidenceError("progress revision must be a non-empty string")
+
+        try:
+            self.repository.read(SOURCE_PROMOTION_PATH, SchemaKind.SOURCE_PROMOTION)
+        except StorageNotFound:
+            pass
+        except (StorageError, RepositoryError, SchemaError) as exc:
+            raise ReviewEvidenceError(
+                f"cannot verify source promotion admission state: {exc}"
+            ) from exc
+        else:
+            raise ReviewEvidenceError(
+                "review promotion is blocked while source promotion is active"
+            )
 
         try:
             self.repository.read(FINALIZATION_PATH, SchemaKind.FINALIZATION_LOCK)
