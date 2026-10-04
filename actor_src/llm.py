@@ -106,10 +106,13 @@ class ManagedLlm:
                     or 0
                 )
                 input_price, output_price = self._prices(role)
-                cost = (
+                measured_cost = (
                     input_tokens * input_price / 1_000_000
                     + output_tokens * output_price / 1_000_000
                 )
+                # Some OpenAI-compatible gateways omit usage. Never treat missing
+                # metering as free: reserve the conservative pre-request estimate.
+                cost = measured_cost if (input_tokens or output_tokens) else estimated
                 self.spent_usd += cost
                 self.usage.append(
                     LlmUsage(
