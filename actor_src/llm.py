@@ -77,6 +77,7 @@ class ManagedLlm:
         model: str,
         messages: list[dict[str, str]],
         max_tokens: int,
+        response_format: dict | None = None,
     ) -> str:
         estimated = self._estimate_request_cost(messages, role, max_tokens)
         if self.spent_usd + estimated > self.limit_usd:
@@ -92,6 +93,8 @@ class ManagedLlm:
         }
         if self.settings.reasoning_effort:
             body["reasoning_effort"] = self.settings.reasoning_effort
+        if response_format is not None:
+            body["response_format"] = response_format
         last_error: Exception | None = None
         for attempt in range(3):
             try:
@@ -173,6 +176,7 @@ class ManagedLlm:
             model=self.settings.review_model,
             messages=messages,
             max_tokens=self.settings.review_max_tokens,
+            response_format={"type": "json_object"},
         )
         cleaned = raw.strip()
         fence = chr(96) * 3
