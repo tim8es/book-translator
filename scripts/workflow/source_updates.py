@@ -918,13 +918,14 @@ class SourceRevisionManager:
             self._copy_staged_artifacts(snapshot, entry)
 
             resulting: dict[str, str] = {}
+            marker_base = marker.data["base_revisions"]
             for key in ("progress", "metadata", "source_manifest", "source_revisions"):
-                path, schema, target, base_version = targets[key]
+                path, schema, target, _ = targets[key]
                 resulting[key] = self._ensure_document(
                     path=path,
                     schema=schema,
                     target=target,
-                    base_version=base_version,
+                    base_version=str(marker_base[key]),
                 )
 
             # Read-back validates translation hashes, source state, and catalog shape.
