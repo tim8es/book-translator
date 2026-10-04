@@ -23,3 +23,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+      - name: Compile Actor runtime
+        if: ${{ matrix.python-version == '3.12' }}
+        run: python -m compileall -q actor_src scripts
+      - name: Validate Actor JSON
+        if: ${{ matrix.python-version == '3.12' }}
+        run: |
+          python -m json.tool .actor/actor.json >/dev/null
+          python -m json.tool .actor/INPUT_SCHEMA.json >/dev/null
+      - name: Load workflow CLI
+        if: ${{ matrix.python-version == '3.12' }}
+        run: python scripts/book.py --help >/dev/null
