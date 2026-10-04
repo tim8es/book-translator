@@ -286,7 +286,8 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertTrue(archive.is_file())
         archive.write_text("# One\n\nTampered.\n", encoding="utf-8")
 
-        result = self.run_cli("validate", "sample", expect=1)
+        self.run_cli("validate", "sample")
+        result = self.run_cli("source-revisions", "sample", "--verify", "--json", expect=1)
         self.assertIn("immutable corpus archive hash mismatch", result.stdout + result.stderr)
 
 
