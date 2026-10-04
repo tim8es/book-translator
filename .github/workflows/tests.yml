@@ -38,6 +38,7 @@ jobs:
         run: |
           python -m json.tool .actor/actor.json >/dev/null
           python -m json.tool .actor/INPUT_SCHEMA.json >/dev/null
+          python -m json.tool .actor/OUTPUT_SCHEMA.json >/dev/null
       - name: Load workflow CLI
         if: ${{ matrix.python-version == '3.12' }}
         run: python scripts/book.py --help >/dev/null
