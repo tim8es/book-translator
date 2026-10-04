@@ -16,6 +16,7 @@ from .claims import unit_id_for_chapter
 from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
+from .source_updates import SOURCE_PROMOTION_PATH, SOURCE_REVISIONS_PATH, initialize_source_revisions
 from .storage import StorageError
 
 
@@ -65,6 +66,14 @@ def normalize_structural_errors(
             message = "Missing source-manifest.json for current workflow book"
             if message not in result:
                 result.append(message)
+        if not (book_dir / SOURCE_REVISIONS_PATH).is_file():
+            message = "Missing source-revisions.json for current workflow book"
+            if message not in result:
+                result.append(message)
+        if (book_dir / SOURCE_PROMOTION_PATH).is_file():
+            result.append(
+                "Source promotion recovery is pending; finish promote-source-update before literary work or output"
+            )
 
     workflow = metadata.get("workflow")
     if not isinstance(workflow, Mapping) or workflow.get("review_evidence") != CURRENT_REVIEW_EVIDENCE:
@@ -294,6 +303,7 @@ def source_extract_command(
         stored_source = book_dir / "source" / identity["filename"]
         manifest = build_source_manifest(book_dir, metadata, progress_doc.data, stored_source)
         repository.create("source-manifest.json", SchemaKind.SOURCE_MANIFEST, manifest)
+        initialize_source_revisions(repository)
 
         if identity["storage_mode"] == "private_external" and stored_source.is_file():
             stored_source.unlink()
