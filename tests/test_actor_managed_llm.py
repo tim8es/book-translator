@@ -22,7 +22,7 @@ def settings(**overrides):
         "translation_model": "translation-model",
         "review_model": "review-model",
         "max_tokens_parameter": "max_completion_tokens",
-        "reasoning_effort": None,
+        "reasoning_effort": "high",
         "translation_input_usd_per_m": 1.0,
         "translation_cached_input_usd_per_m": 0.1,
         "translation_cache_write_usd_per_m": 1.25,
@@ -47,8 +47,9 @@ def settings(**overrides):
 
 
 class _FakeResponse:
-    def __init__(self, finish_reason=None):
+    def __init__(self, finish_reason=None, usage=None):
         self.finish_reason = finish_reason
+        self.usage = usage
 
     def raise_for_status(self):
         return None
@@ -59,20 +60,21 @@ class _FakeResponse:
                 "message": {"content": "translated"},
                 "finish_reason": self.finish_reason,
             }],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 2000},
+            "usage": self.usage or {"prompt_tokens": 1, "completion_tokens": 2000},
         }
 
 
 class _FakeClient:
-    def __init__(self, finish_reason=None):
+    def __init__(self, finish_reason=None, usage=None):
         self.calls = 0
         self.last_json = None
         self.finish_reason = finish_reason
+        self.usage = usage
 
     async def post(self, *args, **kwargs):
         self.calls += 1
         self.last_json = kwargs.get("json")
-        return _FakeResponse(self.finish_reason)
+        return _FakeResponse(self.finish_reason, self.usage)
 
     async def aclose(self):
         return None
@@ -97,6 +99,7 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max_completion_tokens", fake.last_json)
         self.assertNotIn("max_tokens", fake.last_json)
         self.assertNotIn("temperature", fake.last_json)
+        self.assertEqual(fake.last_json["reasoning_effort"], "high")
 
     async def test_truncated_output_is_never_retried(self):
         llm = ManagedLlm(
@@ -119,6 +122,42 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(fake.calls, 1)
+
+    async def test_cache_write_tokens_use_separate_price(self):
+        llm = ManagedLlm(
+            settings(
+                translation_input_usd_per_m=10.0,
+                translation_cached_input_usd_per_m=1.0,
+                translation_cache_write_usd_per_m=20.0,
+                translation_output_usd_per_m=30.0,
+                max_llm_cost_usd=10.0,
+            ),
+            run_limit_usd=10.0,
+        )
+        await llm.client.aclose()
+        fake = _FakeClient(
+            usage={
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+                "prompt_tokens_details": {
+                    "cached_tokens": 200,
+                    "cache_write_tokens": 300,
+                },
+            }
+        )
+        llm.client = fake
+
+        await llm.complete(
+            role="translation",
+            model="gpt-6-luna",
+            messages=[{"role": "user", "content": "short"}],
+            max_tokens=10,
+        )
+
+        usage = llm.usage[0]
+        self.assertEqual(usage.cached_input_tokens, 200)
+        self.assertEqual(usage.cache_write_tokens, 300)
+        self.assertAlmostEqual(usage.cost_usd, 0.0142, places=6)
 
     async def test_reviewer_memory_is_bounded_and_sanitized(self):
         llm = ManagedLlm(
@@ -173,6 +212,8 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(value.review_cached_input_usd_per_m, 0.10)
         self.assertEqual(value.review_cache_write_usd_per_m, 2.50)
         self.assertEqual(value.review_output_usd_per_m, 10.00)
+        self.assertEqual(value.translation_max_tokens, 64_000)
+        self.assertEqual(value.review_max_tokens, 16_000)
 
 
 class BillingGuardTests(unittest.TestCase):
