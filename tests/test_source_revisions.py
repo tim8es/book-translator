@@ -241,5 +241,54 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertEqual(len(payload["revisions"]), 1)
 
 
+    def test_auxiliary_units_follow_same_delta_lifecycle(self):
+        source = self.make_source(
+            "aux.md",
+            [("Preface", "Intro."), ("Chapter", "Body."), ("Afterword", "Thanks.")],
+        )
+        self.run_cli(
+            "extract",
+            str(source),
+            "--slug",
+            "sample",
+            "--target-language",
+            "ru",
+        )
+        before = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        ids = {item["title"]: item["unit_id"] for item in before["chapters"]}
+
+        updated = self.make_source(
+            "aux-v2.md",
+            [("Preface", "Intro."), ("Chapter", "Body."), ("Afterword", "Updated thanks.")],
+        )
+        payload = json.loads(
+            self.run_cli("update-source", "sample", str(updated), "--json").stdout
+        )
+        self.assertEqual(payload["delta"], {"changed": 1, "deleted": 0, "new": 0, "unchanged": 2})
+
+        after = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        by_title = {item["title"]: item for item in after["chapters"]}
+        self.assertEqual(by_title["Preface"]["unit_id"], ids["Preface"])
+        self.assertEqual(by_title["Afterword"]["unit_id"], ids["Afterword"])
+        self.assertEqual(by_title["Afterword"]["status"], "extracted")
+        self.assertIn("source-000002", by_title["Afterword"]["source_path"])
+
+    def test_immutable_revision_archive_tamper_blocks_validation(self):
+        book = self.initialize()
+        catalog = json.loads((book / "source-revisions.json").read_text(encoding="utf-8"))
+        snapshot_path = book / catalog["revisions"][0]["snapshot_path"]
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        archive = book / snapshot["units"][0]["staged_path"]
+        self.assertTrue(archive.is_file())
+        archive.write_text("# One\n\nTampered.\n", encoding="utf-8")
+
+        result = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("immutable corpus archive hash mismatch", result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
