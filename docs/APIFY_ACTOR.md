@@ -83,7 +83,7 @@ The summary records model, role, input/output tokens when available, and estimat
 - EPUB, HTML/XHTML, Markdown, and TXT use the existing automatic extractor;
 - DOCX and PDF are not yet accepted by the automatic Actor path;
 - Translator and Reviewer are sequential and logically independent;
-- glossary/style files are read as shared context but automatic durable literary-memory updates are not implemented yet;
+- after a PASS, bounded reviewer-proposed glossary and style observations are sanitized and persisted by the Actor orchestrator for subsequent chapters;
 - chapters above the owner context limit are rejected before charging; explicit chunking is still needed before Store release;
 - no resume-from-previous-Apify-run contract yet;
 - pricing values are not final;
@@ -92,9 +92,8 @@ The summary records model, role, input/output tokens when available, and estimat
 ## Before first paid public test
 
 1. add bounded chapter chunking with continuity at chunk boundaries;
-2. add automated glossary/style proposal and orchestrator-owned merge rules;
-3. add deterministic failure records and a clear charging policy for failed chapters;
-4. run real books through at least two candidate model combinations and record actual token cost;
-5. set PPE prices from measured p50/p90 cost, not guesses;
-6. deploy privately on Apify and test file upload, PPE limits, output retrieval, retries, and secret redaction;
-7. only then prepare the Store listing and move the commercial runtime into its own repository.
+2. test and tune glossary/style proposal quality on real books;
+3. run real books through at least two candidate model combinations and record actual token cost;
+4. set PPE prices from measured p50/p90 cost, not guesses;
+5. deploy privately on Apify and test file upload, PPE limits, partial chapter delivery, output retrieval, retries, and secret redaction;
+6. only then prepare the Store listing and move the commercial runtime into its own repository.
