@@ -21,6 +21,8 @@ def settings(**overrides):
         "base_url": "https://example.invalid/v1",
         "translation_model": "translation-model",
         "review_model": "review-model",
+        "max_tokens_parameter": "max_completion_tokens",
+        "reasoning_effort": None,
         "translation_input_usd_per_m": 1.0,
         "translation_output_usd_per_m": 1000.0,
         "review_input_usd_per_m": 1.0,
