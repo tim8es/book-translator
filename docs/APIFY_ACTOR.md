@@ -12,17 +12,19 @@ Runtime flow:
 2. initialize the existing Book Translator durable workspace and sealed source manifest;
 3. reject books above the owner source-size limit;
 4. reserve the fixed PPE start event before any LLM call;
-5. for each chapter, reserve word-based PPE capacity before spending on the model;
-6. acquire a Translator claim;
-7. generate the translation using the owner-funded LLM;
-8. accept the translation through the existing hash-bound state machine;
-9. acquire an independent Reviewer claim;
-10. record PASS or CORRECTIONS_REQUIRED evidence;
-11. if needed, re-enter the Translator boundary, correct, and review again;
-12. accept only current PASS evidence;
-13. validate the whole workspace;
-14. build EPUB and/or Markdown from reviewed durable state;
-15. store final artifacts in the run key-value store and usage/cost metadata in SUMMARY.
+5. verify the user's max-charge budget can cover the whole planned book before spending on the model;
+6. for each chapter, verify remaining word-based PPE capacity before spending on the model;
+7. acquire a Translator claim;
+8. generate the translation using the owner-funded LLM;
+9. accept the translation through the existing hash-bound state machine;
+10. acquire an independent Reviewer claim;
+11. record PASS or CORRECTIONS_REQUIRED evidence;
+12. if needed, re-enter the Translator boundary, correct, and review again;
+13. accept only current PASS evidence;
+14. persist the reviewed chapter as a run artifact, then charge its word-based PPE event;
+15. validate the whole workspace;
+16. build EPUB and/or Markdown from reviewed durable state;
+17. store final artifacts in the run key-value store and usage/cost metadata in SUMMARY.
 
 ## Owner-only configuration
 
@@ -56,12 +58,12 @@ The runtime currently targets an OpenAI-compatible chat-completions endpoint so 
 
 The code emits two PPE event names:
 
-- book-started: one event per accepted run, before the first LLM call;
-- translation-1k-words: one event per started 1,000 source words, charged chapter-by-chapter before the LLM work for that chapter.
+- book-started: one event after source validation and full-run budget preflight, before the first LLM call;
+- translation-1k-words: one event per 1,000 source words (rounded up per chapter), charged only after that chapter has current PASS evidence and its reviewed translation has been saved as a run artifact.
 
 Prices are intentionally not hard-coded. They must be configured in Apify Console after unit economics are finalized.
 
-The Actor checks the result of every charge. If the run's maximum charge cannot cover the next unit of work, it stops before the corresponding LLM call.
+Before any LLM call, the Actor verifies that the run's maximum charge can cover the complete planned book at the configured PPE prices. It also rechecks capacity chapter-by-chapter. This avoids spending owner-funded LLM budget on a run that cannot pay for the planned work. A failed later chapter leaves earlier reviewed chapter artifacts accessible and does not charge the failed chapter.
 
 ## Cost protection
 
