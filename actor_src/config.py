@@ -44,8 +44,10 @@ class Settings:
     max_tokens_parameter: str
     reasoning_effort: str | None
     translation_input_usd_per_m: float
+    translation_cached_input_usd_per_m: float
     translation_output_usd_per_m: float
     review_input_usd_per_m: float
+    review_cached_input_usd_per_m: float
     review_output_usd_per_m: float
     max_llm_cost_usd: float
     max_source_words: int
@@ -77,8 +79,10 @@ class Settings:
             max_tokens_parameter=max_tokens_parameter,
             reasoning_effort=reasoning_effort,
             translation_input_usd_per_m=_float("BOOK_TRANSLATOR_TRANSLATION_INPUT_USD_PER_1M", 0.0),
+            translation_cached_input_usd_per_m=_float("BOOK_TRANSLATOR_TRANSLATION_CACHED_INPUT_USD_PER_1M", 0.0),
             translation_output_usd_per_m=_float("BOOK_TRANSLATOR_TRANSLATION_OUTPUT_USD_PER_1M", 0.0),
             review_input_usd_per_m=_float("BOOK_TRANSLATOR_REVIEW_INPUT_USD_PER_1M", 0.0),
+            review_cached_input_usd_per_m=_float("BOOK_TRANSLATOR_REVIEW_CACHED_INPUT_USD_PER_1M", 0.0),
             review_output_usd_per_m=_float("BOOK_TRANSLATOR_REVIEW_OUTPUT_USD_PER_1M", 0.0),
             max_llm_cost_usd=_float("BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN", 20.0),
             max_source_words=_int("BOOK_TRANSLATOR_MAX_SOURCE_WORDS", 500_000),
@@ -95,8 +99,10 @@ class Settings:
     def validate_pricing(self) -> None:
         values = (
             self.translation_input_usd_per_m,
+            self.translation_cached_input_usd_per_m,
             self.translation_output_usd_per_m,
             self.review_input_usd_per_m,
+            self.review_cached_input_usd_per_m,
             self.review_output_usd_per_m,
         )
         if any(value < 0 for value in values):
