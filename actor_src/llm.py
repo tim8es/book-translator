@@ -172,4 +172,39 @@ class ManagedLlm:
         issues = parsed.get("issues", [])
         if not isinstance(issues, list):
             raise LlmError("Reviewer JSON issues must be an array")
-        return {"outcome": parsed["outcome"], "issues": issues}
+
+        glossary = parsed.get("glossary_additions", [])
+        if not isinstance(glossary, list):
+            glossary = []
+        safe_glossary: list[dict[str, str]] = []
+        for item in glossary[:20]:
+            if not isinstance(item, dict):
+                continue
+            original = str(item.get("original") or "").strip()[:300]
+            translation = str(item.get("translation") or "").strip()[:300]
+            if not original or not translation:
+                continue
+            safe_glossary.append(
+                {
+                    "original": original,
+                    "translation": translation,
+                    "type": str(item.get("type") or "term").strip()[:80],
+                    "notes": str(item.get("notes") or "").strip()[:500],
+                }
+            )
+
+        observations = parsed.get("style_observations", [])
+        if not isinstance(observations, list):
+            observations = []
+        safe_observations = [
+            str(item).strip()[:500]
+            for item in observations[:10]
+            if isinstance(item, str) and item.strip()
+        ]
+
+        return {
+            "outcome": parsed["outcome"],
+            "issues": issues,
+            "glossary_additions": safe_glossary,
+            "style_observations": safe_observations,
+        }
