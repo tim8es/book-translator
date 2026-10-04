@@ -169,26 +169,76 @@ def word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
 
 
-async def reserve_start_charge(settings: Settings) -> None:
+def charging_manager():
+    return Actor.get_charging_manager()
+
+
+def ensure_book_charge_capacity(settings: Settings, chapter_word_counts: list[int]) -> None:
+    if settings.skip_charging:
+        return
+
+    manager = charging_manager()
+    pricing = manager.get_pricing_info()
+    if not pricing.is_pay_per_event:
+        raise ActorRunError("Production runs require Apify pay-per-event pricing")
+
+    prices = pricing.per_event_prices
+    missing = [
+        name
+        for name in ("book-started", "translation-1k-words")
+        if name not in prices
+    ]
+    if missing:
+        raise ActorRunError(
+            "Missing configured PPE event price(s): " + ", ".join(missing)
+        )
+
+    word_units = sum(max(1, math.ceil(words / 1000)) for words in chapter_word_counts)
+    required = prices["book-started"] + prices["translation-1k-words"] * word_units
+    already_charged = manager.calculate_total_charged_amount()
+    remaining = pricing.max_total_charge_usd - already_charged
+    if required > remaining:
+        raise ActorRunError(
+            f"Run max charge is too low for the full book: "
+            f"required=${required}, remaining=${remaining}"
+        )
+
+
+async def charge_book_start(settings: Settings) -> None:
     if settings.skip_charging:
         return
     result = await Actor.charge(event_name="book-started")
     charged = int(getattr(result, "charged_count", 0))
-    if charged < 1 or bool(getattr(result, "event_charge_limit_reached", False)):
-        raise ActorRunError("Run charge limit is insufficient to start this translation")
+    if charged < 1:
+        raise ActorRunError("The book-started event could not be charged")
 
 
-async def reserve_chapter_charge(settings: Settings, source_words: int) -> int:
+def ensure_chapter_charge_capacity(settings: Settings, source_words: int) -> int:
     units = max(1, math.ceil(source_words / 1000))
     if settings.skip_charging:
         return units
-    result = await Actor.charge(event_name="translation-1k-words", count=units)
-    charged = int(getattr(result, "charged_count", 0))
-    if charged < units or bool(getattr(result, "event_charge_limit_reached", False)):
+    manager = charging_manager()
+    available = manager.calculate_max_event_charge_count_within_limit(
+        "translation-1k-words"
+    )
+    if available is not None and available < units:
         raise ActorRunError(
-            f"Run charge limit is insufficient for the next chapter: required units={units}, charged={charged}"
+            f"Run charge limit cannot cover the next chapter: "
+            f"required units={units}, available={available}"
         )
     return units
+
+
+async def charge_completed_chapter(settings: Settings, units: int) -> None:
+    if settings.skip_charging:
+        return
+    result = await Actor.charge(event_name="translation-1k-words", count=units)
+    charged = int(getattr(result, "charged_count", 0))
+    if charged < units:
+        raise ActorRunError(
+            f"Reviewed chapter was saved but only {charged}/{units} billing units "
+            "could be charged; stopping to prevent unpaid additional work"
+        )
 
 
 async def translate_once(
@@ -320,7 +370,7 @@ async def process_chapter(
 ) -> dict:
     source = (book_dir / chapter["source_path"]).read_text(encoding="utf-8")
     words = word_count(source)
-    charged_units = await reserve_chapter_charge(settings, words)
+    charged_units = ensure_chapter_charge_capacity(settings, words)
 
     translation = await translate_once(
         llm,
@@ -347,12 +397,21 @@ async def process_chapter(
         )
         if review["outcome"] == "PASS":
             await run_cli("accept-review", BOOK_SLUG, str(chapter["number"]))
+            chapter_key = f"CHAPTER_{int(chapter['number']):06d}"
+            chapter_path = book_dir / chapter["translation_path"]
+            await Actor.set_value(
+                chapter_key,
+                chapter_path.read_text(encoding="utf-8"),
+                content_type="text/markdown",
+            )
+            await charge_completed_chapter(settings, charged_units)
             return {
                 "chapter": chapter["number"],
                 "words": words,
                 "chargedUnits": charged_units,
                 "reviewRounds": review_round,
                 "status": "reviewed",
+                "outputKey": chapter_key,
             }
 
         if review_round == settings.max_review_rounds:
@@ -453,8 +512,13 @@ async def main() -> None:
                     + ", ".join(map(str, oversized))
                 )
 
-            # Reserve the fixed run charge before the first paid LLM call.
-            await reserve_start_charge(settings)
+            chapter_word_counts = [
+                word_count(text) for _, text in source_texts
+            ]
+            # Confirm the user's per-run limit can cover the complete planned
+            # translation before any owner-funded LLM work begins.
+            ensure_book_charge_capacity(settings, chapter_word_counts)
+            await charge_book_start(settings)
 
             glossary = (book_dir / "glossary.md").read_text(encoding="utf-8")
             style_guide = (book_dir / "style-guide.md").read_text(encoding="utf-8")
