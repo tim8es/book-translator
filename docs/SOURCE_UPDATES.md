@@ -61,7 +61,7 @@ Classify every candidate unit as one of:
 
 Do not infer reuse from chapter number alone.
 
-Hash-identical sequential reuse is the primary automatic rule. Unique normalized titles may identify a changed unit after the exact-match pass. Ambiguous matches must not silently reuse translations or reviews.
+Hash-identical sequential reuse is the primary automatic rule. A remaining hash-identical unit may also be reused across reordering only when that hash maps uniquely on both sides. Unique normalized titles may identify a changed unit after the exact-match pass. Ambiguous matches must not silently reuse translations or reviews.
 
 ## 5. Automatic reuse boundary
 
@@ -102,6 +102,7 @@ To inspect history:
 
 ```bash
 python scripts/book.py source-revisions <book-slug> --json
+python scripts/book.py source-revisions <book-slug> --verify --json
 ```
 
 To retain evidence but reject a candidate:
