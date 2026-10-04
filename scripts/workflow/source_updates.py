@@ -394,6 +394,8 @@ def source_revision_integrity_errors(
     metadata: Mapping[str, Any],
     progress: Mapping[str, Any],
     manifest: Mapping[str, Any],
+    *,
+    deep: bool = False,
 ) -> list[str]:
     """Verify revision catalog, immutable corpus archives, and active-revision binding."""
 
@@ -455,6 +457,8 @@ def source_revision_integrity_errors(
         snapshot_units = snapshot.get("units")
         if not isinstance(snapshot_manifest, Mapping) or not isinstance(snapshot_units, list):
             errors.append(f"{revision_id}: immutable snapshot corpus metadata is invalid")
+            continue
+        if revision_id != active and not deep:
             continue
         manifest_items = snapshot_manifest.get("extracted")
         if not isinstance(manifest_items, list) or len(manifest_items) != len(snapshot_units):
