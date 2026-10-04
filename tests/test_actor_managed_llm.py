@@ -54,9 +54,11 @@ class _FakeResponse:
 class _FakeClient:
     def __init__(self):
         self.calls = 0
+        self.last_json = None
 
     async def post(self, *args, **kwargs):
         self.calls += 1
+        self.last_json = kwargs.get("json")
         return _FakeResponse()
 
     async def aclose(self):
@@ -79,6 +81,9 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(fake.calls, 1)
+        self.assertIn("max_completion_tokens", fake.last_json)
+        self.assertNotIn("max_tokens", fake.last_json)
+        self.assertNotIn("temperature", fake.last_json)
 
     async def test_reviewer_memory_is_bounded_and_sanitized(self):
         llm = ManagedLlm(
