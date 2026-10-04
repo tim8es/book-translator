@@ -74,6 +74,20 @@ python scripts/corpus.py restore <book-slug> <source-file>
 
 Do not repair missing extracted chapters one at a time. Do not substitute a later edition or same-named source whose identity differs. After restore, run structural validation and `python scripts/corpus.py verify <book-slug>` before dispatching literary work.
 
+## Source edition changes
+
+A later edition is not corpus repair. If a supplied source has a different trusted identity, follow `docs/SOURCE_UPDATES.md` instead of overwriting the active source or using `corpus.py restore`.
+
+The Orchestrator stages the complete candidate corpus and lets the workflow classify exact reuse, changed units, new units, and deletions:
+
+```bash
+python scripts/book.py update-source <book-slug> <later-source> --json
+```
+
+Reading-order `number` is not durable identity. Claims, translation acceptance, review evidence, and output provenance bind to stable `unit_id` values and exact artifact hashes. Therefore an inserted unit may renumber later units without forcing unnecessary retranslation or re-review of hash-identical work.
+
+Deletions are destructive edition changes and remain staged until explicitly approved. A pending source-promotion recovery marker blocks literary work and output until the same promotion is recovered or completed.
+
 ## Source-edition updates
 
 When a user supplies a later edition of an existing book, do not run initial extraction again and do not overwrite the active source. Load the Orchestrator's `docs/SOURCE_UPDATES.md` contract and use the source revision lifecycle.
@@ -214,8 +228,9 @@ Do not silently infer an old workspace into a supported shape. Invalid or incomp
 
 - Translation failure or failed `accept-translation` leaves the unit unadvanced.
 - `CORRECTIONS_REQUIRED` or missing/stale review evidence leaves the unit `translated`.
-- Corpus or structural failure blocks literary work.
+- Corpus, source-revision, or structural failure blocks literary work.
 - A source identity mismatch is never repaired by substituting different bytes.
+- An interrupted source promotion remains fail-closed behind its durable recovery marker; recover that transition before admitting literary work or output.
 - A later source edition is never copied over the active source; stage and promote a source revision instead.
 - A source-promotion recovery marker blocks literary mutation and output until the recorded transition is recovered.
 - A rejected compare-and-swap is replanned from a fresh read; never blindly retry a mutation.
@@ -231,7 +246,9 @@ Default Markdown build:
 python scripts/book.py build <book-slug>
 ```
 
-An unreviewed preview is allowed only when explicitly requested and clearly identified as such. EPUB/final output must be built only from canonical durable state and verified before claiming completion. Build is a pure projection: it must never translate, reconstruct missing chapters, or consult a legacy repository. Output identity includes the active source revision, so promotion makes prior output stale even when every literary unit was safely reused.
+An unreviewed preview is allowed only when explicitly requested and clearly identified as such. EPUB/final output must be built only from canonical durable state and verified before claiming completion.
+
+Assembly is a pure projection of durable state. A build operation must never translate missing text, reconstruct absent chapters, consult an obsolete workspace, or silently substitute another source. Missing current artifacts are state failures to repair before build. Generated output identity includes the active source revision, so promotion of a later edition makes prior output stale even when every literary unit was safely reusable. Build is a pure projection: it must never translate, reconstruct missing chapters, or consult a legacy repository. Output identity includes the active source revision, so promotion makes prior output stale even when every literary unit was safely reused.
 
 `STATE.md`, `FINAL_QUALITY_GATES.md`, and `REVIEW_REPORT.md` are generated projections; authoritative state remains the machine-readable records and current artifact bytes.
 
