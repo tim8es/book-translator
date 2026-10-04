@@ -49,6 +49,8 @@ Optional:
 - BOOK_TRANSLATOR_MAX_SOURCE_WORDS, default 500000
 - BOOK_TRANSLATOR_MAX_SOURCE_BYTES, default 50000000
 - BOOK_TRANSLATOR_MAX_CHAPTER_CHARS, default 60000
+- BOOK_TRANSLATOR_TRANSLATION_MAX_TOKENS, default 32000
+- BOOK_TRANSLATOR_REVIEW_MAX_TOKENS, default 8000
 - BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS, default 2
 - BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS, default 300
 - BOOK_TRANSLATOR_WORKFLOW_REVISION, default apify-managed-llm-mvp
@@ -74,7 +76,7 @@ There are two independent limits:
 1. user-side Apify max charge, enforced through PPE charge results;
 2. owner-side LLM dollar ceiling, enforced by the runtime.
 
-The LLM budget check estimates the next request before it is sent. After the response, provider-reported token usage is converted to cost. If a compatible gateway omits token usage, the conservative pre-request estimate is booked instead of assuming zero cost.
+The LLM budget check estimates the next request before it is sent. After the response, provider-reported token usage is converted to cost. If a compatible gateway omits token usage, the conservative pre-request estimate is booked instead of assuming zero cost. Any non-success finish reason (for example an output-length truncation) fails closed and is never blindly retried, so an incomplete chapter cannot enter durable translation state and the same doomed request is not paid for repeatedly.
 
 The summary records model, role, input/output tokens when available, and estimated/measured LLM cost. It never records the API key.
 
