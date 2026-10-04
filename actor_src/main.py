@@ -607,6 +607,7 @@ async def main() -> None:
                         "role": item.role,
                         "inputTokens": item.input_tokens,
                         "cachedInputTokens": item.cached_input_tokens,
+                        "cacheWriteTokens": item.cache_write_tokens,
                         "outputTokens": item.output_tokens,
                         "costUsd": round(item.cost_usd, 6),
                     }
