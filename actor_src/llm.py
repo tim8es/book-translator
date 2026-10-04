@@ -70,7 +70,6 @@ class ManagedLlm:
         model: str,
         messages: list[dict[str, str]],
         max_tokens: int,
-        temperature: float = 0.2,
     ) -> str:
         estimated = self._estimate_request_cost(messages, role, max_tokens)
         if self.spent_usd + estimated > self.limit_usd:
@@ -82,9 +81,10 @@ class ManagedLlm:
         body = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            self.settings.max_tokens_parameter: max_tokens,
         }
+        if self.settings.reasoning_effort:
+            body["reasoning_effort"] = self.settings.reasoning_effort
         last_error: Exception | None = None
         for attempt in range(3):
             try:
@@ -146,7 +146,6 @@ class ManagedLlm:
             model=self.settings.translation_model,
             messages=messages,
             max_tokens=max_tokens,
-            temperature=0.2,
         )
 
     async def review_json(self, messages: list[dict[str, str]], max_tokens: int = 8000) -> dict:
@@ -155,7 +154,6 @@ class ManagedLlm:
             model=self.settings.review_model,
             messages=messages,
             max_tokens=max_tokens,
-            temperature=0.0,
         )
         cleaned = raw.strip()
         fence = chr(96) * 3
