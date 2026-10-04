@@ -17,6 +17,10 @@ class LlmBudgetExceeded(LlmError):
     pass
 
 
+class LlmNonRetryableError(LlmError):
+    pass
+
+
 @dataclass
 class LlmUsage:
     model: str
@@ -93,7 +97,13 @@ class ManagedLlm:
                 )
                 response.raise_for_status()
                 payload = response.json()
-                content = payload["choices"][0]["message"]["content"]
+                choice = payload["choices"][0]
+                finish_reason = choice.get("finish_reason")
+                if finish_reason not in {None, "stop"}:
+                    raise LlmNonRetryableError(
+                        f"LLM stopped before a complete artifact: finish_reason={finish_reason}"
+                    )
+                content = choice["message"]["content"]
                 usage = payload.get("usage") or {}
                 input_tokens = int(
                     usage.get("prompt_tokens")
@@ -131,7 +141,7 @@ class ManagedLlm:
                 if not isinstance(content, str) or not content.strip():
                     raise LlmError("LLM returned empty content")
                 return content.strip()
-            except LlmBudgetExceeded:
+            except (LlmBudgetExceeded, LlmNonRetryableError):
                 raise
             except (httpx.HTTPError, KeyError, TypeError, ValueError, LlmError) as exc:
                 last_error = exc
@@ -140,20 +150,20 @@ class ManagedLlm:
                 await asyncio.sleep(2 ** attempt)
         raise LlmError(f"LLM request failed after retries: {last_error}")
 
-    async def translation(self, messages: list[dict[str, str]], max_tokens: int = 16000) -> str:
+    async def translation(self, messages: list[dict[str, str]]) -> str:
         return await self.complete(
             role="translation",
             model=self.settings.translation_model,
             messages=messages,
-            max_tokens=max_tokens,
+            max_tokens=self.settings.translation_max_tokens,
         )
 
-    async def review_json(self, messages: list[dict[str, str]], max_tokens: int = 8000) -> dict:
+    async def review_json(self, messages: list[dict[str, str]]) -> dict:
         raw = await self.complete(
             role="review",
             model=self.settings.review_model,
             messages=messages,
-            max_tokens=max_tokens,
+            max_tokens=self.settings.review_max_tokens,
         )
         cleaned = raw.strip()
         fence = chr(96) * 3
