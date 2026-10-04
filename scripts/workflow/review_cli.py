@@ -146,7 +146,7 @@ def _require_current_translation_acceptance(
         raise ReviewCliError(
             f"chapter {chapter_number} requires current translation_acceptance evidence before review"
         )
-    expected_unit = f"chapter-{chapter_number:06d}"
+    expected_unit = unit_id_for_chapter(chapter)
     if evidence.get("unit_id") != expected_unit:
         raise ReviewCliError(
             f"chapter {chapter_number} translation_acceptance unit identity is invalid"
