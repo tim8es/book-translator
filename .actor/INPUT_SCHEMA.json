@@ -1,0 +1,64 @@
+{
+  "title": "Book Translator input",
+  "description": "Upload one supported book and choose the target language. The LLM credentials and model selection are controlled by the Actor owner.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "bookFiles": {
+      "title": "Book file",
+      "type": "array",
+      "description": "Upload one EPUB, HTML/XHTML, Markdown, or TXT book.",
+      "editor": "fileupload",
+      "minItems": 0,
+      "maxItems": 1
+    },
+    "sourceUrl": {
+      "title": "Book URL",
+      "type": "string",
+      "description": "Alternative to file upload: a direct HTTP(S) URL to the source book.",
+      "editor": "textfield"
+    },
+    "targetLanguage": {
+      "title": "Target language",
+      "type": "string",
+      "description": "Target language name or code, for example Russian or ru.",
+      "editor": "textfield",
+      "default": "Russian"
+    },
+    "sourceLanguage": {
+      "title": "Source language",
+      "type": "string",
+      "description": "Optional override. Leave empty to use source metadata or unknown.",
+      "editor": "textfield"
+    },
+    "title": {
+      "title": "Book title",
+      "type": "string",
+      "description": "Optional metadata override.",
+      "editor": "textfield"
+    },
+    "author": {
+      "title": "Author",
+      "type": "string",
+      "description": "Optional metadata override.",
+      "editor": "textfield"
+    },
+    "outputFormat": {
+      "title": "Output format",
+      "type": "string",
+      "description": "Build EPUB, Markdown, or both after every chapter has current PASS review evidence.",
+      "editor": "select",
+      "default": "epub",
+      "enum": ["epub", "markdown", "both"],
+      "enumTitles": ["EPUB", "Markdown", "EPUB + Markdown"]
+    },
+    "maxLlmCostUsd": {
+      "title": "Optional LLM cost ceiling",
+      "type": "integer",
+      "description": "Optional lower ceiling for this run in whole USD. The owner-level hard ceiling still applies.",
+      "default": 0,
+      "minimum": 0
+    }
+  },
+  "required": ["targetLanguage"]
+}
