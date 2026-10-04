@@ -43,6 +43,8 @@ Optional:
 
 - BOOK_TRANSLATOR_LLM_BASE_URL, default https://api.openai.com/v1
 - BOOK_TRANSLATOR_REVIEW_MODEL, default same as translation model
+- BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER, default max_completion_tokens; set max_tokens for older OpenAI-compatible gateways
+- BOOK_TRANSLATOR_REASONING_EFFORT, optional; forwarded as reasoning_effort when configured
 - BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN, default 20
 - BOOK_TRANSLATOR_MAX_SOURCE_WORDS, default 500000
 - BOOK_TRANSLATOR_MAX_SOURCE_BYTES, default 50000000
@@ -52,7 +54,7 @@ Optional:
 - BOOK_TRANSLATOR_WORKFLOW_REVISION, default apify-managed-llm-mvp
 - BOOK_TRANSLATOR_SKIP_CHARGING=true for local/development tests only
 
-The runtime currently targets an OpenAI-compatible chat-completions endpoint so the model provider can be changed without exposing that choice to the user.
+The runtime currently targets an OpenAI-compatible chat-completions endpoint so the model provider can be changed without exposing that choice to the user. It does not send temperature by default, which keeps it compatible with modern reasoning models. The output-token parameter is owner-configurable because current providers differ between max_completion_tokens and legacy max_tokens.
 
 ## Apify monetization contract
 
