@@ -47,6 +47,7 @@ class Settings:
     review_output_usd_per_m: float
     max_llm_cost_usd: float
     max_source_words: int
+    max_source_bytes: int
     max_chapter_chars: int
     max_review_rounds: int
     request_timeout_seconds: int
@@ -67,6 +68,7 @@ class Settings:
             review_output_usd_per_m=_float("BOOK_TRANSLATOR_REVIEW_OUTPUT_USD_PER_1M", 0.0),
             max_llm_cost_usd=_float("BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN", 20.0),
             max_source_words=_int("BOOK_TRANSLATOR_MAX_SOURCE_WORDS", 500_000),
+            max_source_bytes=_int("BOOK_TRANSLATOR_MAX_SOURCE_BYTES", 50_000_000),
             max_chapter_chars=_int("BOOK_TRANSLATOR_MAX_CHAPTER_CHARS", 60_000),
             max_review_rounds=max(1, _int("BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS", 2)),
             request_timeout_seconds=max(30, _int("BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS", 300)),
