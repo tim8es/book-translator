@@ -367,13 +367,24 @@ async def main() -> None:
             if not chapters:
                 raise ActorRunError("No translatable chapters were extracted")
 
-            total_words = sum(
-                word_count((book_dir / chapter["source_path"]).read_text(encoding="utf-8"))
+            source_texts = [
+                (chapter, (book_dir / chapter["source_path"]).read_text(encoding="utf-8"))
                 for chapter in chapters
-            )
+            ]
+            total_words = sum(word_count(text) for _, text in source_texts)
             if total_words > settings.max_source_words:
                 raise ActorRunError(
                     f"Source exceeds owner safety limit: {total_words} words > {settings.max_source_words}"
+                )
+            oversized = [
+                chapter["number"]
+                for chapter, text in source_texts
+                if len(text) > settings.max_chapter_chars
+            ]
+            if oversized:
+                raise ActorRunError(
+                    "Chapter context exceeds the current safe MVP limit before chunking support: "
+                    + ", ".join(map(str, oversized))
                 )
 
             # Reserve the fixed run charge before the first paid LLM call.
