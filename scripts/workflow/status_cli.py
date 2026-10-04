@@ -269,6 +269,8 @@ def register_status_commands(
     """Register explicit-source overrides, status/resume, and finalize orchestration."""
 
     register_source_overrides(subparsers, root, error_factory=error_factory)
+    from .source_update_cli import register_source_update_commands
+    register_source_update_commands(subparsers, root, error_factory=error_factory)
     resolved_preflight = preflight or (lambda slug: default_preflight(root, slug))
 
     status = subparsers.add_parser("status", help="Report repository-authoritative workflow status.")
