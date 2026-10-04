@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -60,6 +61,39 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         text = "\n\n".join(f"# {title}\n\n{body}" for title, body in chapters) + "\n"
         path.write_text(text, encoding="utf-8")
         return path
+
+    def make_epub(self, name, chapters):
+        path = self.repo / name
+        manifest = "\n".join(
+            f'<item id="c{i}" href="chapter{i}.xhtml" media-type="application/xhtml+xml"/>'
+            for i in range(1, len(chapters) + 1)
+        )
+        spine = "\n".join(f'<itemref idref="c{i}"/>' for i in range(1, len(chapters) + 1))
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr(
+                "META-INF/container.xml",
+                '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                'media-type="application/oebps-package+xml"/></rootfiles></container>',
+            )
+            zf.writestr(
+                "OEBPS/content.opf",
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                '<dc:title>Revision Test</dc:title><dc:creator>Author</dc:creator>'
+                '<dc:language>en</dc:language></metadata>'
+                f'<manifest>{manifest}</manifest><spine>{spine}</spine></package>',
+            )
+            for i, (title, body) in enumerate(chapters, 1):
+                zf.writestr(
+                    f"OEBPS/chapter{i}.xhtml",
+                    f'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                    f'<h1>{title}</h1><p>{body}</p></body></html>',
+                )
+        return path
+
 
     def initialize(self):
         source = self.make_source("book.md", [("One", "Alpha."), ("Two", "Beta.")])
@@ -353,6 +387,31 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in after["chapters"]], ["Two", "One"])
         self.assertEqual(after["chapters"][0]["unit_id"], ids["Two"])
         self.assertEqual(after["chapters"][1]["unit_id"], ids["One"])
+
+
+    def test_epub_later_edition_reuses_unchanged_spine_units(self):
+        source = self.make_epub("book.epub", [("One", "Alpha."), ("Two", "Beta.")])
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+        before = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        ids = {item["title"]: item["unit_id"] for item in before["chapters"]}
+
+        updated = self.make_epub(
+            "book-v2.epub",
+            [("One", "Alpha."), ("Two", "Beta."), ("Three", "Gamma.")],
+        )
+        payload = json.loads(
+            self.run_cli("update-source", "sample", str(updated), "--json").stdout
+        )
+        self.assertEqual(payload["delta"], {"changed": 0, "deleted": 0, "new": 1, "unchanged": 2})
+
+        after = json.loads(
+            (self.repo / "books" / "sample" / "progress.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(after["chapters"][0]["unit_id"], ids["One"])
+        self.assertEqual(after["chapters"][1]["unit_id"], ids["Two"])
+        self.assertEqual(after["chapters"][2]["status"], "extracted")
 
 
 if __name__ == "__main__":
