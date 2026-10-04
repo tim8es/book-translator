@@ -78,13 +78,26 @@ class ClaimLifecycleResult:
 
 
 def canonical_unit_id(number: int) -> str:
-    """Return the stable Workflow unit ID for one chapter number."""
+    """Return the legacy/default Workflow unit ID for one reading-order number."""
 
     if type(number) is not int or not 1 <= number <= MAX_CHAPTER_NUMBER:
         raise InvalidClaimSelector(
             f"chapter number must be an integer from 1 to {MAX_CHAPTER_NUMBER}"
         )
     return f"chapter-{number:06d}"
+
+
+def unit_id_for_chapter(chapter: Mapping[str, Any]) -> str:
+    """Resolve a stable unit identity, falling back for pre-revision workspaces."""
+
+    if not isinstance(chapter, Mapping):
+        raise InvalidClaimSelector("chapter record must be an object")
+    explicit = chapter.get("unit_id")
+    if explicit is not None:
+        if not isinstance(explicit, str) or not re.fullmatch(r"chapter-[0-9]{6}", explicit):
+            raise InvalidClaimSelector(f"invalid stable unit_id {explicit!r}")
+        return explicit
+    return canonical_unit_id(chapter.get("number"))
 
 
 def resolve_selector(progress: Mapping[str, Any], selector: str) -> list[str]:
@@ -96,7 +109,7 @@ def resolve_selector(progress: Mapping[str, Any], selector: str) -> list[str]:
     if not isinstance(chapters, list):
         raise InvalidClaimSelector("progress state must contain a chapters array")
 
-    available: set[int] = set()
+    available: dict[int, str] = {}
     for index, chapter in enumerate(chapters):
         if not isinstance(chapter, Mapping):
             raise InvalidClaimSelector(f"progress chapter {index + 1} must be an object")
@@ -107,7 +120,7 @@ def resolve_selector(progress: Mapping[str, Any], selector: str) -> list[str]:
             )
         if number in available:
             raise InvalidClaimSelector(f"progress contains duplicate chapter number {number}")
-        available.add(number)
+        available[number] = unit_id_for_chapter(chapter)
 
     if not isinstance(selector, str):
         raise InvalidClaimSelector("selector must be a string")
@@ -130,7 +143,7 @@ def resolve_selector(progress: Mapping[str, Any], selector: str) -> list[str]:
         joined = ", ".join(str(number) for number in missing)
         raise InvalidClaimSelector(f"selector references missing chapter(s): {joined}")
 
-    return [canonical_unit_id(number) for number in requested]
+    return [available[number] for number in requested]
 
 
 def _claim_path(unit_id: str) -> str:
