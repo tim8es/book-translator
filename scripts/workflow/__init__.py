@@ -11,6 +11,7 @@ from .claims import (
     ClaimRollbackError,
     InvalidClaimSelector,
     canonical_unit_id,
+    unit_id_for_chapter,
     resolve_selector,
 )
 from .filesystem import FilesystemStorage
@@ -98,6 +99,7 @@ __all__ = [
     "UnsupportedSchemaVersion",
     "WorkflowStateRepository",
     "canonical_unit_id",
+    "unit_id_for_chapter",
     "parse_document",
     "patch_text",
     "resolve_selector",
