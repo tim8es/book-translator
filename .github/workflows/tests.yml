@@ -21,12 +21,12 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
-
       - name: Install Actor runtime dependencies
         if: ${{ matrix.python-version == '3.12' }}
         run: python -m pip install -r requirements-actor.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
       - name: Compile Actor runtime
         if: ${{ matrix.python-version == '3.12' }}
         run: python -m compileall -q actor_src scripts
