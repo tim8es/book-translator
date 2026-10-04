@@ -438,6 +438,8 @@ def source_revision_integrity_errors(
         if not isinstance(entry, Mapping) or entry.get("state") == "discarded":
             continue
         revision_id = str(entry.get("revision_id"))
+        if not deep and revision_id != active:
+            continue
         snapshot_path = entry.get("snapshot_path")
         if not isinstance(snapshot_path, str):
             errors.append(f"{revision_id}: immutable snapshot path is invalid")
