@@ -42,3 +42,6 @@ jobs:
       - name: Load workflow CLI
         if: ${{ matrix.python-version == '3.12' }}
         run: python scripts/book.py --help >/dev/null
+      - name: Build Actor Docker image
+        if: ${{ matrix.python-version == '3.12' }}
+        run: docker build --tag book-translator-actor:ci .
