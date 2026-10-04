@@ -174,6 +174,45 @@ def word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
 
 
+def _markdown_cell(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().replace("|", "\\|")
+
+
+def apply_literary_memory(book_dir: Path, review: dict) -> None:
+    glossary_path = book_dir / "glossary.md"
+    glossary = glossary_path.read_text(encoding="utf-8")
+    rows: list[str] = []
+    for item in review.get("glossary_additions") or []:
+        row = (
+            f"| {_markdown_cell(item['original'])} | "
+            f"{_markdown_cell(item['translation'])} | "
+            f"{_markdown_cell(item.get('type', 'term'))} | "
+            f"{_markdown_cell(item.get('notes', ''))} |"
+        )
+        if row not in glossary:
+            rows.append(row)
+    if rows:
+        glossary = glossary.rstrip() + "\n" + "\n".join(rows) + "\n"
+        glossary_path.write_text(glossary, encoding="utf-8")
+
+    observations = review.get("style_observations") or []
+    if observations:
+        style_path = book_dir / "style-guide.md"
+        style = style_path.read_text(encoding="utf-8")
+        heading = "## Actor observations"
+        if heading not in style:
+            style = style.rstrip() + f"\n\n{heading}\n"
+        additions = []
+        for observation in observations:
+            clean = re.sub(r"\s+", " ", str(observation)).strip()
+            bullet = f"- {clean}"
+            if clean and bullet not in style:
+                additions.append(bullet)
+        if additions:
+            style = style.rstrip() + "\n" + "\n".join(additions) + "\n"
+            style_path.write_text(style, encoding="utf-8")
+
+
 def charging_manager():
     return Actor.get_charging_manager()
 
@@ -402,6 +441,7 @@ async def process_chapter(
         )
         if review["outcome"] == "PASS":
             await run_cli("accept-review", BOOK_SLUG, str(chapter["number"]))
+            apply_literary_memory(book_dir, review)
             chapter_key = f"CHAPTER_{int(chapter['number']):06d}"
             chapter_path = book_dir / chapter["translation_path"]
             await Actor.set_value(
@@ -527,10 +567,10 @@ async def main() -> None:
             ensure_book_charge_capacity(settings, chapter_word_counts)
             await charge_book_start(settings)
 
-            glossary = (book_dir / "glossary.md").read_text(encoding="utf-8")
-            style_guide = (book_dir / "style-guide.md").read_text(encoding="utf-8")
             for index, chapter in enumerate(chapters, start=1):
                 current_chapter = int(chapter["number"])
+                glossary = (book_dir / "glossary.md").read_text(encoding="utf-8")
+                style_guide = (book_dir / "style-guide.md").read_text(encoding="utf-8")
                 await Actor.set_status_message(
                     f"Translating and reviewing chapter {index}/{len(chapters)}"
                 )
