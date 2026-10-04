@@ -458,7 +458,7 @@ def source_revision_integrity_errors(
         if not isinstance(snapshot_manifest, Mapping) or not isinstance(snapshot_units, list):
             errors.append(f"{revision_id}: immutable snapshot corpus metadata is invalid")
             continue
-        if revision_id != active and not deep:
+        if not deep:
             continue
         manifest_items = snapshot_manifest.get("extracted")
         if not isinstance(manifest_items, list) or len(manifest_items) != len(snapshot_units):
