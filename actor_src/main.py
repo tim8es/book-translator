@@ -59,16 +59,9 @@ def prepare_workflow_provenance(settings: Settings) -> None:
 
 def input_location(actor_input: dict) -> str:
     uploads = actor_input.get("bookFiles") or []
-    source_url = str(actor_input.get("sourceUrl") or "").strip()
-    if uploads and source_url:
-        raise ActorRunError("Provide either bookFiles or sourceUrl, not both")
-    if uploads:
-        if len(uploads) != 1 or not isinstance(uploads[0], str):
-            raise ActorRunError("Exactly one uploaded book is supported per run")
-        return uploads[0]
-    if source_url:
-        return source_url
-    raise ActorRunError("Upload a book or provide sourceUrl")
+    if len(uploads) != 1 or not isinstance(uploads[0], str):
+        raise ActorRunError("Exactly one uploaded book is required per run")
+    return uploads[0]
 
 
 def safe_filename(location: str) -> str:
@@ -108,6 +101,15 @@ def load_progress() -> tuple[Path, dict]:
 
 def word_count(text: str) -> int:
     return len(re.findall(r"\S+", text))
+
+
+async def reserve_start_charge(settings: Settings) -> None:
+    if settings.skip_charging:
+        return
+    result = await Actor.charge(event_name="book-started")
+    charged = int(getattr(result, "charged_count", 0))
+    if charged < 1 or bool(getattr(result, "event_charge_limit_reached", False)):
+        raise ActorRunError("Run charge limit is insufficient to start this translation")
 
 
 async def reserve_chapter_charge(settings: Settings, source_words: int) -> int:
@@ -333,9 +335,7 @@ async def main() -> None:
         settings.validate_pricing()
         prepare_workflow_provenance(settings)
 
-        user_limit = float(actor_input.get("maxLlmCostUsd") or 0)
-        llm_limit = min(settings.max_llm_cost_usd, user_limit) if user_limit > 0 else settings.max_llm_cost_usd
-        llm = ManagedLlm(settings, llm_limit)
+        llm = ManagedLlm(settings, settings.max_llm_cost_usd)
 
         try:
             await Actor.set_status_message("Preparing source")
@@ -375,6 +375,9 @@ async def main() -> None:
                 raise ActorRunError(
                     f"Source exceeds owner safety limit: {total_words} words > {settings.max_source_words}"
                 )
+
+            # Reserve the fixed run charge before the first paid LLM call.
+            await reserve_start_charge(settings)
 
             glossary = (book_dir / "glossary.md").read_text(encoding="utf-8")
             style_guide = (book_dir / "style-guide.md").read_text(encoding="utf-8")
