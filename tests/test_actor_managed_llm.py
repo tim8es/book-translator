@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 if sys.version_info < (3, 11):
     raise unittest.SkipTest("Apify SDK v4 requires Python 3.11+")
 
-from actor_src.config import Settings
+from actor_src.config import ConfigError, Settings
 from actor_src.llm import LlmBudgetExceeded, LlmNonRetryableError, ManagedLlm
 from actor_src import main as actor_main
 
@@ -19,6 +19,8 @@ def settings(**overrides):
     values = {
         "api_key": "test-secret",
         "base_url": "https://example.invalid/v1",
+        "cloudflare_access_client_id": None,
+        "cloudflare_access_client_secret": None,
         "translation_model": "translation-model",
         "review_model": "review-model",
         "max_tokens_parameter": "max_completion_tokens",
@@ -81,6 +83,23 @@ class _FakeClient:
 
 
 class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cloudflare_access_service_token_headers_are_attached(self):
+        llm = ManagedLlm(
+            settings(
+                cloudflare_access_client_id="test-client-id",
+                cloudflare_access_client_secret="test-client-secret",
+            ),
+            run_limit_usd=1.0,
+        )
+        try:
+            self.assertEqual(llm.client.headers["CF-Access-Client-Id"], "test-client-id")
+            self.assertEqual(
+                llm.client.headers["CF-Access-Client-Secret"], "test-client-secret"
+            )
+            self.assertEqual(llm.client.headers["Authorization"], "Bearer test-secret")
+        finally:
+            await llm.client.aclose()
+
     async def test_budget_breach_after_response_is_never_retried(self):
         llm = ManagedLlm(settings(), run_limit_usd=1.0)
         await llm.client.aclose()
@@ -208,12 +227,39 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(value.translation_cached_input_usd_per_m, 0.01)
         self.assertEqual(value.translation_cache_write_usd_per_m, 0.125)
         self.assertEqual(value.translation_output_usd_per_m, 0.50)
+        self.assertIsNone(value.cloudflare_access_client_id)
+        self.assertIsNone(value.cloudflare_access_client_secret)
         self.assertEqual(value.review_input_usd_per_m, 2.00)
         self.assertEqual(value.review_cached_input_usd_per_m, 0.10)
         self.assertEqual(value.review_cache_write_usd_per_m, 2.50)
         self.assertEqual(value.review_output_usd_per_m, 10.00)
         self.assertEqual(value.translation_max_tokens, 64_000)
         self.assertEqual(value.review_max_tokens, 16_000)
+
+    def test_cloudflare_access_credentials_must_be_paired_and_https(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "BOOK_TRANSLATOR_LLM_API_KEY": "test-secret",
+                "BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_ID": "test-client-id",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ConfigError, "both Cloudflare Access"):
+                Settings.from_env()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "BOOK_TRANSLATOR_LLM_API_KEY": "test-secret",
+                "BOOK_TRANSLATOR_LLM_BASE_URL": "http://gateway.example/v1",
+                "BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_ID": "test-client-id",
+                "BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_SECRET": "test-client-secret",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ConfigError, "require an HTTPS"):
+                Settings.from_env()
 
 
 class BillingGuardTests(unittest.TestCase):

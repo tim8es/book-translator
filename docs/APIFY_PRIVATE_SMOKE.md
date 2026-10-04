@@ -32,6 +32,12 @@ BOOK_TRANSLATOR_LLM_API_KEY=<secret>
 
 Mark it as **Secret** in Apify. Do not place it in GitHub, Actor input, logs, or source files.
 
+For a Cloudflare Access-protected LLM gateway, additionally set both
+`BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_ID` and
+`BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_SECRET` as **Secrets**, and set
+`BOOK_TRANSLATOR_LLM_BASE_URL` to the gateway's HTTPS `/v1` endpoint. Both Access
+values must be present together; the runtime rejects them if the base URL is not HTTPS.
+
 Current owner-side metering defaults for the selected OpenAI models are:
 
 ```text

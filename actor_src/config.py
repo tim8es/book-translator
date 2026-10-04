@@ -39,6 +39,8 @@ def _int(name: str, default: int) -> int:
 class Settings:
     api_key: str
     base_url: str
+    cloudflare_access_client_id: str | None
+    cloudflare_access_client_secret: str | None
     translation_model: str
     review_model: str
     max_tokens_parameter: str
@@ -73,9 +75,26 @@ class Settings:
                 "BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER must be max_completion_tokens or max_tokens"
             )
         reasoning_effort = os.getenv("BOOK_TRANSLATOR_REASONING_EFFORT", "high").strip() or "high"
+        base_url = os.getenv(
+            "BOOK_TRANSLATOR_LLM_BASE_URL", "https://api.openai.com/v1"
+        ).strip().rstrip("/")
+        cloudflare_access_client_id = (
+            os.getenv("BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_ID", "").strip() or None
+        )
+        cloudflare_access_client_secret = (
+            os.getenv("BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_SECRET", "").strip() or None
+        )
+        if bool(cloudflare_access_client_id) != bool(cloudflare_access_client_secret):
+            raise ConfigError(
+                "Configure both Cloudflare Access client ID and client secret, or neither"
+            )
+        if cloudflare_access_client_id and not base_url.lower().startswith("https://"):
+            raise ConfigError("Cloudflare Access credentials require an HTTPS LLM base URL")
         return cls(
             api_key=_required("BOOK_TRANSLATOR_LLM_API_KEY"),
-            base_url=os.getenv("BOOK_TRANSLATOR_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+            base_url=base_url,
+            cloudflare_access_client_id=cloudflare_access_client_id,
+            cloudflare_access_client_secret=cloudflare_access_client_secret,
             translation_model=translation_model,
             review_model=os.getenv("BOOK_TRANSLATOR_REVIEW_MODEL", "gpt-6.1-sol").strip() or "gpt-6.1-sol",
             max_tokens_parameter=max_tokens_parameter,

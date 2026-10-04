@@ -38,12 +38,16 @@ class ManagedLlm:
         self.limit_usd = min(settings.max_llm_cost_usd, run_limit_usd)
         self.spent_usd = 0.0
         self.usage: list[LlmUsage] = []
+        headers = {
+            "Authorization": f"Bearer {settings.api_key}",
+            "Content-Type": "application/json",
+        }
+        if settings.cloudflare_access_client_id and settings.cloudflare_access_client_secret:
+            headers["CF-Access-Client-Id"] = settings.cloudflare_access_client_id
+            headers["CF-Access-Client-Secret"] = settings.cloudflare_access_client_secret
         self.client = httpx.AsyncClient(
             timeout=settings.request_timeout_seconds,
-            headers={
-                "Authorization": f"Bearer {settings.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
 
     async def close(self) -> None:

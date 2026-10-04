@@ -34,6 +34,13 @@ Required:
 
 - `BOOK_TRANSLATOR_LLM_API_KEY`
 
+Optional Cloudflare Access Service Auth credentials for an Access-protected LLM gateway:
+
+- `BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_ID`
+- `BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_SECRET`
+
+Set both values as Actor Secrets, require an HTTPS `BOOK_TRANSLATOR_LLM_BASE_URL`, and configure a Cloudflare Access Service Auth policy for the gateway hostname. The Actor sends these values as Cloudflare Access headers alongside its OmniRoute Bearer API key. Never log or commit either value.
+
 Private-MVP defaults are intentionally usable without additional model configuration:
 
 - Translator model: `gpt-6-luna`
