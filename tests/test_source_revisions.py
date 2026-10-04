@@ -290,5 +290,52 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertIn("immutable corpus archive hash mismatch", result.stdout + result.stderr)
 
 
+    def test_source_promotion_marker_fails_closed_for_literary_work(self):
+        book = self.initialize()
+        marker = {
+            "schema_version": 1,
+            "book_slug": "sample",
+            "revision_id": "source-000002",
+            "parent_revision_id": "source-000001",
+            "phase": "preparing",
+            "session_id": "promotion-test",
+            "started_at": "2026-10-04T00:00:00Z",
+            "base_revisions": {
+                "metadata": "m",
+                "progress": "p",
+                "source_manifest": "s",
+                "source_revisions": "r",
+            },
+            "target_sha256": {
+                "metadata": "1" * 64,
+                "progress": "2" * 64,
+                "source_manifest": "3" * 64,
+                "source_revisions": "4" * 64,
+            },
+        }
+        workflow_dir = book / ".workflow"
+        workflow_dir.mkdir(exist_ok=True)
+        (workflow_dir / "source-promotion.json").write_text(
+            json.dumps(marker) + "\n",
+            encoding="utf-8",
+        )
+
+        claim = self.run_cli(
+            "claim",
+            "sample",
+            "1",
+            "--role",
+            "translator",
+            "--session-id",
+            "translator-blocked",
+            "--json",
+            expect=1,
+        )
+        self.assertIn("source promotion is active", claim.stderr.lower())
+
+        validation = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("source promotion recovery is pending", (validation.stdout + validation.stderr).lower())
+
+
 if __name__ == "__main__":
     unittest.main()
