@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .claims import unit_id_for_chapter
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
 from .review_report import build_review_report_snapshot, render_review_report_markdown
