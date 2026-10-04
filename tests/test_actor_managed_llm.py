@@ -11,7 +11,7 @@ if sys.version_info < (3, 11):
     raise unittest.SkipTest("Apify SDK v4 requires Python 3.11+")
 
 from actor_src.config import Settings
-from actor_src.llm import LlmBudgetExceeded, ManagedLlm
+from actor_src.llm import LlmBudgetExceeded, LlmNonRetryableError, ManagedLlm
 from actor_src import main as actor_main
 
 
@@ -31,6 +31,8 @@ def settings(**overrides):
         "max_source_words": 500_000,
         "max_source_bytes": 50_000_000,
         "max_chapter_chars": 60_000,
+        "translation_max_tokens": 32_000,
+        "review_max_tokens": 8_000,
         "max_review_rounds": 2,
         "request_timeout_seconds": 30,
         "workflow_revision": "test",
@@ -41,25 +43,32 @@ def settings(**overrides):
 
 
 class _FakeResponse:
+    def __init__(self, finish_reason=None):
+        self.finish_reason = finish_reason
+
     def raise_for_status(self):
         return None
 
     def json(self):
         return {
-            "choices": [{"message": {"content": "translated"}}],
+            "choices": [{
+                "message": {"content": "translated"},
+                "finish_reason": self.finish_reason,
+            }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 2000},
         }
 
 
 class _FakeClient:
-    def __init__(self):
+    def __init__(self, finish_reason=None):
         self.calls = 0
         self.last_json = None
+        self.finish_reason = finish_reason
 
     async def post(self, *args, **kwargs):
         self.calls += 1
         self.last_json = kwargs.get("json")
-        return _FakeResponse()
+        return _FakeResponse(self.finish_reason)
 
     async def aclose(self):
         return None
@@ -84,6 +93,28 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("max_completion_tokens", fake.last_json)
         self.assertNotIn("max_tokens", fake.last_json)
         self.assertNotIn("temperature", fake.last_json)
+
+    async def test_truncated_output_is_never_retried(self):
+        llm = ManagedLlm(
+            settings(
+                translation_output_usd_per_m=1.0,
+                max_llm_cost_usd=10.0,
+            ),
+            run_limit_usd=10.0,
+        )
+        await llm.client.aclose()
+        fake = _FakeClient(finish_reason="length")
+        llm.client = fake
+
+        with self.assertRaises(LlmNonRetryableError):
+            await llm.complete(
+                role="translation",
+                model="translation-model",
+                messages=[{"role": "user", "content": "short"}],
+                max_tokens=100,
+            )
+
+        self.assertEqual(fake.calls, 1)
 
     async def test_reviewer_memory_is_bounded_and_sanitized(self):
         llm = ManagedLlm(
