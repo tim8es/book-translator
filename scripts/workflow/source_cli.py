@@ -161,6 +161,8 @@ def manifest_integrity_errors(
                 f"Manifest path mismatch for chapter {chapter.get('number')}: expected {source_rel}, got {item.get('path')!r}"
             )
             continue
+        if item.get("unit_id") is not None and item.get("unit_id") != unit_id_for_chapter(chapter):
+            errors.append(f"Manifest unit identity mismatch for {source_rel}")
         if item.get("number") != chapter.get("number"):
             errors.append(f"Manifest chapter number mismatch for {source_rel}")
         if item.get("title") != chapter.get("title"):
