@@ -40,14 +40,30 @@ class AgentContractTests(unittest.TestCase):
                 "global": "AGENTS.md",
                 "setup": "docs/AGENT_SETUP.md",
                 "orchestration": "docs/ORCHESTRATION.md",
+                "source_updates": "docs/SOURCE_UPDATES.md",
                 "translation": "docs/TRANSLATION.md",
             },
         )
         self.assertEqual(manifest["context_profiles"]["bootstrap"], ["global", "setup"])
-        self.assertEqual(manifest["context_profiles"]["orchestrator"], ["global", "orchestration"])
+        self.assertEqual(
+            manifest["context_profiles"]["orchestrator"],
+            ["global", "orchestration", "source_updates"],
+        )
         self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation"])
         self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation"])
         self.assertNotIn("contract_read_order", manifest)
+
+    def test_source_update_contract_preserves_revision_guarantees(self):
+        text = (PROJECT_ROOT / "docs" / "SOURCE_UPDATES.md").read_text(encoding="utf-8").lower()
+        for phrase in (
+            "stable unit identity",
+            "source-revisions.json",
+            "staged_requires_decision",
+            "crash-safe promotion",
+            "reuse is allowed only",
+            "epub/markdown assembly is a pure projection",
+        ):
+            self.assertIn(phrase, text)
 
     def test_context_profiles_reference_only_declared_contracts(self):
         manifest = self.load_manifest()
@@ -66,6 +82,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("orchestration", profiles["bootstrap"])
         self.assertNotIn("setup", profiles["orchestrator"])
         self.assertNotIn("translation", profiles["orchestrator"])
+        self.assertIn("source_updates", profiles["orchestrator"])
         self.assertNotIn("setup", profiles["translator"])
         self.assertNotIn("orchestration", profiles["translator"])
         self.assertNotIn("setup", profiles["reviewer"])
