@@ -389,6 +389,156 @@ def historical_extracted_paths(repository: WorkflowStateRepository) -> set[str]:
     return result
 
 
+def source_revision_integrity_errors(
+    repository: WorkflowStateRepository,
+    metadata: Mapping[str, Any],
+    progress: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> list[str]:
+    """Verify revision catalog, immutable corpus archives, and active-revision binding."""
+
+    errors: list[str] = []
+    try:
+        catalog = repository.read(SOURCE_REVISIONS_PATH, SchemaKind.SOURCE_REVISIONS).data
+    except StorageNotFound:
+        return ["Missing source-revisions.json for current workflow book"]
+    except (StorageError, RepositoryError, SchemaError) as exc:
+        return [f"Invalid source-revisions.json: {exc}"]
+
+    source = metadata.get("source")
+    if not isinstance(source, Mapping):
+        return ["metadata.json source identity is required for source revision validation"]
+
+    active = catalog.get("active_revision")
+    if source.get("revision_id") != active:
+        errors.append("metadata.json source.revision_id disagrees with source-revisions.json active_revision")
+    active_entry: Mapping[str, Any] | None = None
+    for entry in catalog.get("revisions", []):
+        if isinstance(entry, Mapping) and entry.get("revision_id") == active:
+            active_entry = entry
+            break
+    if active_entry is None:
+        errors.append("source-revisions.json active revision entry is missing")
+    else:
+        if active_entry.get("source_sha256") != source.get("sha256"):
+            errors.append("active source revision SHA-256 disagrees with metadata.json")
+        if active_entry.get("source_sha256") != manifest.get("source_sha256"):
+            errors.append("active source revision SHA-256 disagrees with source-manifest.json")
+        if active_entry.get("source_file") != metadata.get("source_file"):
+            errors.append("active source revision filename disagrees with metadata.json")
+
+    try:
+        active_manifest_units = _manifest_by_unit(progress, manifest)
+    except SourceRevisionError as exc:
+        errors.append(str(exc))
+        active_manifest_units = []
+    active_by_unit = {item["unit_id"]: item for item in active_manifest_units}
+
+    for entry in catalog.get("revisions", []):
+        if not isinstance(entry, Mapping) or entry.get("state") == "discarded":
+            continue
+        revision_id = str(entry.get("revision_id"))
+        snapshot_path = entry.get("snapshot_path")
+        if not isinstance(snapshot_path, str):
+            errors.append(f"{revision_id}: immutable snapshot path is invalid")
+            continue
+        try:
+            snapshot = _read_json(repository, snapshot_path)
+        except SourceRevisionError as exc:
+            errors.append(str(exc))
+            continue
+        if snapshot.get("revision_id") != revision_id:
+            errors.append(f"{revision_id}: immutable snapshot revision identity mismatch")
+            continue
+
+        snapshot_manifest = snapshot.get("source_manifest")
+        snapshot_units = snapshot.get("units")
+        if not isinstance(snapshot_manifest, Mapping) or not isinstance(snapshot_units, list):
+            errors.append(f"{revision_id}: immutable snapshot corpus metadata is invalid")
+            continue
+        manifest_items = snapshot_manifest.get("extracted")
+        if not isinstance(manifest_items, list) or len(manifest_items) != len(snapshot_units):
+            errors.append(f"{revision_id}: immutable snapshot unit count mismatch")
+            continue
+        manifest_by_unit: dict[str, Mapping[str, Any]] = {}
+        for item in manifest_items:
+            if not isinstance(item, Mapping):
+                errors.append(f"{revision_id}: immutable manifest contains an invalid unit entry")
+                continue
+            unit_id = item.get("unit_id")
+            if not isinstance(unit_id, str):
+                errors.append(f"{revision_id}: immutable manifest unit identity is missing")
+                continue
+            manifest_by_unit[unit_id] = item
+
+        for unit in snapshot_units:
+            if not isinstance(unit, Mapping):
+                errors.append(f"{revision_id}: immutable snapshot contains an invalid unit record")
+                continue
+            unit_id = unit.get("unit_id")
+            archive_path = unit.get("staged_path")
+            item = manifest_by_unit.get(str(unit_id))
+            if item is None:
+                errors.append(f"{revision_id}: immutable snapshot unit {unit_id!r} is absent from manifest")
+                continue
+            if not isinstance(archive_path, str) or not archive_path:
+                errors.append(f"{revision_id}: immutable corpus archive path is missing for {unit_id}")
+                continue
+            try:
+                archived = repository.storage.read(archive_path).content
+            except StorageNotFound:
+                errors.append(f"{revision_id}: immutable corpus archive is missing: {archive_path}")
+                continue
+            except StorageError as exc:
+                errors.append(f"{revision_id}: cannot read immutable corpus archive {archive_path}: {exc}")
+                continue
+            if _sha256(archived) != item.get("sha256"):
+                errors.append(f"{revision_id}: immutable corpus archive hash mismatch: {archive_path}")
+
+        snapshot_metadata = snapshot.get("metadata")
+        if isinstance(snapshot_metadata, Mapping):
+            snapshot_source = snapshot_metadata.get("source")
+            if (
+                isinstance(snapshot_source, Mapping)
+                and snapshot_source.get("storage_mode") == "embedded"
+            ):
+                original = snapshot_source.get("original_filename")
+                if not isinstance(original, str) or not original:
+                    errors.append(f"{revision_id}: embedded source archive filename is missing")
+                else:
+                    archive_path = f"{SOURCE_REVISIONS_ROOT}/{revision_id}/source/{original}"
+                    try:
+                        archived_source = repository.storage.read(archive_path).content
+                    except StorageNotFound:
+                        errors.append(f"{revision_id}: immutable source binary is missing: {archive_path}")
+                    except StorageError as exc:
+                        errors.append(f"{revision_id}: cannot read immutable source binary {archive_path}: {exc}")
+                    else:
+                        if (
+                            len(archived_source) != snapshot_source.get("size_bytes")
+                            or _sha256(archived_source) != snapshot_source.get("sha256")
+                        ):
+                            errors.append(f"{revision_id}: immutable source binary identity mismatch")
+
+    if active_entry is not None:
+        try:
+            active_snapshot = _read_json(repository, str(active_entry.get("snapshot_path")))
+        except SourceRevisionError:
+            active_snapshot = None
+        if isinstance(active_snapshot, Mapping):
+            units = active_snapshot.get("units")
+            if isinstance(units, list):
+                snapshot_ids = {
+                    str(unit.get("unit_id"))
+                    for unit in units
+                    if isinstance(unit, Mapping) and isinstance(unit.get("unit_id"), str)
+                }
+                if snapshot_ids != set(active_by_unit):
+                    errors.append("active immutable source snapshot unit identities disagree with current corpus")
+
+    return errors
+
+
 class SourceRevisionManager:
     """Stage source editions and promote them through a fail-closed durable marker."""
 
