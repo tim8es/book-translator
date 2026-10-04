@@ -158,7 +158,7 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertNotIn("translation_acceptance", by_title["New"])
 
         reviews = json.loads(self.run_cli("reviews", "sample", "--json").stdout)
-        states = {item["chapter_number"]: item["state"] for item in reviews["chapters"]}
+        states = {item["chapter_number"]: item["state"] for item in reviews["reviews"]}
         self.assertEqual(states[1], "pass")
         self.assertEqual(states[3], "pass")
 
