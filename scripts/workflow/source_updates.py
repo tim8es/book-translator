@@ -251,6 +251,55 @@ def initialize_source_revisions(
             }
         ],
     }
+    archived_units: list[dict[str, Any]] = []
+    for chapter, entry in zip(chapters, entries):
+        unit_id = unit_id_for_chapter(chapter)
+        root_path = str(chapter["source_path"])
+        try:
+            raw = repository.storage.read(root_path).content
+        except StorageNotFound as exc:
+            raise SourceRevisionError(
+                f"cannot archive initial source unit because it is missing: {root_path}"
+            ) from exc
+        expected_sha = str(entry.get("sha256"))
+        if _sha256(raw) != expected_sha:
+            raise SourceRevisionError(
+                f"cannot archive initial source unit because its hash changed: {root_path}"
+            )
+        archive_path = (
+            f"{SOURCE_REVISIONS_ROOT}/{revision_id}/corpus/"
+            f"{int(chapter['number']):03d}-{unit_id}.md"
+        )
+        _create_or_verify(repository, archive_path, raw)
+        archived_units.append(
+            {
+                "unit_id": unit_id,
+                "number": chapter["number"],
+                "title": chapter["title"],
+                "classification": "initial",
+                "source_path": root_path,
+                "staged_path": archive_path,
+            }
+        )
+
+    if source_mode == "embedded":
+        root_source_path = f"source/{source_file}"
+        try:
+            source_raw = repository.storage.read(root_source_path).content
+        except StorageNotFound as exc:
+            raise SourceRevisionError(
+                f"cannot archive initial embedded source because it is missing: {root_source_path}"
+            ) from exc
+        if len(source_raw) != int(source["size_bytes"]) or _sha256(source_raw) != str(source["sha256"]):
+            raise SourceRevisionError(
+                "cannot archive initial embedded source because its durable identity changed"
+            )
+        initial_source_archive = (
+            f"{SOURCE_REVISIONS_ROOT}/{revision_id}/source/"
+            f"{source.get('original_filename') or source_file}"
+        )
+        _create_or_verify(repository, initial_source_archive, source_raw)
+
     snapshot = {
         "schema_version": 1,
         "revision_id": revision_id,
@@ -265,17 +314,7 @@ def initialize_source_revisions(
             "new": len(chapters),
             "deleted": 0,
         },
-        "units": [
-            {
-                "unit_id": unit_id_for_chapter(chapter),
-                "number": chapter["number"],
-                "title": chapter["title"],
-                "classification": "initial",
-                "source_path": chapter["source_path"],
-                "staged_path": None,
-            }
-            for chapter in chapters
-        ],
+        "units": archived_units,
     }
 
     _create_or_verify(repository, snapshot_path, _json_bytes(snapshot))
