@@ -125,10 +125,15 @@ async def materialize_source(location: str, settings: Settings) -> Path:
 
                     response.raise_for_status()
                     declared = response.headers.get("content-length")
-                    if declared and int(declared) > settings.max_source_bytes:
-                        raise ActorRunError(
-                            f"Source exceeds owner byte-size limit: {declared} > {settings.max_source_bytes}"
-                        )
+                    if declared:
+                        try:
+                            declared_size = int(declared)
+                        except ValueError as exc:
+                            raise ActorRunError("Remote source returned an invalid Content-Length") from exc
+                        if declared_size > settings.max_source_bytes:
+                            raise ActorRunError(
+                                f"Source exceeds owner byte-size limit: {declared_size} > {settings.max_source_bytes}"
+                            )
 
                     written = 0
                     with target.open("wb") as stream:
@@ -461,6 +466,8 @@ async def main() -> None:
         prepare_workflow_provenance(settings)
 
         llm = ManagedLlm(settings, settings.max_llm_cost_usd)
+        completed_results: list[dict] = []
+        current_chapter: int | None = None
 
         try:
             await Actor.set_status_message("Preparing source")
@@ -522,9 +529,8 @@ async def main() -> None:
 
             glossary = (book_dir / "glossary.md").read_text(encoding="utf-8")
             style_guide = (book_dir / "style-guide.md").read_text(encoding="utf-8")
-            results = []
-
             for index, chapter in enumerate(chapters, start=1):
+                current_chapter = int(chapter["number"])
                 await Actor.set_status_message(
                     f"Translating and reviewing chapter {index}/{len(chapters)}"
                 )
@@ -537,7 +543,7 @@ async def main() -> None:
                     glossary=glossary,
                     style_guide=style_guide,
                 )
-                results.append(result)
+                completed_results.append(result)
                 await Actor.push_data(result)
 
             await run_cli("validate", BOOK_SLUG)
@@ -566,5 +572,25 @@ async def main() -> None:
             await Actor.set_value("SUMMARY", summary)
             await Actor.push_data(summary)
             await Actor.set_status_message("Translation complete", is_terminal=True)
+        except Exception as exc:
+            message = re.sub(r"https?://\\S+", "<remote-url>", str(exc))
+            failure = {
+                "status": "failed",
+                "errorType": type(exc).__name__,
+                "message": message[:1000],
+                "currentChapter": current_chapter,
+                "completedChapters": [item["chapter"] for item in completed_results],
+                "llmCostUsd": round(llm.spent_usd, 6),
+                "llmCostCeilingUsd": llm.limit_usd,
+            }
+            try:
+                await Actor.set_value("SUMMARY", failure)
+                await Actor.push_data(failure)
+                await Actor.set_status_message(
+                    f"Translation failed after {len(completed_results)} reviewed chapter(s)",
+                    is_terminal=True,
+                )
+            finally:
+                raise
         finally:
             await llm.close()
