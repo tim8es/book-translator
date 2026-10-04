@@ -37,6 +37,7 @@ from workflow.patch_cli import PatchCliError, register_patch_command
 from workflow.review_cli import ReviewCliError, register_review_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
+from workflow.source_updates import historical_extracted_paths
 
 
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -596,6 +597,16 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
     if len(slugs) != len(set(slugs)):
         errors.append("Chapter slugs are not unique")
 
+    unit_ids = [
+        chapter.get("unit_id")
+        for chapter in chapters
+        if isinstance(chapter, dict) and chapter.get("unit_id") is not None
+    ]
+    if unit_ids and len(unit_ids) != len(chapters):
+        errors.append("Stable unit IDs must be present on every unit once source revisions are enabled")
+    if len(unit_ids) != len(set(unit_ids)):
+        errors.append("Stable unit IDs are not unique")
+
     referenced_extracted: set[str] = set()
     for chapter in chapters:
         if not isinstance(chapter, dict):
@@ -629,8 +640,9 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
     extracted_dir = book_dir / "extracted"
     if extracted_dir.is_dir():
         actual = {path.relative_to(book_dir).as_posix() for path in extracted_dir.glob("*.md")}
-        for path in sorted(actual - referenced_extracted):
-            errors.append(f"Extracted chapter is not referenced in progress.json: {path}")
+        historical = historical_extracted_paths(state_repository(book_dir))
+        for path in sorted(actual - referenced_extracted - historical):
+            errors.append(f"Extracted chapter is not referenced in active or historical source revisions: {path}")
         for path in sorted(referenced_extracted - actual):
             errors.append(f"progress.json references missing extracted chapter: {path}")
 
