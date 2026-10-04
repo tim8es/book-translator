@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
+import socket
 import subprocess
 import sys
 import uuid
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from apify import Actor
@@ -71,24 +73,88 @@ def safe_filename(location: str) -> str:
     return candidate or "book.epub"
 
 
-async def materialize_source(location: str) -> Path:
+async def ensure_public_remote_url(location: str) -> None:
+    parsed = urlparse(location)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ActorRunError("Uploaded file location must be an HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ActorRunError("Credentials embedded in uploaded file URLs are not allowed")
+
+    host = parsed.hostname
+    if host.lower() == "localhost":
+        raise ActorRunError("Local/private upload URLs are not allowed")
+
+    def resolve() -> list[str]:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        return sorted({item[4][0] for item in infos})
+
+    try:
+        addresses = await asyncio.to_thread(resolve)
+    except OSError as exc:
+        raise ActorRunError(f"Cannot resolve uploaded file host: {host}") from exc
+
+    if not addresses:
+        raise ActorRunError(f"Uploaded file host resolved to no addresses: {host}")
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if not ip.is_global:
+            raise ActorRunError(
+                f"Uploaded file URL resolves to a non-public address: {address}"
+            )
+
+
+async def materialize_source(location: str, settings: Settings) -> Path:
     target_dir = ROOT / ".actor-work"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / safe_filename(location)
 
     parsed = urlparse(location)
     if parsed.scheme in {"http", "https"}:
-        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            response = await client.get(location)
-            response.raise_for_status()
-            target.write_bytes(response.content)
+        current = location
+        async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+            for _ in range(6):
+                await ensure_public_remote_url(current)
+                async with client.stream("GET", current) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        redirect = response.headers.get("location")
+                        if not redirect:
+                            raise ActorRunError("Upload URL redirect has no Location header")
+                        current = urljoin(current, redirect)
+                        continue
+
+                    response.raise_for_status()
+                    declared = response.headers.get("content-length")
+                    if declared and int(declared) > settings.max_source_bytes:
+                        raise ActorRunError(
+                            f"Source exceeds owner byte-size limit: {declared} > {settings.max_source_bytes}"
+                        )
+
+                    written = 0
+                    with target.open("wb") as stream:
+                        async for chunk in response.aiter_bytes():
+                            written += len(chunk)
+                            if written > settings.max_source_bytes:
+                                raise ActorRunError(
+                                    f"Source exceeds owner byte-size limit: > {settings.max_source_bytes}"
+                                )
+                            stream.write(chunk)
+                    break
+            else:
+                raise ActorRunError("Too many redirects while fetching uploaded source")
     else:
+        if not settings.skip_charging:
+            raise ActorRunError("Local source paths are disabled in production runs")
         source = Path(location).expanduser().resolve()
         if not source.is_file():
             raise ActorRunError(f"Uploaded source cannot be resolved: {location}")
+        if source.stat().st_size > settings.max_source_bytes:
+            raise ActorRunError(
+                f"Source exceeds owner byte-size limit: {source.stat().st_size} > {settings.max_source_bytes}"
+            )
         target.write_bytes(source.read_bytes())
 
-    if target.stat().st_size == 0:
+    if not target.is_file() or target.stat().st_size == 0:
         raise ActorRunError("Source book is empty")
     return target
 
@@ -339,7 +405,7 @@ async def main() -> None:
 
         try:
             await Actor.set_status_message("Preparing source")
-            source = await materialize_source(input_location(actor_input))
+            source = await materialize_source(input_location(actor_input), settings)
             target_language = str(actor_input.get("targetLanguage") or "").strip()
             if not target_language:
                 raise ActorRunError("targetLanguage is required")
