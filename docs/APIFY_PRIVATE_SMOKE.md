@@ -14,39 +14,43 @@ Apify supports selecting a branch by adding it as the URL fragment.
 
 ## Owner environment
 
-Create the following Actor environment variables. Mark `BOOK_TRANSLATOR_LLM_API_KEY` as Secret.
+For the private smoke test, the runtime is already configured with these defaults:
+
+- Translator: `gpt-6-luna`
+- Reviewer: `gpt-6.1-sol`
+- reasoning effort: `high` for both
+- Chat Completions token parameter: `max_completion_tokens`
+- Translator max completion budget: 64,000 tokens
+- Reviewer max completion budget: 16,000 tokens
+- end-user charging: disabled by default on this private MVP branch
+
+The only required owner secret is:
 
 ```text
 BOOK_TRANSLATOR_LLM_API_KEY=<secret>
-BOOK_TRANSLATOR_LLM_BASE_URL=https://api.openai.com/v1
-
-BOOK_TRANSLATOR_TRANSLATION_MODEL=gpt-5.4-mini
-BOOK_TRANSLATOR_REVIEW_MODEL=gpt-5.4
-BOOK_TRANSLATOR_MAX_TOKENS_PARAMETER=max_completion_tokens
-
-BOOK_TRANSLATOR_TRANSLATION_INPUT_USD_PER_1M=0.75
-BOOK_TRANSLATOR_TRANSLATION_CACHED_INPUT_USD_PER_1M=0.075
-BOOK_TRANSLATOR_TRANSLATION_OUTPUT_USD_PER_1M=4.50
-BOOK_TRANSLATOR_REVIEW_INPUT_USD_PER_1M=2.50
-BOOK_TRANSLATOR_REVIEW_CACHED_INPUT_USD_PER_1M=0.25
-BOOK_TRANSLATOR_REVIEW_OUTPUT_USD_PER_1M=15.00
-
-BOOK_TRANSLATOR_MAX_LLM_COST_USD_PER_RUN=5
-BOOK_TRANSLATOR_MAX_SOURCE_WORDS=500000
-BOOK_TRANSLATOR_MAX_SOURCE_BYTES=50000000
-BOOK_TRANSLATOR_MAX_CHAPTER_CHARS=60000
-BOOK_TRANSLATOR_TRANSLATION_MAX_TOKENS=32000
-BOOK_TRANSLATOR_REVIEW_MAX_TOKENS=8000
-BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS=2
-BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS=300
-BOOK_TRANSLATOR_WORKFLOW_REVISION=apify-managed-llm-mvp
-
-BOOK_TRANSLATOR_SKIP_CHARGING=true
 ```
 
-Do not enable a reasoning effort for the first smoke test. The models default to `none`, which keeps latency and cost easier to interpret.
+Mark it as **Secret** in Apify. Do not place it in GitHub, Actor input, logs, or source files.
 
-The token prices above are owner-side metering inputs, not customer pricing. Update them whenever provider pricing changes.
+Current owner-side metering defaults for the selected OpenAI models are:
+
+```text
+gpt-6-luna:
+  input=$0.10/M
+  cached_input=$0.01/M
+  cache_write=$0.125/M
+  output=$0.50/M
+
+gpt-6.1-sol:
+  input=$2.00/M
+  cached_input=$0.10/M
+  cache_write=$2.50/M
+  output=$10.00/M
+```
+
+These rates apply to the short-context requests used by the current chapter limit. They are runtime defaults, can be overridden with owner environment variables, and must be reviewed whenever provider pricing changes.
+
+Optional overrides remain available for model IDs, reasoning effort, token prices, source limits, token budgets, timeout, workflow revision, and the owner LLM cost ceiling.
 
 ## First input
 
