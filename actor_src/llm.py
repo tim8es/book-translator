@@ -131,6 +131,8 @@ class ManagedLlm:
                 if not isinstance(content, str) or not content.strip():
                     raise LlmError("LLM returned empty content")
                 return content.strip()
+            except LlmBudgetExceeded:
+                raise
             except (httpx.HTTPError, KeyError, TypeError, ValueError, LlmError) as exc:
                 last_error = exc
                 if attempt == 2:
