@@ -1,0 +1,62 @@
+{
+  "title": "Book Translator input",
+  "description": "Upload one supported book and choose the target language. The LLM credentials and model selection are controlled by the Actor owner.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "bookFiles": {
+      "title": "Book file",
+      "type": "array",
+      "description": "Upload one EPUB, HTML/XHTML, Markdown, or TXT book. The file is processed only for this Actor run.",
+      "editor": "fileupload",
+      "minItems": 1,
+      "maxItems": 1
+    },
+    "targetLanguage": {
+      "title": "Target language",
+      "type": "string",
+      "description": "Target language name or code, for example Russian or ru.",
+      "editor": "textfield",
+      "default": "Russian"
+    },
+    "sourceLanguage": {
+      "title": "Source language",
+      "type": "string",
+      "description": "Optional override. Leave empty to use source metadata or unknown.",
+      "editor": "textfield"
+    },
+    "title": {
+      "title": "Book title",
+      "type": "string",
+      "description": "Optional metadata override.",
+      "editor": "textfield"
+    },
+    "author": {
+      "title": "Author",
+      "type": "string",
+      "description": "Optional metadata override.",
+      "editor": "textfield"
+    },
+    "outputFormat": {
+      "title": "Output format",
+      "type": "string",
+      "description": "Build EPUB, Markdown, or both after every chapter has current PASS review evidence.",
+      "editor": "select",
+      "default": "epub",
+      "enum": [
+        "epub",
+        "markdown",
+        "both"
+      ],
+      "enumTitles": [
+        "EPUB",
+        "Markdown",
+        "EPUB + Markdown"
+      ]
+    }
+  },
+  "required": [
+    "bookFiles",
+    "targetLanguage"
+  ]
+}

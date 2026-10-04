@@ -1,0 +1,9 @@
+{
+  "actorSpecification": 1,
+  "name": "book-translator-managed-llm",
+  "title": "Book Translator — Managed LLM",
+  "description": "Translate and independently review full books using the Actor owner's LLM credentials.",
+  "version": "0.1",
+  "input": "./INPUT_SCHEMA.json",
+  "output": "./OUTPUT_SCHEMA.json"
+}

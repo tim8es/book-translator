@@ -1,0 +1,25 @@
+{
+  "actorOutputSchemaVersion": 1,
+  "title": "Book Translator outputs",
+  "description": "Reviewed translation files, per-chapter recovery artifacts, and run metadata.",
+  "properties": {
+    "files": {
+      "type": "string",
+      "title": "Translation files",
+      "description": "All files produced by the run, including reviewed chapter recovery artifacts and final EPUB/Markdown when completed.",
+      "template": "{{links.apiDefaultKeyValueStoreUrl}}/keys"
+    },
+    "summary": {
+      "type": "string",
+      "title": "Run summary",
+      "description": "Completion/failure state, chapter counts, output keys, and measured or estimated owner LLM cost.",
+      "template": "{{links.apiDefaultKeyValueStoreUrl}}/records/SUMMARY"
+    },
+    "progress": {
+      "type": "string",
+      "title": "Chapter progress",
+      "description": "Machine-readable per-chapter completion records and final run summary.",
+      "template": "{{links.apiDefaultDatasetUrl}}/items"
+    }
+  }
+}
