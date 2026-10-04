@@ -23,6 +23,7 @@ from xml.etree import ElementTree as ET
 
 from workflow import (
     FilesystemStorage,
+    canonical_unit_id,
     RepositoryError,
     ReviewEvidenceError,
     ReviewLedgerManager,
@@ -455,6 +456,7 @@ def extract_command(args: argparse.Namespace) -> int:
         (book_dir / source_rel).write_text(chapter.content, encoding="utf-8")
         chapter_records.append(
             {
+                "unit_id": canonical_unit_id(number),
                 "number": number,
                 "title": chapter.title,
                 "slug": chapter_slug,
