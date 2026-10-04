@@ -27,6 +27,7 @@ class LlmUsage:
     role: str
     input_tokens: int
     cached_input_tokens: int
+    cache_write_tokens: int
     output_tokens: int
     cost_usd: float
 
@@ -48,23 +49,25 @@ class ManagedLlm:
     async def close(self) -> None:
         await self.client.aclose()
 
-    def _prices(self, role: str) -> tuple[float, float, float]:
+    def _prices(self, role: str) -> tuple[float, float, float, float]:
         if role == "translation":
             return (
                 self.settings.translation_input_usd_per_m,
                 self.settings.translation_cached_input_usd_per_m,
+                self.settings.translation_cache_write_usd_per_m,
                 self.settings.translation_output_usd_per_m,
             )
         return (
             self.settings.review_input_usd_per_m,
             self.settings.review_cached_input_usd_per_m,
+            self.settings.review_cache_write_usd_per_m,
             self.settings.review_output_usd_per_m,
         )
 
     def _estimate_request_cost(self, messages: list[dict[str, str]], role: str, max_tokens: int) -> float:
         text_chars = sum(len(item.get("content", "")) for item in messages)
         estimated_input_tokens = max(1, text_chars // 4)
-        input_price, _, output_price = self._prices(role)
+        input_price, _, _, output_price = self._prices(role)
         return (
             estimated_input_tokens * input_price / 1_000_000
             + max_tokens * output_price / 1_000_000
@@ -123,12 +126,18 @@ class ManagedLlm:
                 )
                 prompt_details = usage.get("prompt_tokens_details") or {}
                 cached_input_tokens = int(prompt_details.get("cached_tokens") or 0)
+                cache_write_tokens = int(prompt_details.get("cache_write_tokens") or 0)
                 cached_input_tokens = min(max(0, cached_input_tokens), input_tokens)
-                uncached_input_tokens = input_tokens - cached_input_tokens
-                input_price, cached_input_price, output_price = self._prices(role)
+                cache_write_tokens = min(
+                    max(0, cache_write_tokens),
+                    max(0, input_tokens - cached_input_tokens),
+                )
+                uncached_input_tokens = input_tokens - cached_input_tokens - cache_write_tokens
+                input_price, cached_input_price, cache_write_price, output_price = self._prices(role)
                 measured_cost = (
                     uncached_input_tokens * input_price / 1_000_000
                     + cached_input_tokens * cached_input_price / 1_000_000
+                    + cache_write_tokens * cache_write_price / 1_000_000
                     + output_tokens * output_price / 1_000_000
                 )
                 # Some OpenAI-compatible gateways omit usage. Never treat missing
@@ -141,6 +150,7 @@ class ManagedLlm:
                         role=role,
                         input_tokens=input_tokens,
                         cached_input_tokens=cached_input_tokens,
+                        cache_write_tokens=cache_write_tokens,
                         output_tokens=output_tokens,
                         cost_usd=cost,
                     )
