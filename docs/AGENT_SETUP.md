@@ -64,7 +64,7 @@ Do not claim that a private repository, remote, push, or cloud workspace was cre
 
 One Book Translator installation may contain **multiple books** under separate `books/<book-slug>/` workspaces.
 
-The book directory is the default durable storage boundary for one book. Each book keeps its own source, extraction, translation, metadata/provenance, progress, glossary, style guide, source-integrity state, and output.
+The book directory is the default durable storage boundary for one book. Each book keeps its own source, extraction, translation, metadata/provenance, progress, glossary, style guide, source-integrity state, source-edition revision history, and output.
 
 Do **not** require a permanent branch per book as the default storage model. Permanent per-book branches make book discovery, shared workflow updates, and beginner operation harder.
 
@@ -184,7 +184,7 @@ If the required inputs are already available, setup should continue without an e
 
 ## Helper and source-format capability
 
-`scripts/book.py` and `scripts/corpus.py` are optional command-line helpers and use only the Python standard library. When Python is available, `book.py` handles structural extraction/validation/build operations and `corpus.py` handles source-corpus sealing, SHA-256 verification, and batch recovery.
+`scripts/book.py` and `scripts/corpus.py` are optional command-line helpers and use only the Python standard library. When Python is available, `book.py` handles structural extraction/validation/build operations plus later-source revision staging/promotion, and `corpus.py` handles source-corpus sealing, SHA-256 verification, and batch recovery of the active edition.
 
 The source formats `book.py` can extract automatically are declared in `agent-manifest.json.source_formats.automatic_helper`. Formats declared in `agent_dependent` require reliable format handling by the active agent or an explicit minimal conversion/extraction step.
 
