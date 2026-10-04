@@ -4,6 +4,10 @@ Upload a book, choose the target language, and receive a reviewed translation.
 
 This Actor uses model credentials managed by the Actor owner. Users do not need to provide an LLM API key.
 
+Current private validation stack:
+- Translator: GPT-6 Luna with high reasoning;
+- Reviewer: GPT-6.1 Sol with high reasoning.
+
 ## Inputs
 
 - one EPUB, HTML/XHTML, Markdown, or TXT file;
