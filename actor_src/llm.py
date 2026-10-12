@@ -194,7 +194,14 @@ class ManagedLlm:
                 last_error = exc
                 if attempt == 2:
                     break
-                await asyncio.sleep(2 ** attempt)
+                delay = 2 ** attempt
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 503:
+                    retry_after = exc.response.headers.get("Retry-After")
+                    try:
+                        delay = max(delay, min(60.0, float(retry_after))) if retry_after else 60.0
+                    except (TypeError, ValueError):
+                        delay = 60.0
+                await asyncio.sleep(delay)
         raise LlmError(f"LLM request failed after retries: {last_error}")
 
     async def translation(self, messages: list[dict[str, str]]) -> str:
