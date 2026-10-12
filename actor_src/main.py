@@ -511,6 +511,9 @@ async def main() -> None:
             target_language = str(actor_input.get("targetLanguage") or "").strip()
             if not target_language:
                 raise ActorRunError("targetLanguage is required")
+            output_format = str(actor_input.get("outputFormat") or "epub").lower().strip()
+            if output_format not in {"epub", "markdown", "both"}:
+                raise ActorRunError("outputFormat must be epub, markdown, or both")
 
             extract_args = [
                 "extract",
@@ -583,9 +586,6 @@ async def main() -> None:
                 await Actor.push_data(result)
 
             await run_cli("validate", BOOK_SLUG)
-            output_format = str(actor_input.get("outputFormat") or "epub").lower().strip()
-            if output_format not in {"epub", "markdown", "both"}:
-                raise ActorRunError("outputFormat must be epub, markdown, or both")
             output_keys = await publish_outputs(book_dir, output_format)
 
             summary = {
