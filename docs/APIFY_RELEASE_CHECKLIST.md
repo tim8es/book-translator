@@ -42,7 +42,7 @@ Run `docs/APIFY_PRIVATE_SMOKE.md` using the bundled two-chapter fixture:
 - [ ] Decide separately whether to retain the synthetic `apify-actor-start` price; if retained, include it explicitly in full-book capacity checks and all published price examples. The current code checks only the two **custom** event prices, so **leave the synthetic start price at zero for this release** unless that code is extended and tested.
 - [ ] Determine actual custom event prices from costs of real cloud runs using `docs/APIFY_PRICE_MODEL.md`.
 - [ ] Set an appropriate minimum user maximum run charge; code still preflights full-book affordability before model work.
-- [ ] Set `BOOK_TRANSLATOR_SKIP_CHARGING=false` **after** events are configured and tested with a paid account.
+- [ ] Ensure `BOOK_TRANSLATOR_SKIP_CHARGING=false` **before** any public run (the safe default); test the pricing events with a paid account.
 - [ ] Verify a paid Apify test account is charged correctly and a free plan exits before any remote file download or LLM expense, with a clear status.
 - [ ] Verify a failed review round doesn't bill an unreviewed chapter; previously completed chapters remain accessible.
 - [ ] Complete developer payout, tax, and identity-verification steps required by Apify.
