@@ -11,7 +11,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 if sys.version_info < (3, 11):
     raise unittest.SkipTest("Apify SDK v4 requires Python 3.11+")
@@ -94,6 +94,7 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
             fixture = root / "examples" / "apify-smoke-book.txt"
             self.assertTrue(fixture.is_file(), "Missing checked-in smoke fixture")
             fake_actor = FakeActor(fixture)
+            fake_actor.input["bookFiles"] = ["https://example.org/upload/book.txt"]
             created_llms = []
 
             def create_llm(settings, run_limit_usd):
@@ -105,9 +106,12 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(actor_main, "ROOT", root),
                 patch.object(actor_main, "Actor", fake_actor),
                 patch.object(actor_main, "ManagedLlm", side_effect=create_llm),
+                patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
                 patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key"}),
             ):
+                stage_source.return_value = fixture
                 await actor_main.main()
+                stage_source.assert_awaited_once()
 
             self.assertEqual(fake_actor.records["SUMMARY"]["status"], "complete")
             self.assertEqual(fake_actor.records["SUMMARY"]["chapters"], 2)
@@ -130,6 +134,31 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(created_llms[0].calls, ["translation", "review"] * 2)
             self.assertNotIn("test-only-key", str(fake_actor.records))
             self.assertNotIn("test-only-key", str(fake_actor.rows))
+
+    async def test_local_path_is_rejected_even_when_billing_disabled(self):
+        with TemporaryDirectory() as temp:
+            with patch.object(actor_main, "ROOT", Path(temp)):
+                with self.assertRaisesRegex(actor_main.ActorRunError, "local paths are not supported"):
+                    await actor_main.materialize_source("/etc/passwd", object())
+
+    async def test_invalid_output_format_fails_before_model_work(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_actor = FakeActor(root / "placeholder.txt")
+            fake_actor.input["bookFiles"] = ["https://example.org/book.txt"]
+            fake_actor.input["outputFormat"] = "pdf"
+
+            with (
+                patch.object(actor_main, "ROOT", root),
+                patch.object(actor_main, "Actor", fake_actor),
+                patch.object(actor_main, "ManagedLlm", FakeManagedLlm),
+                patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
+                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key"}),
+            ):
+                stage_source.return_value = root / "placeholder.txt"
+                with self.assertRaisesRegex(actor_main.ActorRunError, "outputFormat"):
+                    await actor_main.main()
+                self.assertEqual(fake_actor.records["SUMMARY"]["status"], "failed")
 
 
 if __name__ == "__main__":
