@@ -211,7 +211,7 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigDefaultsTests(unittest.TestCase):
-    def test_private_mvp_defaults_to_gpt6_models_high_and_no_billing(self):
+    def test_private_mvp_defaults_to_gpt6_models_high_and_billing_guard(self):
         with patch.dict(
             "os.environ",
             {"BOOK_TRANSLATOR_LLM_API_KEY": "test-secret"},
@@ -222,7 +222,7 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(value.translation_model, "gpt-6-luna")
         self.assertEqual(value.review_model, "gpt-6.1-sol")
         self.assertEqual(value.reasoning_effort, "high")
-        self.assertTrue(value.skip_charging)
+        self.assertFalse(value.skip_charging)
         self.assertEqual(value.translation_input_usd_per_m, 0.10)
         self.assertEqual(value.translation_cached_input_usd_per_m, 0.01)
         self.assertEqual(value.translation_cache_write_usd_per_m, 0.125)
