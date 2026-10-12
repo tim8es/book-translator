@@ -148,16 +148,9 @@ async def materialize_source(location: str, settings: Settings) -> Path:
             else:
                 raise ActorRunError("Too many redirects while fetching uploaded source")
     else:
-        if not settings.skip_charging:
-            raise ActorRunError("Local source paths are disabled in production runs")
-        source = Path(location).expanduser().resolve()
-        if not source.is_file():
-            raise ActorRunError(f"Uploaded source cannot be resolved: {location}")
-        if source.stat().st_size > settings.max_source_bytes:
-            raise ActorRunError(
-                f"Source exceeds owner byte-size limit: {source.stat().st_size} > {settings.max_source_bytes}"
-            )
-        target.write_bytes(source.read_bytes())
+        # Never accept untrusted filesystem paths from Actor input. The public
+        # runtime must not read arbitrary files, including when charging is off.
+        raise ActorRunError("Upload a book as an HTTP(S) file URL; local paths are not supported")
 
     if not target.is_file() or target.stat().st_size == 0:
         raise ActorRunError("Source book is empty")
@@ -590,7 +583,9 @@ async def main() -> None:
                 await Actor.push_data(result)
 
             await run_cli("validate", BOOK_SLUG)
-            output_format = str(actor_input.get("outputFormat") or "epub")
+            output_format = str(actor_input.get("outputFormat") or "epub").lower().strip()
+            if output_format not in {"epub", "markdown", "both"}:
+                raise ActorRunError("outputFormat must be epub, markdown, or both")
             output_keys = await publish_outputs(book_dir, output_format)
 
             summary = {
