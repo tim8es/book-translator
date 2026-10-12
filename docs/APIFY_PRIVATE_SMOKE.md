@@ -1,5 +1,7 @@
 # Private Apify smoke test
 
+> Private smoke automation: [Deploy beta](https://github.com/tim8es/book-translator/actions/workflows/deploy-apify-private.yml) then [Cloud smoke](https://github.com/tim8es/book-translator/actions/workflows/smoke-apify-private.yml) from GitHub Actions after setting the repository secret `APIFY_TOKEN` and the private Actor's `BOOK_TRANSLATOR_LLM_API_KEY` secret. Before testing, set `BOOK_TRANSLATOR_SKIP_CHARGING=true` explicitly on the **private** Actor; its safe default is false. The smoke workflow refuses a public Actor, checks both reviewed chapters, EPUB and Markdown, and reports measured usage metadata. It has not yet been executed against Apify.
+
 This runbook is for the `apify-managed-llm-mvp` branch. It keeps the Actor private and explicitly disables end-user charging while measuring real LLM cost and validating the full workflow.
 
 ## Source
