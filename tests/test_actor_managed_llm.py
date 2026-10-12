@@ -395,9 +395,7 @@ class ReviewerPromptCompatibilityTests(unittest.TestCase):
             glossary="",
             style_guide="",
         )
-        content = "\n".join(message["content"] for message in messages)
-
-        self.assertIn("json format", content)
+        self.assertIn("json format", messages[1]["content"])
 
 
 if __name__ == "__main__":
