@@ -49,9 +49,10 @@ def settings(**overrides):
 
 
 class _FakeResponse:
-    def __init__(self, finish_reason=None, usage=None):
+    def __init__(self, finish_reason=None, usage=None, headers=None):
         self.finish_reason = finish_reason
         self.usage = usage
+        self.headers = headers or {}
 
     def raise_for_status(self):
         return None
@@ -67,16 +68,17 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    def __init__(self, finish_reason=None, usage=None):
+    def __init__(self, finish_reason=None, usage=None, headers=None):
         self.calls = 0
         self.last_json = None
         self.finish_reason = finish_reason
         self.usage = usage
+        self.headers = headers
 
     async def post(self, *args, **kwargs):
         self.calls += 1
         self.last_json = kwargs.get("json")
-        return _FakeResponse(self.finish_reason, self.usage)
+        return _FakeResponse(self.finish_reason, self.usage, self.headers)
 
     async def aclose(self):
         return None
@@ -141,6 +143,58 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(fake.calls, 1)
+
+    async def test_omniroute_cost_and_routed_model_headers_are_used(self):
+        llm = ManagedLlm(
+            settings(
+                translation_input_usd_per_m=1.0,
+                translation_output_usd_per_m=1.0,
+            ),
+            run_limit_usd=1.0,
+        )
+        await llm.client.aclose()
+        llm.client = _FakeClient(
+            usage={"prompt_tokens": 1000, "completion_tokens": 1000},
+            headers={
+                "X-OmniRoute-Response-Cost": "0.0032109876",
+                "X-OmniRoute-Model": "provider/routed-model",
+            },
+        )
+
+        await llm.complete(
+            role="translation",
+            model="auto",
+            messages=[{"role": "user", "content": "short"}],
+            max_tokens=10,
+        )
+
+        self.assertEqual(llm.usage[0].model, "provider/routed-model")
+        self.assertAlmostEqual(llm.usage[0].cost_usd, 0.0032109876, places=10)
+        await llm.client.aclose()
+
+    async def test_omniroute_zero_cost_header_does_not_claim_unpriced_model_is_free(self):
+        llm = ManagedLlm(
+            settings(
+                translation_input_usd_per_m=2.0,
+                translation_output_usd_per_m=3.0,
+            ),
+            run_limit_usd=1.0,
+        )
+        await llm.client.aclose()
+        llm.client = _FakeClient(
+            usage={"prompt_tokens": 1000, "completion_tokens": 1000},
+            headers={"X-OmniRoute-Response-Cost": "0.0000000000"},
+        )
+
+        await llm.complete(
+            role="translation",
+            model="auto",
+            messages=[{"role": "user", "content": "short"}],
+            max_tokens=10,
+        )
+
+        self.assertAlmostEqual(llm.usage[0].cost_usd, 0.005, places=9)
+        await llm.client.aclose()
 
     async def test_cache_write_tokens_use_separate_price(self):
         llm = ManagedLlm(
