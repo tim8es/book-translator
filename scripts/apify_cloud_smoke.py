@@ -148,6 +148,7 @@ def check_artifacts(token: str, run_id: str, record: dict) -> None:
             "inputTokens": entry.get("inputTokens"),
             "outputTokens": entry.get("outputTokens"),
             "costUsd": entry.get("costUsd"),
+            "costSource": entry.get("costSource"),
         }
         for entry in (summary.get("usage") or [])
     ]
