@@ -640,6 +640,7 @@ async def main() -> None:
                         "cacheWriteTokens": item.cache_write_tokens,
                         "outputTokens": item.output_tokens,
                         "costUsd": round(item.cost_usd, 6),
+                        "costSource": item.cost_source,
                     }
                     for item in llm.usage
                 ],
