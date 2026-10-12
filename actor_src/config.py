@@ -116,9 +116,10 @@ class Settings:
             max_review_rounds=max(1, _int("BOOK_TRANSLATOR_MAX_REVIEW_ROUNDS", 2)),
             request_timeout_seconds=max(30, _int("BOOK_TRANSLATOR_LLM_TIMEOUT_SECONDS", 300)),
             workflow_revision=os.getenv("BOOK_TRANSLATOR_WORKFLOW_REVISION", "apify-managed-llm-mvp").strip(),
-            # Private-MVP default: do not bill end users until PPE pricing is calibrated.
-            # Public release must explicitly set this to false after monetization is configured.
-            skip_charging=os.getenv("BOOK_TRANSLATOR_SKIP_CHARGING", "true").lower() in {"1", "true", "yes"},
+            # Fail closed: published Actors must not silently spend owner LLM funds
+            # without customer billing. Explicitly enable unbilled execution only
+            # for owner-controlled private smoke runs.
+            skip_charging=os.getenv("BOOK_TRANSLATOR_SKIP_CHARGING", "false").lower() in {"1", "true", "yes"},
         )
 
     def validate_pricing(self) -> None:
