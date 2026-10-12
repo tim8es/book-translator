@@ -1,13 +1,13 @@
 {
-  "title": "Book Translator input",
-  "description": "Upload one supported book and choose the target language. The LLM credentials and model selection are controlled by the Actor owner.",
+  "title": "AI Book Translator input",
+  "description": "Upload one permitted EPUB, TXT, Markdown or HTML book, choose a target language, and download an independently AI-reviewed translation. Very long chapters may be rejected; PDF and DOCX are not supported.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "bookFiles": {
       "title": "Book file",
       "type": "array",
-      "description": "Upload one EPUB, HTML/XHTML, Markdown, or TXT book. The file is processed only for this Actor run.",
+      "description": "Upload one EPUB, TXT, HTML/XHTML or Markdown file. Content is processed by Apify and the operator's LLM provider. Do not upload files you are not authorized to translate.",
       "editor": "fileupload",
       "minItems": 1,
       "maxItems": 1
@@ -15,34 +15,34 @@
     "targetLanguage": {
       "title": "Target language",
       "type": "string",
-      "description": "Target language name or code, for example Russian or ru.",
+      "description": "Language to translate into (e.g. Russian, German, English).",
       "editor": "textfield",
       "default": "Russian"
     },
     "sourceLanguage": {
       "title": "Source language",
       "type": "string",
-      "description": "Optional override. Leave empty to use source metadata or unknown.",
+      "description": "Optional. Provide the source language or leave blank when unknown.",
       "editor": "textfield"
     },
     "title": {
       "title": "Book title",
       "type": "string",
-      "description": "Optional metadata override.",
+      "description": "Optional title for the assembled output.",
       "editor": "textfield"
     },
     "author": {
       "title": "Author",
       "type": "string",
-      "description": "Optional metadata override.",
+      "description": "Optional author metadata for the assembled output.",
       "editor": "textfield"
     },
     "outputFormat": {
       "title": "Output format",
       "type": "string",
-      "description": "Build EPUB, Markdown, or both after every chapter has current PASS review evidence.",
+      "description": "The Actor produces only fully reviewed books. Select EPUB, Markdown, or both.",
       "editor": "select",
-      "default": "epub",
+      "default": "both",
       "enum": [
         "epub",
         "markdown",
