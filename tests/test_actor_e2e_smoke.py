@@ -135,6 +135,31 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("test-only-key", str(fake_actor.records))
             self.assertNotIn("test-only-key", str(fake_actor.rows))
 
+    async def test_free_plan_stops_without_external_llm_cost(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_actor = FakeActor(root / "placeholder.txt")
+            fake_actor.input["bookFiles"] = ["https://example.org/book.txt"]
+            with (
+                patch.object(actor_main, "ROOT", root),
+                patch.object(actor_main, "Actor", fake_actor),
+                patch.object(actor_main, "ManagedLlm", FakeManagedLlm),
+                patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
+                patch.dict(
+                    os.environ,
+                    {
+                        "BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key",
+                        "BOOK_TRANSLATOR_SKIP_CHARGING": "false",
+                        "APIFY_USER_IS_PAYING": "false",
+                    },
+                ),
+            ):
+                await actor_main.main()
+                stage_source.assert_not_awaited()
+            self.assertEqual(fake_actor.records["SUMMARY"]["status"], "not_available")
+            self.assertEqual(fake_actor.records["SUMMARY"]["llmCostUsd"], 0.0)
+            self.assertEqual(fake_actor.rows, [])
+
     async def test_local_path_is_rejected_even_when_billing_disabled(self):
         with TemporaryDirectory() as temp:
             with patch.object(actor_main, "ROOT", Path(temp)):
