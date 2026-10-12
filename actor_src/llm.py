@@ -31,6 +31,7 @@ class LlmUsage:
     cache_write_tokens: int
     output_tokens: int
     cost_usd: float
+    cost_source: str
 
 
 class ManagedLlm:
@@ -157,9 +158,15 @@ class ManagedLlm:
                     gateway_cost = None
                 # Some OpenAI-compatible gateways omit usage. Never treat missing
                 # metering as free: reserve the conservative pre-request estimate.
-                cost = gateway_cost if gateway_cost is not None else (
-                    measured_cost if (input_tokens or output_tokens) else estimated
-                )
+                if gateway_cost is not None:
+                    cost = gateway_cost
+                    cost_source = "omniroute"
+                elif input_tokens or output_tokens:
+                    cost = measured_cost
+                    cost_source = "configured_token_rates_estimate"
+                else:
+                    cost = estimated
+                    cost_source = "preflight_estimate"
                 self.spent_usd += cost
                 self.usage.append(
                     LlmUsage(
@@ -170,6 +177,7 @@ class ManagedLlm:
                         cache_write_tokens=cache_write_tokens,
                         output_tokens=output_tokens,
                         cost_usd=cost,
+                        cost_source=cost_source,
                     )
                 )
                 if self.spent_usd > self.limit_usd:
