@@ -13,6 +13,7 @@ if sys.version_info < (3, 11):
 from actor_src.config import ConfigError, Settings
 from actor_src.llm import LlmBudgetExceeded, LlmNonRetryableError, ManagedLlm
 from actor_src import main as actor_main
+from actor_src.prompts import reviewer_messages
 
 
 def settings(**overrides):
@@ -383,6 +384,20 @@ class LiteraryMemoryTests(unittest.TestCase):
             style = (book_dir / "style-guide.md").read_text(encoding="utf-8")
             self.assertEqual(glossary.count("| John | Джон | character | Name |"), 1)
             self.assertEqual(style.count("- Narration remains terse."), 1)
+
+
+class ReviewerPromptCompatibilityTests(unittest.TestCase):
+    def test_review_prompt_names_json_mode_with_lowercase_keyword(self):
+        messages = reviewer_messages(
+            source="source",
+            translation="translation",
+            target_language="Russian",
+            glossary="",
+            style_guide="",
+        )
+        content = "\n".join(message["content"] for message in messages)
+
+        self.assertIn("json format", content)
 
 
 if __name__ == "__main__":
