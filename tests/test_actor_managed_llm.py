@@ -182,6 +182,7 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
                 sleep.assert_awaited_once_with(60.0)
         finally:
             await llm.client.aclose()
+
     async def test_omniroute_cost_and_routed_model_headers_are_used(self):
         llm = ManagedLlm(
             settings(
