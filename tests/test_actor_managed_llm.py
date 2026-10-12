@@ -1,3 +1,4 @@
+import httpx
 import json
 import sys
 import unittest
@@ -145,6 +146,42 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake.calls, 1)
 
+    async def test_503_waits_for_breaker_cooldown_before_retrying(self):
+        llm = ManagedLlm(
+            settings(translation_output_usd_per_m=1.0),
+            run_limit_usd=1.0,
+        )
+        await llm.client.aclose()
+        request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        blocked = httpx.Response(503, request=request)
+        success = httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "translated"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            headers={"X-OmniRoute-Response-Cost": "0.000001"},
+            request=request,
+        )
+        fake = SimpleNamespace(
+            post=AsyncMock(side_effect=[blocked, success]),
+            aclose=AsyncMock(),
+        )
+        llm.client = fake
+
+        try:
+            with patch("actor_src.llm.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                result = await llm.complete(
+                    role="translation",
+                    model="fast-openai",
+                    messages=[{"role": "user", "content": "short"}],
+                    max_tokens=100,
+                )
+                self.assertEqual(result, "translated")
+                self.assertEqual(fake.post.await_count, 2)
+                sleep.assert_awaited_once_with(60.0)
+        finally:
+            await llm.client.aclose()
     async def test_omniroute_cost_and_routed_model_headers_are_used(self):
         llm = ManagedLlm(
             settings(
