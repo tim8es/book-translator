@@ -37,6 +37,10 @@ jobs:
           fi
       - name: Install Apify CLI
         run: npm install --global apify-cli
+      - name: Authenticate Apify CLI
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: apify login --token "$APIFY_TOKEN"
       - name: Deploy candidate as beta build
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
