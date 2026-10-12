@@ -51,7 +51,7 @@ def reviewer_messages(
             "role": "system",
             "content": (
                 "You are the independent Reviewer role in Book Translator. Follow the contract below. "
-                "Compare source against translation. Return ONLY JSON with this exact shape: "
+                "Compare source against translation. Return ONLY a JSON object in json format with this exact shape: "
                 '{"outcome":"PASS|CORRECTIONS_REQUIRED",'
                 '"issues":[{"source":"...","problem":"...","required_fix":"..."}],'
                 '"glossary_additions":[{"original":"...","translation":"...","type":"...","notes":"..."}],'
