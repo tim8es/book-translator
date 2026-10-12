@@ -51,7 +51,7 @@ Private-MVP defaults are intentionally usable without additional model configura
 - Translator max completion budget: 64000
 - Reviewer max completion budget: 16000
 - owner LLM ceiling: $20/run
-- end-user PPE charging: disabled by default on this private branch
+- end-user PPE charging: enforced by default; private owner smoke requires explicit `BOOK_TRANSLATOR_SKIP_CHARGING=true`
 
 Current short-context metering defaults:
 
@@ -84,7 +84,7 @@ Every default can be overridden through owner-only environment variables:
 - `BOOK_TRANSLATOR_WORKFLOW_REVISION`
 - `BOOK_TRANSLATOR_SKIP_CHARGING`
 
-Before a paid/public release, `BOOK_TRANSLATOR_SKIP_CHARGING` must be explicitly set to `false` after PPE prices are configured and validated.
+Public release must keep `BOOK_TRANSLATOR_SKIP_CHARGING=false` (the safe default); do not enable owner-funded unbilled mode in public. Configure and test PPE first.
 
 The runtime currently targets the OpenAI Chat Completions endpoint. It deliberately does not send temperature. Both selected models support `reasoning_effort=high`, and the runtime records provider-reported input, cached-input, cache-write, output, and total calculated owner cost.
 
