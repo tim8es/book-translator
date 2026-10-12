@@ -135,6 +135,52 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("test-only-key", str(fake_actor.records))
             self.assertNotIn("test-only-key", str(fake_actor.rows))
 
+    async def test_signed_upload_urls_and_owner_secrets_are_redacted(self):
+        from actor_src.config import Settings
+        with patch.dict(
+            os.environ,
+            {
+                "BOOK_TRANSLATOR_LLM_API_KEY": "very-secret-api-key",
+                "BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_ID": "private-client-id",
+                "BOOK_TRANSLATOR_LLM_CLOUDFLARE_ACCESS_CLIENT_SECRET": "private-client-secret",
+            },
+        ):
+            config = Settings.from_env()
+        error = RuntimeError(
+            "Download https://api.apify.com/v2/record.txt?token=SIGNED_TOKEN "
+            "failed: very-secret-api-key private-client-id private-client-secret"
+        )
+        message = actor_main.safe_failure_message(error, config)
+        self.assertNotIn("SIGNED_TOKEN", message)
+        self.assertNotIn("very-secret-api-key", message)
+        self.assertNotIn("private-client-id", message)
+        self.assertNotIn("private-client-secret", message)
+        self.assertIn("<remote-url>", message)
+        self.assertIn("[REDACTED]", message)
+
+    async def test_failed_source_request_sanitizes_summary_and_exception(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_actor = FakeActor(root / "placeholder.txt")
+            fake_actor.input["bookFiles"] = ["https://example.org/book.txt"]
+            secret_url = "https://upload.example/book.txt?token=hidden-signed-token"
+            with (
+                patch.object(actor_main, "ROOT", root),
+                patch.object(actor_main, "Actor", fake_actor),
+                patch.object(actor_main, "ManagedLlm", FakeManagedLlm),
+                patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
+                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "hidden-provider-key"}),
+            ):
+                stage_source.side_effect = RuntimeError(
+                    f"HTTP 403 for {secret_url}; owner token hidden-provider-key"
+                )
+                with self.assertRaisesRegex(actor_main.ActorRunError, "HTTP 403") as raised:
+                    await actor_main.main()
+            self.assertEqual(fake_actor.records["SUMMARY"]["status"], "failed")
+            for value in (str(raised.exception), str(fake_actor.records["SUMMARY"])):
+                self.assertNotIn("hidden-signed-token", value)
+                self.assertNotIn("hidden-provider-key", value)
+
     async def test_free_plan_stops_without_external_llm_cost(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)
