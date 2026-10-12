@@ -267,6 +267,18 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
         await llm.client.aclose()
 
 
+    async def test_reviewer_does_not_force_provider_json_mode(self):
+        llm = ManagedLlm(settings(), run_limit_usd=1.0)
+        llm.complete = AsyncMock(return_value='{"outcome":"PASS","issues":[]}')
+
+        try:
+            result = await llm.review_json([{"role": "user", "content": "review"}])
+            self.assertEqual(result["outcome"], "PASS")
+            self.assertNotIn("response_format", llm.complete.call_args.kwargs)
+        finally:
+            await llm.client.aclose()
+
+
 class ConfigDefaultsTests(unittest.TestCase):
     def test_private_mvp_defaults_to_gpt6_models_high_and_billing_guard(self):
         with patch.dict(
