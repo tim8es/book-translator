@@ -1,6 +1,6 @@
 {
   "title": "AI Book Translator input",
-  "description": "Upload one permitted EPUB, TXT, Markdown or HTML book, choose a target language, and download an independently AI-reviewed translation. Very long chapters may be rejected; PDF and DOCX are not supported.",
+  "description": "Upload one permitted EPUB, TXT, Markdown or HTML book, choose a target language, and download an independently AI-reviewed translation. A paid Apify plan is required. Very long chapters may be rejected; PDF and DOCX are not supported.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
