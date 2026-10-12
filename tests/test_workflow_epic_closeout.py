@@ -46,10 +46,19 @@ class WorkflowEpicCloseoutContractTests(unittest.TestCase):
             orchestration,
         )
 
-    def test_only_generic_optional_ci_workflow_remains(self):
+    def test_only_generic_ci_and_explicit_manual_apify_workflows_exist(self):
         workflow_dir = PROJECT_ROOT / ".github" / "workflows"
         workflows = sorted(path.name for path in workflow_dir.glob("*.yml"))
-        self.assertEqual(workflows, ["tests.yml"])
+        allowed = {"tests.yml", "deploy-apify-private.yml", "smoke-apify-private.yml"}
+        self.assertIn("tests.yml", workflows)
+        self.assertEqual(set(workflows) - allowed, set())
+        for filename in workflows:
+            if filename == "tests.yml":
+                continue
+            source = (workflow_dir / filename).read_text(encoding="utf-8")
+            self.assertIn("workflow_dispatch:", source)
+            self.assertNotIn("  push:", source)
+            self.assertNotIn("  pull_request:", source)
 
         setup = (PROJECT_ROOT / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
         orchestration = (PROJECT_ROOT / "docs" / "ORCHESTRATION.md").read_text(
