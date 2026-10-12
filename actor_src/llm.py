@@ -211,7 +211,6 @@ class ManagedLlm:
             model=self.settings.review_model,
             messages=messages,
             max_tokens=self.settings.review_max_tokens,
-            response_format={"type": "json_object"},
         )
         cleaned = raw.strip()
         fence = chr(96) * 3
