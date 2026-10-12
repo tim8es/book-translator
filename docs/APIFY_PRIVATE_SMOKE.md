@@ -1,6 +1,6 @@
 # Private Apify smoke test
 
-This runbook is for the `apify-managed-llm-mvp` branch. It keeps the Actor private and disables end-user charging while measuring real LLM cost and validating the full workflow.
+This runbook is for the `apify-managed-llm-mvp` branch. It keeps the Actor private and explicitly disables end-user charging while measuring real LLM cost and validating the full workflow.
 
 ## Source
 
@@ -22,7 +22,7 @@ For the private smoke test, the runtime is already configured with these default
 - Chat Completions token parameter: `max_completion_tokens`
 - Translator max completion budget: 64,000 tokens
 - Reviewer max completion budget: 16,000 tokens
-- end-user charging: disabled by default on this private MVP branch
+- end-user charging: **enabled by default (fail-closed)**; set `BOOK_TRANSLATOR_SKIP_CHARGING=true` explicitly only for a private smoke
 
 The only required owner secret is:
 
