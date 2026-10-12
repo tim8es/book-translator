@@ -21,7 +21,7 @@ Please upload only content that you have the rights and authorization to transla
 4. Run the Actor. Check the dataset for chapter progress and the output tab for the finished files.
 5. Download `OUTPUT_EPUB` and/or `OUTPUT_MARKDOWN` from the run's key-value store.
 
-No manual prompting or external API key is required. You can also start runs through the Apify API or integrate them with other automations.
+No manual prompting or external API key is required. **This owner-funded LLM service currently requires a paid Apify plan.** Free-plan runs exit with an explanatory status before any external model calls. You can also start runs through the Apify API or integrate them with other automations.
 
 ## Supported file formats and limitations
 
@@ -92,7 +92,7 @@ The planned public billing model is **pay per event**:
 
 For a book with two chapters of 1,200 words and 400 words, the workflow would use **one start event and three word-unit events**. The dollar price per event is displayed by Apify Store when monetization is configured; **no fixed price is promised in this documentation**. Set the maximum run charge high enough to cover the entire book; the Actor checks the price capacity before starting paid model work.
 
-If a chapter fails review, the corresponding reviewed-chapter event is not charged. The start event, already completed chapters, and any platform usage may still be billable according to Apify's pricing settings. Avoid running lengthy books until you have checked the live per-event prices.
+**Free Apify users are not supported in this release**: they receive a no-charge, no-translation status. This protects the operator from third-party LLM expenses that free runs do not reimburse.\n\nIf a chapter fails review, the corresponding reviewed-chapter event is not charged. The start event, already completed chapters, and any platform usage may still be billable according to Apify's pricing settings. Avoid running lengthy books until you have checked the live per-event prices.
 
 ## Privacy and data retention
 
