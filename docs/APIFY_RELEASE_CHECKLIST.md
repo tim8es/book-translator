@@ -2,6 +2,17 @@
 
 Status on 2026-10-12: **source prepared; NOT publicly published; live Apify run unverified**.
 
+## Automated private deployment (manual one-click actions)
+
+To avoid entering an Apify token in ChatGPT, add it as a **GitHub Actions repository secret** named `APIFY_TOKEN`. Never commit or paste the token into an issue. The following workflows are deliberately kept on default `main` for `workflow_dispatch` but check out the isolated candidate branch:
+
+1. [Deploy private Apify beta](https://github.com/tim8es/book-translator/actions/workflows/deploy-apify-private.yml) — manually **Run workflow** to push version 0.1 with the `beta` tag; this does **not** publish the Actor publicly. Requires the GitHub secret only.
+2. Configure `BOOK_TRANSLATOR_LLM_API_KEY` and any gateway Access credentials **as Apify Actor secrets**, not in GitHub. Set `BOOK_TRANSLATOR_SKIP_CHARGING=true` for the private owner smoke only.
+3. [Run authenticated private cloud smoke](https://github.com/tim8es/book-translator/actions/workflows/smoke-apify-private.yml) — manually **Run workflow** to discover the owner's private Actor, invoke the `beta` build using the bundled two-chapter sample, and verify `SUMMARY`, Markdown, EPUB and recovery keys. Script refuses a public Actor and prints only usage metadata, never book text or credentials.
+4. Once actual costs are recorded, switch `BOOK_TRANSLATOR_SKIP_CHARGING=false`, configure custom PPE events and perform paid billing tests before Store publication.
+
+These workflows remain **unexecuted** until the owner provides account-bound secrets in the appropriate console. Workflow files alone do not establish an Apify Actor or a successful build.
+
 ## 1. Create or locate the private Actor in Apify Console
 
 - [ ] In [Apify Console](https://console.apify.com/actors), use **Development > My Actors**, create/select `book-translator-managed-llm`.
