@@ -107,7 +107,7 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(actor_main, "Actor", fake_actor),
                 patch.object(actor_main, "ManagedLlm", side_effect=create_llm),
                 patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
-                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key"}),
+                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key", "BOOK_TRANSLATOR_SKIP_CHARGING": "true"}),
             ):
                 stage_source.return_value = fixture
                 await actor_main.main()
@@ -169,7 +169,7 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(actor_main, "Actor", fake_actor),
                 patch.object(actor_main, "ManagedLlm", FakeManagedLlm),
                 patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
-                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "hidden-provider-key"}),
+                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "hidden-provider-key", "BOOK_TRANSLATOR_SKIP_CHARGING": "true"}),
             ):
                 stage_source.side_effect = RuntimeError(
                     f"HTTP 403 for {secret_url}; owner token hidden-provider-key"
@@ -224,7 +224,7 @@ class ActorEndToEndSmokeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(actor_main, "Actor", fake_actor),
                 patch.object(actor_main, "ManagedLlm", FakeManagedLlm),
                 patch.object(actor_main, "materialize_source", new_callable=AsyncMock) as stage_source,
-                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key"}),
+                patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_API_KEY": "test-only-key", "BOOK_TRANSLATOR_SKIP_CHARGING": "true"}),
             ):
                 stage_source.return_value = root / "placeholder.txt"
                 with self.assertRaisesRegex(actor_main.ActorRunError, "outputFormat"):
