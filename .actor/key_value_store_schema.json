@@ -1,0 +1,22 @@
+{
+  "actorKeyValueStoreSchemaVersion": 1,
+  "title": "Reviewed book artifacts",
+  "description": "Download the finished book, inspected chapters, and run summary.",
+  "collections": {
+    "books": {
+      "title": "Finished books",
+      "description": "Completed EPUB and Markdown exports.",
+      "keyPrefix": "OUTPUT_"
+    },
+    "chapters": {
+      "title": "Reviewed chapters",
+      "description": "Individual completed chapters available after partial failures.",
+      "keyPrefix": "CHAPTER_"
+    },
+    "summary": {
+      "title": "Run summary",
+      "description": "Status, output links, chapters, provider-token usage, and owner-side costs.",
+      "key": "SUMMARY"
+    }
+  }
+}
