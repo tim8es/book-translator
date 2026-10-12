@@ -231,8 +231,16 @@ def split_markdown(text: str, fallback_title: str) -> list[Chapter]:
     return chapters
 
 
+# Include spelled-out English chapter numbers (e.g. "Chapter One") while
+# keeping the plain-text heuristic anchored to the start of the line.
+ENGLISH_CHAPTER_NUMBERS = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred"
+)
 TXT_CHAPTER_RE = re.compile(
-    r"^\s*(?:(?:chapter|глава)\s+(?:\d+|[ivxlcdm]+)|(?:часть|part)\s+(?:\d+|[ivxlcdm]+))\b.*$",
+    rf"^\s*(?:(?:chapter|глава)\s+(?:\d+|[ivxlcdm]+|{ENGLISH_CHAPTER_NUMBERS})"
+    r"|(?:часть|part)\s+(?:\d+|[ivxlcdm]+))\b.*$",
     flags=re.IGNORECASE,
 )
 
