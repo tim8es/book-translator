@@ -1,9 +1,15 @@
 {
   "actorSpecification": 1,
   "name": "book-translator-managed-llm",
-  "title": "Book Translator — Managed LLM",
-  "description": "Translate and independently review full books using the Actor owner's LLM credentials.",
+  "title": "AI Book Translator — EPUB & Markdown",
+  "description": "Translate EPUB, TXT, Markdown, or HTML books into another language with independent AI review. Download reviewed EPUB and Markdown files.",
   "version": "0.1",
+  "buildTag": "latest",
   "input": "./INPUT_SCHEMA.json",
-  "output": "./OUTPUT_SCHEMA.json"
+  "output": "./OUTPUT_SCHEMA.json",
+  "readme": "./README.md",
+  "defaultMemoryMbytes": 512,
+  "minMemoryMbytes": 256,
+  "maxMemoryMbytes": 2048,
+  "usesStandbyMode": false
 }
