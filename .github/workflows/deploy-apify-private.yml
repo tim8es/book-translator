@@ -1,0 +1,52 @@
+name: Deploy private Apify candidate
+
+# Intentionally manual, and defined on main so GitHub exposes "Run workflow".
+# Publishes a BETA build of the isolated candidate; never toggles Store visibility.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: book-translator-apify-private-deploy
+  cancel-in-progress: false
+
+jobs:
+  private-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out candidate branch (not production main)
+        uses: actions/checkout@v4
+        with:
+          ref: apify-managed-llm-mvp
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Require Apify deploy credential
+        shell: bash
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: |
+          if [[ -z "$APIFY_TOKEN" ]]; then
+            echo "::error::Add APIFY_TOKEN as a GitHub Actions repository secret before a private deployment."
+            exit 1
+          fi
+      - name: Install Apify CLI
+        run: npm install --global apify-cli
+      - name: Deploy candidate as beta build
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: |
+          # Apify CLI creates/updates an Actor named by .actor/actor.json.
+          # The beta build tag keeps the candidate separate from "latest".
+          # No --force flag: refuse to overwrite newer remote versions.
+          apify actors push --version=0.1 --build-tag=beta
+      - name: Next release gates
+        run: |
+          echo "Private candidate submitted. Configure BOOK_TRANSLATOR_LLM_API_KEY"
+          echo "as an Apify Secret, then complete docs/APIFY_RELEASE_CHECKLIST.md."
+          echo "This workflow does not set public visibility, prices, or billing secrets."
