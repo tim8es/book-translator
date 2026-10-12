@@ -1,0 +1,41 @@
+name: Smoke-test private Apify beta
+
+# Manually invoked only after deploying beta and configuring the owner's
+# LLM API key in the PRIVATE Actor's Apify secrets.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: book-translator-apify-private-smoke
+  cancel-in-progress: false
+
+jobs:
+  cloud-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out Book Translator candidate
+        uses: actions/checkout@v4
+        with:
+          ref: apify-managed-llm-mvp
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require authenticated Apify token
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$APIFY_TOKEN" ]]; then
+            echo "::error::Add APIFY_TOKEN as a GitHub Actions repository secret."
+            exit 1
+          fi
+      - name: Run real private-cloud end-to-end smoke
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: python scripts/apify_cloud_smoke.py
