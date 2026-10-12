@@ -1,4 +1,3 @@
-import httpx
 import json
 import sys
 import unittest
@@ -10,6 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 if sys.version_info < (3, 11):
     raise unittest.SkipTest("Apify SDK v4 requires Python 3.11+")
+
+import httpx
 
 from actor_src.config import ConfigError, Settings
 from actor_src.llm import LlmBudgetExceeded, LlmNonRetryableError, ManagedLlm
