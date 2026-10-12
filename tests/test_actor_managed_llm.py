@@ -170,6 +170,7 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(llm.usage[0].model, "provider/routed-model")
         self.assertAlmostEqual(llm.usage[0].cost_usd, 0.0032109876, places=10)
+        self.assertEqual(llm.usage[0].cost_source, "omniroute")
         await llm.client.aclose()
 
     async def test_omniroute_zero_cost_header_does_not_claim_unpriced_model_is_free(self):
@@ -194,6 +195,7 @@ class ManagedLlmSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertAlmostEqual(llm.usage[0].cost_usd, 0.005, places=9)
+        self.assertEqual(llm.usage[0].cost_source, "configured_token_rates_estimate")
         await llm.client.aclose()
 
     async def test_cache_write_tokens_use_separate_price(self):
