@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import math
+import os
 import re
 import socket
 import subprocess
@@ -506,6 +507,23 @@ async def main() -> None:
         current_chapter: int | None = None
 
         try:
+            # Free-plan runs do not generate developer event revenue, but would
+            # still incur owner-funded LLM API costs. End gracefully before any
+            # input download or provider call unless this is an explicit private
+            # smoke test (skip_charging=True).
+            if not settings.skip_charging and os.getenv("APIFY_USER_IS_PAYING", "").strip().lower() not in {"true", "1"}:
+                restriction = {
+                    "status": "not_available",
+                    "message": "Paid Apify plan required for owner-funded AI translation",
+                    "llmCostUsd": 0.0,
+                    "completedChapters": [],
+                }
+                await Actor.set_value("SUMMARY", restriction)
+                await Actor.set_status_message(
+                    "This translation Actor currently requires a paid Apify plan",
+                    is_terminal=True,
+                )
+                return
             await Actor.set_status_message("Preparing source")
             source = await materialize_source(input_location(actor_input), settings)
             target_language = str(actor_input.get("targetLanguage") or "").strip()
