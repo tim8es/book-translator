@@ -29,6 +29,23 @@ class ActorRunError(RuntimeError):
     pass
 
 
+def safe_failure_message(exc: Exception, settings: Settings) -> str:
+    """Remove upload links and owner secrets before persisting or logging failures."""
+    message = str(exc)
+    # Signed upload URLs frequently contain temporary storage access tokens.
+    message = re.sub(r"""(?i)https?://[^\s<>"']+""", "<remote-url>", message)
+    # Also remove credentials when a provider unexpectedly includes them in
+    # its response body. Longest first protects overlapping secret values.
+    secrets = (
+        settings.api_key,
+        settings.cloudflare_access_client_id,
+        settings.cloudflare_access_client_secret,
+    )
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        message = message.replace(secret, "[REDACTED]")
+    return message[:1000]
+
+
 async def run_cli(*args: str) -> str:
     command = [sys.executable, str(ROOT / "scripts" / "book.py"), *args]
 
@@ -631,7 +648,7 @@ async def main() -> None:
             await Actor.push_data(summary)
             await Actor.set_status_message("Translation complete", is_terminal=True)
         except Exception as exc:
-            message = re.sub(r"https?://\\S+", "<remote-url>", str(exc))
+            message = safe_failure_message(exc, settings)
             failure = {
                 "status": "failed",
                 "errorType": type(exc).__name__,
@@ -651,6 +668,9 @@ async def main() -> None:
             except Exception:
                 # Failure reporting must never hide the original processing error.
                 pass
-            raise
+            # Let the run fail, but never allow the original exception (which
+            # can contain a signed upload URL or provider credential) to be
+            # formatted verbatim into the platform logs.
+            raise ActorRunError(f"{type(exc).__name__}: {message}") from None
         finally:
             await llm.close()
