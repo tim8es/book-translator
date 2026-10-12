@@ -1,0 +1,84 @@
+{
+  "actorSpecification": 1,
+  "title": "Translation progress",
+  "description": "One row per accepted chapter plus a final completion or failure summary.",
+  "fields": {
+    "type": "object",
+    "properties": {
+      "chapter": {
+        "type": "integer",
+        "title": "Chapter number",
+        "description": "Ordinal chapter number."
+      },
+      "words": {
+        "type": "integer",
+        "title": "Source words",
+        "description": "Number of source words in the reviewed chapter."
+      },
+      "chargedUnits": {
+        "type": "integer",
+        "title": "1,000-word units",
+        "description": "Count of word-unit events associated with the chapter; not a dollar amount."
+      },
+      "reviewRounds": {
+        "type": "integer",
+        "title": "Review rounds",
+        "description": "Number of independent review passes required."
+      },
+      "status": {
+        "type": "string",
+        "title": "Status",
+        "description": "Reviewed for chapter items; complete or failed for a summary."
+      },
+      "outputKey": {
+        "type": "string",
+        "title": "Chapter output key",
+        "description": "Key-value store key holding the reviewed translation."
+      },
+      "chapters": {
+        "type": "integer",
+        "title": "Total chapters",
+        "description": "Chapter count in a completed run."
+      },
+      "sourceWords": {
+        "type": "integer",
+        "title": "Total source words",
+        "description": "Word count across the book."
+      },
+      "outputKeys": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "title": "Output file keys",
+        "description": "Names of generated book records."
+      },
+      "llmCostUsd": {
+        "type": "number",
+        "title": "Operator LLM cost (USD)",
+        "description": "Computed model expenditure by the Actor owner, not the amount charged to the user."
+      }
+    }
+  },
+  "views": {
+    "overview": {
+      "title": "Translation progress",
+      "transformation": {
+        "fields": [
+          "chapter",
+          "status",
+          "words",
+          "reviewRounds",
+          "chargedUnits",
+          "outputKey",
+          "chapters",
+          "sourceWords",
+          "llmCostUsd"
+        ]
+      },
+      "display": {
+        "component": "table"
+      }
+    }
+  }
+}
