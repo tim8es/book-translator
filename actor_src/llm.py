@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from dataclasses import dataclass
 
 import httpx
@@ -144,13 +145,25 @@ class ManagedLlm:
                     + cache_write_tokens * cache_write_price / 1_000_000
                     + output_tokens * output_price / 1_000_000
                 )
+                gateway_cost = response.headers.get("X-OmniRoute-Response-Cost")
+                try:
+                    gateway_cost = float(gateway_cost) if gateway_cost is not None else None
+                except (TypeError, ValueError):
+                    gateway_cost = None
+                # OmniRoute uses zero for both free and unpriced models.
+                if gateway_cost is not None and (
+                    not math.isfinite(gateway_cost) or gateway_cost <= 0
+                ):
+                    gateway_cost = None
                 # Some OpenAI-compatible gateways omit usage. Never treat missing
                 # metering as free: reserve the conservative pre-request estimate.
-                cost = measured_cost if (input_tokens or output_tokens) else estimated
+                cost = gateway_cost if gateway_cost is not None else (
+                    measured_cost if (input_tokens or output_tokens) else estimated
+                )
                 self.spent_usd += cost
                 self.usage.append(
                     LlmUsage(
-                        model=model,
+                        model=response.headers.get("X-OmniRoute-Model") or model,
                         role=role,
                         input_tokens=input_tokens,
                         cached_input_tokens=cached_input_tokens,
