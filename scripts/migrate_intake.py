@@ -61,10 +61,14 @@ def spine_entries(epub: Path) -> list[dict]:
                     continue
                 entry = (PurePosixPath(opf_name).parent /
                          unquote(item.get("href", "").split("#")[0])).as_posix()
-                document = ET.fromstring(archive.read(entry))
-                blocks = sum(n.tag.split("}")[-1] in {"h1", "h2", "h3", "h4", "p"}
-                             for n in document.iter())
-                entries.append({"basename": PurePosixPath(entry).name, "blocks": blocks})
+                raw = archive.read(entry)
+                document = ET.fromstring(raw)
+                nodes = [n for n in document.iter()
+                         if n.tag.split("}")[-1].lower() in {"h1", "h2", "h3", "h4", "p"}]
+                nonempty = sum(bool("".join(n.itertext()).strip()) for n in nodes)
+                entries.append({"basename": PurePosixPath(entry).name, "blocks": len(nodes),
+                                "nonempty_blocks": nonempty,
+                                "sha256": hashlib.sha256(raw).hexdigest()})
             if not entries:
                 raise MigrationError("No readable EPUB spine units")
             return entries
@@ -177,12 +181,25 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
                 blocks = spine[pos]["blocks"]
                 if sources and any(s != spine[pos]["basename"] for s in sources):
                     problems.append("Draft source path differs from verified EPUB")
-                if method == "indexed_parts" and set(indexed) != set(range(blocks)):
-                    problems.append(f"Indexed coverage {len(indexed)}/{blocks}")
+                counts = {spine[pos]["blocks"]: "all_blocks",
+                          spine[pos]["nonempty_blocks"]: "nonempty_blocks"}
+                if method == "indexed_parts":
+                    matched = [count for count in counts if set(indexed) == set(range(count))]
+                    if not matched:
+                        problems.append(f"Indexed coverage {len(indexed)} differs from both "
+                                        f"all={spine[pos]['blocks']} and nonempty={spine[pos]['nonempty_blocks']}")
+                    else:
+                        blocks = matched[0]
                 if method == "markdown":
                     markers = [int(x) for x in INDEX.findall((book / candidate).read_text(encoding="utf-8"))]
-                    if markers and (len(markers) != len(set(markers)) or set(markers) != set(range(blocks))):
-                        problems.append(f"Markdown index coverage mismatch: {len(markers)}/{blocks}")
+                    matched = [count for count in counts if set(markers) == set(range(count))]
+                    if not markers:
+                        problems.append("Unindexed standalone Markdown requires direct source review")
+                    elif len(markers) != len(set(markers)) or not matched:
+                        problems.append(f"Markdown index coverage {len(markers)} differs from "
+                                        f"all={spine[pos]['blocks']} and nonempty={spine[pos]['nonempty_blocks']}")
+                    else:
+                        blocks = matched[0]
         if not candidate:
             problems.append("No unambiguous complete candidate")
         status = ("source_unverified" if spine is None else
@@ -192,6 +209,8 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             state["ready_candidates"] += 1
         state["chapters"].append({"chapter": number, "unit_number": unit, "status": status,
                                   "candidate": candidate, "method": method, "source_blocks": blocks,
+                                  "source_blocks_all": spine[number - 1 + offset]["blocks"] if spine is not None and offset is not None and 0 <= number - 1 + offset < len(spine) else None,
+                                  "source_blocks_nonempty": spine[number - 1 + offset]["nonempty_blocks"] if spine is not None and offset is not None and 0 <= number - 1 + offset < len(spine) else None,
                                   "indexed_blocks": len(indexed),
                                   "indexed_min": min(indexed) if indexed else None,
                                   "indexed_max": max(indexed) if indexed else None,
@@ -214,7 +233,8 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
                 else:
                     pos = matches[0]
                     afterword["unit_number"] = pos + 1
-                    if set(map(int, block_map)) != set(range(spine[pos]["blocks"])):
+                    valid_counts = {spine[pos]["blocks"], spine[pos]["nonempty_blocks"]}
+                    if not any(set(map(int, block_map)) == set(range(n)) for n in valid_counts):
                         afterword["issues"].append("Afterword coverage mismatch")
                     afterword["status"] = "needs_reconciliation" if afterword["issues"] else "candidate_unreviewed"
             state["afterword"] = afterword

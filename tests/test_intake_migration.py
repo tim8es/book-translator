@@ -50,6 +50,30 @@ class IntakeMigrationTests(unittest.TestCase):
         self.assertEqual(draft.read_bytes(), before)
         self.assertFalse((self.book / "migration-staging").exists())
 
+    def test_nonempty_source_index_coverage_is_accepted(self):
+        source = self.source()
+        # A third XHTML paragraph is empty; historical indexed drafts omit it.
+        with zipfile.ZipFile(source, "a") as archive:
+            archive.writestr("split_002.xhtml",
+                "<html><body><h1>Chapter 1</h1><p>Content</p><p>   </p></body></html>")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        (self.book / "INTAKE.md").write_text("Original EPUB SHA-256: " + digest, encoding="utf-8")
+        (self.book / "incoming/chapter-001-ru-draft.part-01.json").write_text(
+            json.dumps({"draft": {"0": "Глава 1", "1": "Текст"},
+                        "source_path": "split_002.xhtml"}), encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["chapters"][0]["status"], "candidate_unreviewed")
+        self.assertEqual(report["chapters"][0]["source_blocks_all"], 3)
+        self.assertEqual(report["chapters"][0]["source_blocks_nonempty"], 2)
+        self.assertEqual(report["chapters"][0]["source_blocks"], 2)
+
+    def test_unindexed_named_draft_is_not_accepted_as_complete(self):
+        source = self.source()
+        (self.book / "incoming/chapter-001-ru-draft.md").write_text(
+            "# Глава 1\\n\\nПохоже на полный перевод, но без индексов.\\n", encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["chapters"][0]["status"], "needs_reconciliation")
+
     def test_valid_source_sha_and_explicit_offset(self):
         source = self.source()
         draft = self.book / "incoming/chapter-001-ru-draft.md"
