@@ -32,6 +32,101 @@ def _emit(payload: Mapping[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
+
+
+def _wave_load_plan(decision: Mapping[str, object], status: Mapping[str, object],
+                    wave: Mapping[str, object], routing: Mapping[str, object]
+                    ) -> dict[str, object] | None:
+    """Return references for an admitted unit; never read chapter/memory contents."""
+    if decision.get("action") not in {"claim", "work"}:
+        return None
+    role = decision.get("role")
+    if role not in {"translator", "reviewer"}:
+        raise WaveError("wave work action requires a recognized worker role")
+    contracts = routing.get("contracts")
+    profiles = routing.get("context_profiles")
+    overlays = routing.get("context_overlays")
+    if not isinstance(contracts, Mapping) or not isinstance(profiles, Mapping) or not isinstance(overlays, Mapping):
+        raise WaveError("agent manifest lacks role-context routing")
+    wave_overlays = overlays.get("waves")
+    if not isinstance(wave_overlays, Mapping):
+        raise WaveError("agent manifest lacks active wave role overlays")
+    base = profiles.get(role)
+    overlay = wave_overlays.get(role)
+    if not isinstance(base, list) or not isinstance(overlay, list) or not overlay:
+        raise WaveError("active wave worker contracts are not configured")
+    keys = base + overlay
+    if any(not isinstance(key, str) or key not in contracts for key in keys):
+        raise WaveError("worker contract routing contains unknown document keys")
+    paths = [contracts[key] for key in keys]
+    if any(not isinstance(path, str) or
+           not (path == "AGENTS.md" or (path.startswith("docs/") and path.endswith(".md"))) or
+           ".." in path.split("/") for path in paths):
+        raise WaveError("invalid worker contract path")
+    # Distinct role contracts, in stable manifest order.
+    paths = list(dict.fromkeys(paths))
+
+    unit_id = decision["unit_id"]
+    units = [unit for unit in status["units"] if unit["unit_id"] == unit_id]
+    if len(units) != 1:
+        raise WaveError("working unit not found in verified book status")
+    unit = units[0]
+    if unit_id not in wave["unit_ids"] or unit["chapter_number"] != decision["chapter_number"]:
+        raise WaveError("working unit is not within the pinned wave")
+    context = decision["context"]
+    if (context["wave_id"] != wave["wave_id"] or
+            context["memory_revision"] != wave["memory_revision"] or
+            context["source_sha256"] != wave["source_sha256"] or
+            context["workflow_revision"] != wave["workflow_revision"] or
+            context["shared_state_revisions"] != wave["shared_state_revisions"]):
+        raise WaveError("workpack is inconsistent with the pinned wave")
+    slug = decision["book_slug"]
+    book = f"books/{slug}"
+    inputs = [
+        {"kind": "original", "path": f"{book}/{unit['source_path']}"},
+        {"kind": "glossary", "path": f"{book}/glossary.md"},
+        {"kind": "style_guide", "path": f"{book}/style-guide.md"},
+    ]
+    if role == "reviewer" or decision.get("operation") == "correct_translation":
+        inputs.extend([
+            {"kind": "translation", "path": f"{book}/{unit['translation_path']}"},
+            {"kind": "review_ledger", "path": f"{book}/review-ledger.json"},
+        ])
+    return {
+        "role": role,
+        "phase": "after_claim" if decision["action"] == "claim" else "live_claim",
+        "instruction_paths": paths,
+        "inputs": inputs,
+        "output_path": f"{book}/{unit['translation_path']}" if role == "translator" else None,
+        "memory": {
+            "snapshot_path": (f"{book}/.workflow/literary-memory/snapshots/"
+                              f"{wave['memory_revision']}.json"),
+            "revision": wave["memory_revision"],
+            "context_command": (f"python scripts/book.py memory-context {slug} "
+                                f"--unit-id {unit_id}"),
+        },
+        "pinned_revisions": {
+            "workflow": wave["workflow_revision"],
+            "source_sha256": wave["source_sha256"],
+            "glossary": wave["shared_state_revisions"]["glossary"],
+            "style_guide": wave["shared_state_revisions"]["style_guide"],
+        },
+        "source_content_included": False,
+    }
+
+
+def _read_role_routing(root: Path) -> Mapping[str, object]:
+    """Load only the selected installation's agent routing table."""
+    path = root / "agent-manifest.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise WaveError(f"cannot read pinned agent manifest: {exc}") from exc
+    if not isinstance(doc, Mapping) or doc.get("schema_version") != 3:
+        raise WaveError("unsupported pinned agent manifest")
+    return doc
+
+
 def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> None:
     """Registration avoids separate workflow authority or separate repository."""
     from .status_cli import _book_directory, _snapshot, _artifact_reader
@@ -100,6 +195,18 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                 if any(u["unit_id"] not in manifest["unit_ids"] for u in session["units"]):
                     raise WaveError("session has assignments outside the active wave")
                 result = next_action(plan, snapshot, args.session_id)
+                if result["action"] in {"claim", "work"}:
+                    try:
+                        memory = manager.memory()
+                    except WaveError as exc:
+                        raise WaveError(f"active literary memory is unavailable: {exc}") from exc
+                    if memory["revision"] != manifest["memory_revision"]:
+                        raise WaveError("active literary memory differs from pinned wave revision")
+                    result["load_plan"] = _wave_load_plan(
+                        result, snapshot, manifest, _read_role_routing(root)
+                    )
+                else:
+                    result["load_plan"] = None
             elif action == "memory-context":
                 manifest, state, _ = manager._active_state()
                 if args.unit_id not in manifest["unit_ids"]:
@@ -109,7 +216,13 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                     raise WaveError("requested unit is unavailable")
                 previous = [u["unit_id"] for u in snapshot["units"]
                             if u["chapter_number"] < entry["chapter_number"]]
-                result = context_pack(manager.memory(), unit_id=args.unit_id,
+                try:
+                    memory = manager.memory()
+                except WaveError as exc:
+                    raise WaveError(f"active literary memory is unavailable: {exc}") from exc
+                if memory["revision"] != manifest["memory_revision"]:
+                    raise WaveError("active literary memory differs from pinned wave revision")
+                result = context_pack(memory, unit_id=args.unit_id,
                                       source=reader(entry["source_path"]),
                                       budget_chars=args.budget_chars,
                                       previous_units=previous)

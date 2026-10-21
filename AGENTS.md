@@ -11,7 +11,11 @@ Role-specific rules are selected through `agent-manifest.json.context_profiles`.
 1. Read `agent-manifest.json` from the workflow revision selected for the current run or book.
 2. Identify the current role: `bootstrap`, `orchestrator`, `translator`, or `reviewer`.
 3. Load only the contract files named by that role's `context_profiles` entry from the same workflow revision.
-4. Load another role's contract only when explicitly transitioning into that role or resolving a dependency documented by the active contract.
+4. When the book has an ACTIVE literary wave, append only the current role's
+   `context_overlays.waves` contracts from the same manifest/revision. Do not
+   apply the overlay outside waves or to another role.
+5. Load another role's contract only when explicitly transitioning into that role
+   or resolving a dependency documented by the active contract.
 
 README is descriptive documentation, not execution policy.
 

@@ -14,7 +14,8 @@
     "setup": "docs/AGENT_SETUP.md",
     "orchestration": "docs/ORCHESTRATION.md",
     "translation": "docs/TRANSLATION.md",
-    "source_updates": "docs/SOURCE_UPDATES.md"
+    "source_updates": "docs/SOURCE_UPDATES.md",
+    "wave_worker": "docs/WAVE_WORKER.md"
   },
   "context_profiles": {
     "bootstrap": [
@@ -84,5 +85,15 @@
     "extracted",
     "translated",
     "reviewed"
-  ]
+  ],
+  "context_overlays": {
+    "waves": {
+      "translator": [
+        "wave_worker"
+      ],
+      "reviewer": [
+        "wave_worker"
+      ]
+    }
+  }
 }
