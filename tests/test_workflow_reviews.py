@@ -164,6 +164,77 @@ class WorkflowReviewTests(unittest.TestCase):
         saved = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
         self.assertEqual(saved.data["records"][0]["quality_report"], evidence)
 
+    def test_anchored_review_requires_real_quotes_and_rechecks_corrections(self):
+        self.claim()
+        manager = self.manager()
+
+        def evidence(*findings):
+            return {
+                "evidence_version": 2, "context": "bounded_context",
+                "checks": dict.fromkeys(
+                    ["coverage", "meaning", "terminology", "style", "structure"], True
+                ),
+                "findings": list(findings),
+            }
+
+        first = {
+            "id": "meaning-1", "category": "meaning", "severity": "major",
+            "detail": "Source and target are not semantically equivalent.",
+            "resolved": False,
+            "source_anchor": {"quote": "Source.", "occurrence": 0},
+            "translation_anchor": {"quote": "Перевод.", "occurrence": 0},
+            "resolves": None,
+        }
+        bad = dict(first, source_anchor={"quote": "Missing source.", "occurrence": 0})
+        with self.assertRaisesRegex(ReviewEvidenceError, "absent"):
+            manager.record(
+                self.progress, self.progress_revision, self.metadata, 1,
+                outcome="CORRECTIONS_REQUIRED", reviewer_session_id="reviewer-a",
+                quality_report=evidence(bad),
+            )
+        ledger = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
+        self.assertEqual(ledger.data["records"], [])
+
+        correction = manager.record(
+            self.progress, self.progress_revision, self.metadata, 1,
+            outcome="CORRECTIONS_REQUIRED", reviewer_session_id="reviewer-a",
+            quality_report=evidence(first),
+        )
+        with self.assertRaisesRegex(ReviewEvidenceError, "v2 evidence"):
+            self.record(manager, outcome="PASS")
+        with self.assertRaisesRegex(ReviewEvidenceError, "explicit rechecks"):
+            manager.record(
+                self.progress, self.progress_revision, self.metadata, 1,
+                outcome="PASS", reviewer_session_id="reviewer-a",
+                quality_report=evidence(),
+            )
+        next_finding = dict(
+            first, id="meaning-recheck", resolved=True,
+            resolves={"record_id": correction.record["record_id"], "finding_id": "meaning-1"},
+        )
+        with self.assertRaisesRegex(ReviewEvidenceError, "changed translation"):
+            manager.record(
+                self.progress, self.progress_revision, self.metadata, 1,
+                outcome="PASS", reviewer_session_id="reviewer-a",
+                quality_report=evidence(next_finding),
+            )
+
+        self.artifacts["translated/001-one.md"] = "# Один\\n\\nИсправленный перевод.\\n".encode("utf-8")
+        next_finding["translation_anchor"] = {"quote": "Исправленный перевод.", "occurrence": 0}
+        accepted = manager.record(
+            self.progress, self.progress_revision, self.metadata, 1,
+            outcome="PASS", reviewer_session_id="reviewer-a",
+            quality_report=evidence(next_finding),
+        )
+        self.assertEqual(
+            accepted.record["quality_report"]["findings"][0]["resolves"]["record_id"],
+            correction.record["record_id"],
+        )
+        self.assertEqual(
+            self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER).data["records"][-1]["outcome"],
+            "PASS",
+        )
+
     def test_bulk_resolution_reads_review_ledger_once(self):
         manager = self.manager()
         original = manager._load_ledger
