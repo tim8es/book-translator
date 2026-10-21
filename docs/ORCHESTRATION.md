@@ -127,6 +127,35 @@ T1 -> R1 -> durable state -> T2 -> R2 -> durable state
 
 Explicit parallel execution is invocation-scoped only through `resume --parallel N` with `N > 1`.
 
+## Manually opened parallel chat sessions
+
+The user creates chat sessions explicitly. The workflow **never assumes it can
+create agents or start other conversations**. A session may process a bounded
+sequence of chapters while independently acquiring and releasing a claim for
+each unit. The plan is not a durable lock.
+
+Generate balanced, read-only session workpacks:
+
+```bash
+python scripts/book.py plan-sessions <book-slug> --sessions 3 --json
+```
+
+The command partitions available translation/review work by extracted-source
+byte size into contiguous groups; it skips reviewed and currently claimed units.
+The response contains stable unit IDs, current operations, a session identifier,
+the pinned workflow revision, Git HEAD, glossary/style revisions, and instructions
+to paste into separate conversations. Each chat must re-read authoritative
+state before acting; proposals cannot authorize writes.
+
+If local Git is unavailable, obtain the repository HEAD SHA using GitHub and
+pass `--base-commit <sha>` to the planner or `resume --parallel`. A GitHub-only
+chat may assemble equivalent workpacks from the same repository state without
+pretending it executed a local command.
+
+A workpack is advisory: use the claim/acceptance protocol below to coordinate
+real concurrent writes. If a snapshot changes, re-plan or refresh affected
+chapters. Do not reserve an entire range for the duration of a lengthy session.
+
 ## Durable claims
 
 A worker may not start literary work without owning a durable claim for the exact unit and role:
