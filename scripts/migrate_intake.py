@@ -66,8 +66,10 @@ def spine_entries(epub: Path) -> list[dict]:
                                   if n.tag.split("}")[-1] in {"h1", "h2", "h3", "h4", "p"}]
                 all_blocks = len(block_elements)
                 nonempty_blocks = sum(bool("".join(n.itertext()).strip()) for n in block_elements)
+                first_block_tag = block_elements[0].tag.split("}")[-1] if block_elements else None
                 entries.append({"basename": PurePosixPath(entry).name, "blocks": all_blocks,
-                                "all_blocks": all_blocks, "nonempty_blocks": nonempty_blocks})
+                                "all_blocks": all_blocks, "nonempty_blocks": nonempty_blocks,
+                                "first_block_tag": first_block_tag})
             if not entries:
                 raise MigrationError("No readable EPUB spine units")
             return entries
@@ -85,6 +87,12 @@ def resolve_block_scheme(indexes: set[int], spine_unit: dict):
         return "all_xhtml_blocks"
     if indexes == set(range(nonempty_count)):
         return "nonempty_xhtml_blocks"
+    # Historical p:000 indexes may start at 'Chapter Notes' because the source
+    # XHTML h2 chapter heading was intentionally handled outside block markers.
+    # This is an UNREVIEWED candidate, not proof that a translated title exists.
+    if (spine_unit.get("first_block_tag") in {"h1", "h2", "h3", "h4"}
+            and all_count > 2 and indexes == set(range(all_count - 1))):
+        return "all_xhtml_blocks_excluding_heading"
     return None
 
 
@@ -253,6 +261,7 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None,
                                             f"{all_blocks} all or {nonempty_blocks} nonempty")
                 blocks = (all_blocks if block_scheme == "all_xhtml_blocks"
                           else nonempty_blocks if block_scheme == "nonempty_xhtml_blocks"
+                          else all_blocks - 1 if block_scheme == "all_xhtml_blocks_excluding_heading"
                           else all_blocks)
         if not candidate:
             problems.append("No unambiguous complete candidate")
@@ -271,6 +280,7 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None,
                                   "all_source_blocks": all_blocks,
                                   "nonempty_source_blocks": nonempty_blocks,
                                   "index_scheme": block_scheme,
+                                  "missing_heading_requires_review": block_scheme == "all_xhtml_blocks_excluding_heading",
                                   "indexed_min": min(indexed) if indexed else None,
                                   "indexed_max": max(indexed) if indexed else None,
                                   "files": len(paths), "issues": problems})

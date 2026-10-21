@@ -205,6 +205,37 @@ class IntakeMigrationTests(unittest.TestCase):
         with self.assertRaises(migration.MigrationError):
             migration.audit(self.book, offset=1, source_reference=reference)
 
+
+    def test_historical_markdown_excluding_verified_source_heading(self):
+        source = self.source()
+        with zipfile.ZipFile(source, "a") as archive:
+            archive.writestr("split_002.xhtml",
+                             "<html><body><h1>Chapter 1</h1><p>Notes</p><p>Content</p></body></html>")
+        (self.book / "INTAKE.md").write_text(
+            "Original EPUB SHA-256: " + hashlib.sha256(source.read_bytes()).hexdigest(),
+            encoding="utf-8")
+        draft = self.book / "incoming/chapter-001-ru-draft.md"
+        draft.write_text("# Глава 1\n\n<!-- p:000 -->\nПримечания\n"
+                         "<!-- p:001 -->\nТекст\n", encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        unit = report["chapters"][0]
+        self.assertEqual(unit["status"], "candidate_unreviewed")
+        self.assertEqual(unit["index_scheme"], "all_xhtml_blocks_excluding_heading")
+        self.assertTrue(unit["missing_heading_requires_review"])
+        self.assertEqual(unit["source_blocks"], 2)
+        self.assertEqual(unit["reviewed_promotions"] if "reviewed_promotions" in unit else report["reviewed_promotions"], 0)
+
+    def test_nonheading_source_may_not_use_omitted_heading_scheme(self):
+        unit = {"all_blocks": 5, "nonempty_blocks": 3, "first_block_tag": "p"}
+        self.assertIsNone(migration.resolve_block_scheme({0, 1, 2, 3}, unit))
+
+    def test_truncated_markdown_not_mistaken_for_omitted_heading(self):
+        source = self.source()
+        draft = self.book / "incoming/chapter-001-ru-draft.md"
+        draft.write_text("# Глава 1\n", encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertNotEqual(report["chapters"][0]["index_scheme"], "all_xhtml_blocks_excluding_heading")
+
     def test_missing_chapter_cannot_be_promoted(self):
         source = self.source()
         report = migration.audit(self.book, source, offset=1)

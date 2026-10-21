@@ -68,3 +68,21 @@ counts. Do not publish the EPUB or extracted source text. Run:
 Reference-only results are NOT canonical state: `source_verified` stays false,
 `--stage` remains blocked and no Reviewer PASS is inferred. Restoring a sealed
 corpus later requires the original EPUB in an authorized private workspace.
+
+
+## Historical drafts with a separately written chapter heading
+
+Some full Markdown chapter drafts (notably chapters 31–39 of
+The Claiming Moon) number every XHTML h/p element **after** the initial h2
+chapter title, so source p:000 corresponds to source element 1.
+
+The auditor recognizes `all_xhtml_blocks_excluding_heading` only if:
+- the verified original source unit begins with a heading h1–h4;
+- the historical marker sequence exactly covers source elements 1..N-1,
+  renumbered as 0..N-2;
+- none of the earlier full-index schemes matches first.
+
+These are merely **UNREVIEWED staging candidates**. The omitted original
+chapter heading must be translated, independently source-reviewed, and
+incorporated into the accepted chapter before any literary PASS. This special
+scheme is not established by a metadata-only source reference.
