@@ -44,12 +44,16 @@ To create missing evidence **only after a successful independent audit**:
 The command checks that the original EPUB matches the preexisting source SHA-256
 and byte length, and that every extracted chapter is exactly reproducible.
 It does not reset or edit translation state, current chapters, review evidence,
-glossary or style guide. Existing conflicting evidence is never overwritten.
+glossary or style guide. Existing conflicting evidence for the same source is never overwritten.
+When a new source edition was promoted, re-certify the new original with
+`--record --replace-stale`: the old report is archived under
+`source-coverage-history/<source-sha256>.json` before a conditional replacement
+of the current report. Neither progress nor translations are modified.
 
-For source edition updates, a new original requires renewed coverage
-certification; a mismatched report blocks further translation/build until
-reconciled. The current implementation intentionally does not auto-promote a
-new edition to verified coverage.
+A new original requires renewed coverage certification. If its provenance,
+extracted text or current edition cannot be independently verified, the command
+fails without changing the current report. JSON mode produces a machine-readable
+BLOCKED reason with a nonzero process exit status.
 
 ## Boundaries
 

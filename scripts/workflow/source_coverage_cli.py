@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub
+from .filesystem import FilesystemStorage
+from .storage import StorageAlreadyExists, StorageError, StorageVersionConflict
 
 
 class CoverageCliError(RuntimeError):
@@ -63,17 +65,47 @@ def coverage_command(args: argparse.Namespace, root: Path) -> int:
     except (SourceCoverageError, ValueError, OSError, UnicodeError) as exc:
         raise CoverageCliError(f"source coverage blocked: {exc}") from exc
 
+    if args.replace_stale and not args.record:
+        raise CoverageCliError("--replace-stale requires --record")
     if args.record:
-        path = book_dir / COVERAGE_PATH
+        storage = FilesystemStorage(book_dir)
         payload = (json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
         try:
-            with path.open("xb") as handle:
-                handle.write(payload)
-        except FileExistsError:
-            if path.read_bytes() != payload:
-                raise CoverageCliError("existing coverage evidence differs; refusing overwrite")
-        except OSError as exc:
-            raise CoverageCliError(f"cannot record evidence: {exc}") from exc
+            current = storage.read(COVERAGE_PATH)
+        except StorageError as exc:
+            from .storage import StorageNotFound
+            if not isinstance(exc, StorageNotFound):
+                raise CoverageCliError(f"cannot read current coverage report: {exc}") from exc
+            try:
+                storage.create_if_absent(COVERAGE_PATH, payload)
+            except StorageAlreadyExists as conflict:
+                raise CoverageCliError("coverage report appeared concurrently; re-run verification") from conflict
+        else:
+            if current.content != payload:
+                if not args.replace_stale:
+                    raise CoverageCliError(
+                        "existing coverage report differs; use --replace-stale only for a verified new source edition"
+                    )
+                try:
+                    previous = json.loads(current.content.decode("utf-8"))
+                    previous_sha = previous["source_sha256"]
+                except (ValueError, UnicodeError, KeyError, TypeError) as exc:
+                    raise CoverageCliError("existing evidence is invalid; refusing to replace") from exc
+                if (not isinstance(previous_sha, str)
+                        or len(previous_sha) != 64
+                        or any(char not in "0123456789abcdef" for char in previous_sha)
+                        or previous_sha == report["source_sha256"]):
+                    raise CoverageCliError("refusing to replace conflicting evidence for the same source")
+                backup_path = f"source-coverage-history/{previous_sha}.json"
+                try:
+                    storage.create_if_absent(backup_path, current.content)
+                except StorageAlreadyExists:
+                    if storage.read(backup_path).content != current.content:
+                        raise CoverageCliError("existing coverage archive disagrees; refusing overwrite")
+                try:
+                    storage.write_if_version(COVERAGE_PATH, payload, current.version)
+                except StorageVersionConflict as exc:
+                    raise CoverageCliError("coverage evidence changed concurrently; re-run verification") from exc
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
@@ -92,10 +124,18 @@ def register_coverage_command(subparsers: argparse._SubParsersAction, root: Path
     parser.add_argument("slug")
     parser.add_argument("--source", help="Exact original EPUB; needed for private-source workspaces.")
     parser.add_argument("--record", action="store_true", help="Create missing evidence, never overwrite.")
+    parser.add_argument(
+        "--replace-stale", action="store_true",
+        help="Archive and replace evidence only after verifying a different source edition.",
+    )
     parser.add_argument("--json", action="store_true")
     def run(args):
         try:
             return coverage_command(args, root)
         except CoverageCliError as exc:
+            if args.json:
+                print(json.dumps({"state": "blocked", "errors": [str(exc)]},
+                                 ensure_ascii=False, sort_keys=True))
+                return 1
             raise error_factory(str(exc)) from exc
     parser.set_defaults(func=run)

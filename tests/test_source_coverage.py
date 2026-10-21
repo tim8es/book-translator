@@ -171,6 +171,20 @@ class CoverageCliTests(unittest.TestCase):
         self.assertEqual((book_dir / "progress.json").read_bytes(), progress)
         self.run_book("validate", "sample")
 
+    def test_json_failure_is_machine_readable_and_never_writes(self):
+        source = self.sample()
+        self.run_book("extract", str(source), "--slug", "sample", "--target-language", "ru")
+        book_dir = self.root / "books" / "sample"
+        (book_dir / "source-coverage.json").unlink()
+        path = book_dir / "extracted"
+        chapter = next(path.glob("*.md"))
+        chapter.write_text("Lost paragraph.", encoding="utf-8")
+        payload = json.loads(
+            self.run_book("source-coverage", "sample", "--json", ok=False).stdout
+        )
+        self.assertEqual(payload["state"], "blocked")
+        self.assertFalse((book_dir / "source-coverage.json").exists())
+
     def test_private_source_can_certify_using_original_without_storing_epub(self):
         source = self.sample()
         self.run_book("extract", str(source), "--slug", "sample",
