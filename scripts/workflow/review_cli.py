@@ -247,6 +247,15 @@ def review_record_command(args: argparse.Namespace, root: Path) -> int:
     _require_current_translation_acceptance(progress, metadata, args.chapter)
     manager = _manager(book_dir, repository)
     review_commit = args.review_commit if args.review_commit is not None else _git_head(root)
+    quality_report = None
+    if args.quality_report:
+        try:
+            path = Path(args.quality_report)
+            if path.stat().st_size > 32768:
+                raise ValueError("quality report exceeds 32 KiB")
+            quality_report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ReviewCliError(f"cannot load quality report: {exc}") from exc
     try:
         result = manager.record(
             progress,
@@ -256,6 +265,7 @@ def review_record_command(args: argparse.Namespace, root: Path) -> int:
             outcome=args.outcome,
             reviewer_session_id=args.session_id,
             review_commit=review_commit,
+            quality_report=quality_report,
         )
     except (ReviewError, SchemaError, RepositoryError, StorageError) as exc:
         raise ReviewCliError(str(exc)) from exc
@@ -384,6 +394,10 @@ def register_review_commands(subparsers: argparse._SubParsersAction, root: Path)
     record.add_argument("--outcome", choices=("PASS", "CORRECTIONS_REQUIRED"), required=True)
     record.add_argument("--session-id", required=True, help="Owning reviewer session identity.")
     record.add_argument("--review-commit", help="Relevant Git commit; best-effort HEAD when omitted.")
+    record.add_argument(
+        "--quality-report", metavar="FILE",
+        help="JSON evidence of independent/bounded review checks and findings.",
+    )
     record.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
     record.set_defaults(func=lambda args: review_record_command(args, root))
 

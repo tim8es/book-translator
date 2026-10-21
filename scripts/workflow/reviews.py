@@ -14,6 +14,7 @@ from uuid import uuid4
 from .claims import unit_id_for_chapter
 from .coordination import FINALIZATION_PATH, SOURCE_PROMOTION_PATH
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
+from .review_quality import ReviewQualityError, validate_quality_report
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
 from .storage import StorageError, StorageNotFound, StorageVersionConflict
@@ -374,6 +375,7 @@ class ReviewLedgerManager:
         outcome: str,
         reviewer_session_id: str,
         review_commit: str | None = None,
+        quality_report: Mapping[str, Any] | None = None,
     ) -> ReviewRecordResult:
         if outcome not in {"PASS", "CORRECTIONS_REQUIRED"}:
             raise ReviewEvidenceError("review outcome must be PASS or CORRECTIONS_REQUIRED")
@@ -390,12 +392,27 @@ class ReviewLedgerManager:
             raise ReviewConflict("progress state changed; re-read before recording review evidence")
 
         workflow_revision, contract_revision = self._workflow_context(metadata)
-        unit_id, _, source_sha256, translation_sha256 = self._artifact_identity(
+        unit_id, chapter, source_sha256, translation_sha256 = self._artifact_identity(
             progress,
             chapter_number,
             allow_untranslated=False,
         )
         assert translation_sha256 is not None
+        validated_quality = None
+        if quality_report is not None:
+            try:
+                validated_quality = validate_quality_report(quality_report, outcome=outcome)
+            except ReviewQualityError as exc:
+                raise ReviewEvidenceError(f"invalid literary quality report: {exc}") from exc
+            accepted = chapter.get("translation_acceptance")
+            if (
+                validated_quality["context"] == "independent_session"
+                and isinstance(accepted, Mapping)
+                and accepted.get("session_id") == reviewer_session_id
+            ):
+                raise ReviewEvidenceError(
+                    "independent_session review cannot reuse the translator session identity"
+                )
         claim = self._require_reviewer_claim(unit_id, reviewer_session_id, workflow_revision)
         loaded = self._load_ledger(progress)
         history = self._history_for(loaded.data, unit_id)
@@ -417,6 +434,8 @@ class ReviewLedgerManager:
             "correction_round": self._correction_round(history, outcome),
             "supersedes_record_id": history[-1]["record_id"] if history else None,
         }
+        if validated_quality is not None:
+            record["quality_report"] = validated_quality
         if "shared_state_revisions" in claim:
             record["shared_state_revisions"] = copy.deepcopy(
                 claim["shared_state_revisions"]

@@ -16,6 +16,8 @@ from enum import Enum
 from pathlib import PurePosixPath
 from typing import Any
 
+from .review_quality import ReviewQualityError, validate_quality_report
+
 
 SCHEMA_VERSION = 1
 ALLOWED_PROGRESS_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -366,6 +368,12 @@ def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None
             else:
                 message = f"must reference the immediately preceding record {expected_supersedes} for this unit"
             raise _field(schema, f"{prefix}.supersedes_record_id", message)
+
+        if "quality_report" in record:
+            try:
+                validate_quality_report(record["quality_report"], outcome=outcome)
+            except ReviewQualityError as exc:
+                raise _field(schema, f"{prefix}.quality_report", str(exc)) from exc
 
         last_by_unit[unit_id] = record_id
 
