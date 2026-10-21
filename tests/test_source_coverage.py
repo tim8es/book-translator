@@ -89,6 +89,18 @@ class CoverageAuditTests(unittest.TestCase):
                 with self.assertRaises(SourceCoverageError):
                     certify(self.path)
 
+    def test_unmanifested_xhtml_file_is_rejected(self):
+        epub(self.path, "<html><body><p>Alpha.</p></body></html>")
+        with zipfile.ZipFile(self.path, "a") as z:
+            z.writestr("OPS/forgotten.xhtml", "<html><body><p>Forgotten chapter.</p></body></html>")
+        with self.assertRaisesRegex(SourceCoverageError, "outside the EPUB manifest"):
+            certify(self.path)
+
+    def test_unknown_semantic_markup_is_rejected(self):
+        epub(self.path, "<html><body><p>Alpha <del>deleted</del>.</p></body></html>")
+        with self.assertRaisesRegex(SourceCoverageError, "<del>"):
+            certify(self.path)
+
     def test_mismatched_chapter_corpus_is_rejected(self):
         epub(self.path, "<html><body><p>Alpha.</p></body></html>")
         with self.assertRaisesRegex(SourceCoverageError, "chapter list differs"):

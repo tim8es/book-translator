@@ -131,6 +131,13 @@ def update_source_command(args: argparse.Namespace, root: Path) -> int:
     try:
         source_format = book.detect_format(source)
         chapters, _ = book.extract_chapters(source, source_format)
+        if source_format == "epub":
+            from .source_coverage import audit_epub
+            audit_epub(
+                source, chapters,
+                extract_document=book.split_html_document,
+                decode_text=book.decode_text,
+            )
     except Exception as exc:
         raise SourceUpdateCliError(f"cannot extract candidate source edition: {exc}") from exc
 

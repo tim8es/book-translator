@@ -5,6 +5,7 @@ translation. The audit reads XHTML body nodes with XML ElementTree and compares
 the exact ordered sequence of normalized word and punctuation tokens with the
 HTMLParser-produced Markdown chapters. It also checks all non-navigation XHTML
 listed in the EPUB manifest, including documents omitted from the spine.
+Undeclared XHTML members in the ZIP also block certification.
 
 The supported subset comprises text blocks, headings, lists without numbering,
 and inline bold/emphasis/code. Links, footnotes, tables, images, pagebreaks,

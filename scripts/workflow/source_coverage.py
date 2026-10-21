@@ -28,6 +28,7 @@ UNSUPPORTED = {"a", "img", "table", "figure", "figcaption", "aside", "sup",
                "style", "nav", "ol", "hr", "iframe", "object", "canvas",
                "form", "input", "button"}
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+ALLOWED_BODY = BLOCKS | {"br", "ul", "span", "em", "i", "strong", "b", "code"}
 
 
 class SourceCoverageError(ValueError):
@@ -63,7 +64,7 @@ def _reference(raw: bytes, path: str) -> tuple[list[str], int]:
     def visit(node: ET.Element) -> None:
         nonlocal count
         tag = _name(node.tag)
-        if tag in UNSUPPORTED:
+        if tag in UNSUPPORTED or tag not in ALLOWED_BODY:
             raise SourceCoverageError(f"{path}: unsupported semantic element <{tag}>")
         for key, value in node.attrib.items():
             attr = _name(key)
@@ -218,6 +219,13 @@ def audit_epub(
                     f"{item['path']}: {len(reference)} text tokens outside EPUB spine"
                 )
             documents.append({"path": item["path"], "state": "excluded_empty"})
+
+        declared = {item["path"] for item in manifest.values()}
+        for member in archive.namelist():
+            if member.lower().endswith((".xhtml", ".html", ".htm")) and member not in declared:
+                raise SourceCoverageError(
+                    f"{member}: XHTML document exists outside the EPUB manifest"
+                )
 
     if len(reproduced) != len(chapters) or any(
         left.title != right.title or left.content != right.content
