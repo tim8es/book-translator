@@ -421,6 +421,89 @@ class WaveManager:
             raise WaveError("no recoverable reconciliation in progress")
         return self.close(expected_wave=wave_id)
 
+    def sync_shared_memory(self, status: Mapping[str, Any],
+                           metadata: Mapping[str, Any]) -> dict[str, Any]:
+        """Bind glossary/style edits reconciled between waves to a new snapshot.
+
+        Conservatively impacts all already-reviewed units: prose changes cannot
+        be interpreted safely by substring matching alone.
+        """
+        if self.active() is not None or not status.get("valid"):
+            raise WaveError("memory synchronization requires no active wave and valid preflight")
+        if status.get("claims") or self.storage.list(".workflow/claims"):
+            raise WaveError("cannot synchronize literary memory while claims exist")
+        source = metadata.get("source")
+        if not isinstance(source, Mapping) or not source.get("revision_id"):
+            raise WaveError("source identity unavailable for memory synchronization")
+        shared = status.get("state_revisions")
+        if not isinstance(shared, Mapping) or any(
+            not isinstance(shared.get(k), str) or not shared[k]
+            for k in ("glossary", "style_guide")
+        ):
+            raise WaveError("current glossary/style revisions are required")
+        coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
+        try:
+            lease = coordinator.acquire(operation="wave_transition", session_id="memory-sync")
+        except CoordinationError as exc:
+            raise WaveError(f"cannot synchronize during another book transition: {exc}") from exc
+        try:
+            pointer, pointer_version = _json_read(self.storage, MEMORY_ACTIVE)
+            previous = self.memory()
+            if previous["source_revision_id"] != source["revision_id"]:
+                raise WaveError("memory cannot silently rebase onto another source edition")
+            if (previous["glossary_revision"] == shared["glossary"]
+                    and previous["style_guide_revision"] == shared["style_guide"]):
+                return {"state": "unchanged", "memory_revision": previous["revision"]}
+            updated = snapshot_from(
+                previous["entries"], source_revision_id=previous["source_revision_id"],
+                glossary_revision=shared["glossary"],
+                style_guide_revision=shared["style_guide"],
+            )
+            import hashlib
+            sync_id = hashlib.sha256(canonical({
+                "old": previous["revision"], "new": updated["revision"],
+            })).hexdigest()[:32]
+            path = f".workflow/literary-memory/syncs/{sync_id}.json"
+            try:
+                event, _ = _json_read(self.storage, path)
+            except WaveError:
+                try:
+                    self.storage.read(path)
+                except StorageNotFound:
+                    event = {
+                        "schema_version": 1, "sync_id": sync_id,
+                        "phase": "CLOSED", "closed_at": _now(),
+                        "previous_memory_revision": previous["revision"],
+                        "next_memory_revision": updated["revision"],
+                    }
+                else:
+                    raise
+            if event.get("next_memory_revision") != updated["revision"]:
+                raise WaveError("existing memory synchronization identity differs")
+            # Only strictly current reviewed chapters receive an impact item.
+            reviewed = sorted(u["unit_id"] for u in status.get("units", [])
+                              if u["lifecycle"] == "reviewed" and u["review"] == "pass")
+            candidates = [
+                {"memory_id": f"shared-{sync_id}", "unit_id": uid,
+                 "reason": "shared_state_reconciled", "matched_terms": [], "state": "pending"}
+                for uid in reviewed
+            ]
+            _create(self.storage, path, event)
+            _create(self.storage, _snapshot(updated["revision"]), updated)
+            _create(self.storage, f".workflow/literary-memory/impacts/{sync_id}.json", {
+                "schema_version": 1, "wave_id": sync_id,
+                "memory_revision": updated["revision"], "candidates": candidates,
+            })
+            _write(self.storage, MEMORY_ACTIVE, {"revision": updated["revision"]},
+                   pointer_version)
+            return {"state": "synchronized", "memory_revision": updated["revision"],
+                    "impact_count": len(candidates), "sync_id": sync_id}
+        finally:
+            try:
+                coordinator.release(lease)
+            except CoordinationError as exc:
+                raise WaveError(f"memory synchronization could not release lock: {exc}") from exc
+
     def impact_queue(self) -> list[dict[str, Any]]:
         """All unresolved historical impact references must be explicitly reviewed."""
         results = []
@@ -469,9 +552,19 @@ class WaveManager:
         if expires <= datetime.now(timezone.utc):
             raise WaveError("reviewer claim expired before impact resolution")
         reviewed = datetime.fromisoformat(review_record["reviewed_at"].replace("Z", "+00:00"))
-        closed, _ = _json_read(self.storage, _state(wave_id))
+        try:
+            closed, _ = _json_read(self.storage, _state(wave_id))
+        except WaveError:
+            try:
+                self.storage.read(_state(wave_id))
+            except StorageNotFound:
+                closed, _ = _json_read(
+                    self.storage, f".workflow/literary-memory/syncs/{wave_id}.json"
+                )
+            else:
+                raise
         if closed.get("phase") != "CLOSED" or not closed.get("closed_at"):
-            raise WaveError("impact review cannot precede wave closure")
+            raise WaveError("impact review cannot precede memory publication")
         cutoff = datetime.fromisoformat(closed["closed_at"].replace("Z", "+00:00"))
         if reviewed <= cutoff:
             raise WaveError("impact re-review must be later than memory publication")
