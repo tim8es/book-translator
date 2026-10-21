@@ -430,6 +430,11 @@ class ReviewLedgerManager:
                     chapter.get("translation_path"), kind="translation", allow_untranslated=False
                 )
                 assert source_bytes is not None and translation_bytes is not None
+                if (_sha256(source_bytes) != source_sha256
+                        or _sha256(translation_bytes) != translation_sha256):
+                    raise EvidenceAnchorError(
+                        "source or translation changed while validating anchored review; retry from current state"
+                    )
                 verify_evidence_anchors(validated_quality, source_bytes, translation_bytes)
             verify_correction_lineage(
                 validated_quality, previous=history[-1] if history else None,

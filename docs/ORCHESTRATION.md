@@ -317,3 +317,10 @@ Assembly is a pure projection of durable state. A build operation must never tra
 GitHub API storage is a supported durable backend for environments without a local checkout. It preserves the same create-if-absent and compare-and-swap semantics as filesystem storage. GitHub Actions are not required for runtime orchestration.
 
 Transport failures or ambiguous mutations must not be blindly retried. Re-read authoritative GitHub state, classify what actually happened, and replan. GitHub-specific mechanics remain at the storage boundary; Translator and Reviewer contracts stay backend-agnostic.
+
+## Source-linked review evidence
+
+Optional v2 review reports bind exact source/translation excerpts and immutable
+finding IDs to the existing review ledger. Same-source follow-up reviews must
+explicitly address each prior unresolved v2 finding. See TRANSLATION.md for
+the evidence contract. Review reports never directly modify translations.

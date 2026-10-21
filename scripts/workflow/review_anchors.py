@@ -48,10 +48,10 @@ def validate_v2_finding(finding: Any, number: int) -> dict[str, Any]:
     if not isinstance(fid, str) or FINDING_ID.fullmatch(fid) is None:
         raise EvidenceAnchorError(f"{where}.id must be a short stable slug")
     category = finding["category"]
-    if category not in CATEGORIES:
+    if not isinstance(category, str) or category not in CATEGORIES:
         raise EvidenceAnchorError(f"{where}.category is unsupported")
     severity = finding["severity"]
-    if severity not in {"minor", "major", "critical"}:
+    if not isinstance(severity, str) or severity not in {"minor", "major", "critical"}:
         raise EvidenceAnchorError(f"{where}.severity is invalid")
     detail = finding["detail"]
     if not isinstance(detail, str) or not 1 <= len(detail.strip()) <= 1000:
