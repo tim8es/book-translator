@@ -15,6 +15,11 @@ from .claims import unit_id_for_chapter
 from .coordination import FINALIZATION_PATH, SOURCE_PROMOTION_PATH
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .review_quality import ReviewQualityError, validate_quality_report
+from .review_anchors import (
+    EvidenceAnchorError,
+    verify_evidence_anchors,
+    verify_correction_lineage,
+)
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
 from .storage import StorageError, StorageNotFound, StorageVersionConflict
@@ -416,6 +421,23 @@ class ReviewLedgerManager:
         claim = self._require_reviewer_claim(unit_id, reviewer_session_id, workflow_revision)
         loaded = self._load_ledger(progress)
         history = self._history_for(loaded.data, unit_id)
+        try:
+            if validated_quality is not None and validated_quality.get("evidence_version") == 2:
+                source_bytes = self._read_artifact(
+                    chapter.get("source_path"), kind="source", allow_untranslated=False
+                )
+                translation_bytes = self._read_artifact(
+                    chapter.get("translation_path"), kind="translation", allow_untranslated=False
+                )
+                assert source_bytes is not None and translation_bytes is not None
+                verify_evidence_anchors(validated_quality, source_bytes, translation_bytes)
+            verify_correction_lineage(
+                validated_quality, previous=history[-1] if history else None,
+                source_sha256=source_sha256, translation_sha256=translation_sha256,
+                outcome=outcome,
+            )
+        except EvidenceAnchorError as exc:
+            raise ReviewEvidenceError(f"source-linked review evidence failed: {exc}") from exc
         record_id = self._new_id()
         sequence = loaded.data["next_sequence"]
         record = {
