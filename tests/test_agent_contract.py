@@ -42,8 +42,18 @@ class AgentContractTests(unittest.TestCase):
                 "orchestration": "docs/ORCHESTRATION.md",
                 "source_updates": "docs/SOURCE_UPDATES.md",
                 "translation": "docs/TRANSLATION.md",
+                "wave_worker": "docs/WAVE_WORKER.md",
             },
         )
+        self.assertEqual(
+            manifest["context_overlays"],
+            {"waves": {
+                "translator": ["wave_worker"],
+                "reviewer": ["wave_worker"],
+            }},
+        )
+        self.assertNotIn("wave_worker", manifest["context_profiles"]["translator"])
+        self.assertNotIn("wave_worker", manifest["context_profiles"]["reviewer"])
         self.assertEqual(manifest["context_profiles"]["bootstrap"], ["global", "setup"])
         self.assertEqual(
             manifest["context_profiles"]["orchestrator"],

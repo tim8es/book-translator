@@ -193,8 +193,11 @@ class WorkflowStatusCliTests(unittest.TestCase):
             [item["kind"] for item in load["inputs"]],
             ["original", "glossary", "style_guide"],
         )
+        actual_source = json.loads(
+            (book_dir / "progress.json").read_text(encoding="utf-8")
+        )["chapters"][0]["source_path"]
         self.assertEqual(
-            load["inputs"][0]["path"], "books/sample/extracted/001-one.md",
+            load["inputs"][0]["path"], f"books/sample/{actual_source}",
         )
         self.assertFalse(load["source_content_included"])
         self.assertNotIn("Alpha.", json.dumps(load, ensure_ascii=False))

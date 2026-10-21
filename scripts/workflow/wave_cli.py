@@ -196,7 +196,11 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                     raise WaveError("session has assignments outside the active wave")
                 result = next_action(plan, snapshot, args.session_id)
                 if result["action"] in {"claim", "work"}:
-                    if manager.memory()["revision"] != manifest["memory_revision"]:
+                    try:
+                        memory = manager.memory()
+                    except WaveError as exc:
+                        raise WaveError(f"active literary memory is unavailable: {exc}") from exc
+                    if memory["revision"] != manifest["memory_revision"]:
                         raise WaveError("active literary memory differs from pinned wave revision")
                     result["load_plan"] = _wave_load_plan(
                         result, snapshot, manifest, _read_role_routing(root)
@@ -212,7 +216,10 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                     raise WaveError("requested unit is unavailable")
                 previous = [u["unit_id"] for u in snapshot["units"]
                             if u["chapter_number"] < entry["chapter_number"]]
-                memory = manager.memory()
+                try:
+                    memory = manager.memory()
+                except WaveError as exc:
+                    raise WaveError(f"active literary memory is unavailable: {exc}") from exc
                 if memory["revision"] != manifest["memory_revision"]:
                     raise WaveError("active literary memory differs from pinned wave revision")
                 result = context_pack(memory, unit_id=args.unit_id,
