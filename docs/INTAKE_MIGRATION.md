@@ -47,3 +47,12 @@ or use the documented private-external source mechanism.
 IMPORTANT: --stage does not certify literary quality, completeness of plain
 Markdown files, or Reviewer PASS. Partial draft stages must be reconciled
 outside the production workflow, not relabeled as reviewed.
+
+## Index conventions
+
+Historical source-indexed drafts use either all h1–h4/p XHTML elements (including
+empty blocks) or only nonempty h1–h4/p elements. The tool derives both counts from
+the verified original and records the matching convention per chapter; a partial
+range or a mixture that satisfies neither convention remains blocked. A direct
+Markdown draft without source indexes is an UNREVIEWED candidate only and still
+requires sequential source-comparison verification.

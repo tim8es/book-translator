@@ -141,6 +141,32 @@ class IntakeMigrationTests(unittest.TestCase):
         self.assertFalse((self.book / "migration-staging").exists())
 
 
+
+    def test_source_dual_index_schemes(self):
+        unit = {"all_blocks": 3, "nonempty_blocks": 2}
+        self.assertEqual(migration.resolve_block_scheme({0, 1, 2}, unit), "all_xhtml_blocks")
+        self.assertEqual(migration.resolve_block_scheme({0, 1}, unit), "nonempty_xhtml_blocks")
+        self.assertIsNone(migration.resolve_block_scheme({1, 2}, unit))
+        self.assertIsNone(migration.resolve_block_scheme({0}, unit))
+
+    def test_verified_epub_with_empty_paragraph_tracks_both_counts(self):
+        source = self.source()
+        with zipfile.ZipFile(source, "a") as archive:
+            archive.writestr("split_002.xhtml", "<html><body><h1>Chapter 1</h1><p></p><p>Content</p></body></html>")
+        (self.book / "INTAKE.md").write_text(
+            "Original EPUB SHA-256: " + hashlib.sha256(source.read_bytes()).hexdigest(),
+            encoding="utf-8")
+        (self.book / "incoming/chapter-001-ru-draft.part-01.json").write_text(
+            json.dumps({"draft": {"0": "Глава", "1": "Текст"}, "source_path": "split_002.xhtml"}),
+            encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        unit = report["chapters"][0]
+        self.assertEqual(unit["status"], "candidate_unreviewed")
+        self.assertEqual(unit["index_scheme"], "nonempty_xhtml_blocks")
+        self.assertEqual(unit["source_blocks"], 2)
+        self.assertEqual(unit["all_source_blocks"], 3)
+        self.assertEqual(unit["nonempty_source_blocks"], 2)
+
     def test_missing_chapter_cannot_be_promoted(self):
         source = self.source()
         report = migration.audit(self.book, source, offset=1)
