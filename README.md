@@ -450,3 +450,9 @@ Contract tests protect role routing and documentation boundaries. CLI/corpus tes
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
+
+## Evidence-based literary review
+
+Optional v2 review evidence binds literary review findings to verifiable original
+and translated excerpts, with explicit follow-up tracking. See
+[translation contract](docs/TRANSLATION.md). Historical v1 reports are preserved.

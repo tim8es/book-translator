@@ -339,3 +339,45 @@ at least one unresolved finding.
 
 The report is optional to preserve compatibility with historical ledgers.
 An absent report must never be represented as independently audited quality.
+
+### Evidence-based Review (v2, opt-in)
+
+For source-linked quality evidence, supply a report with evidence_version=2 to review-record --quality-report.
+All five checks (coverage, meaning, terminology, style, structure) remain mandatory.
+Every finding provides a stable id, category, severity, detail, resolved flag, source_anchor,
+translation_anchor, and resolves (null for first findings). These anchors are verified against
+the exact UTF-8 source/translation artifacts before any review ledger write.
+
+Example JSON (invented illustration, NOT a live review):
+
+```json
+{
+  "evidence_version": 2,
+  "context": "independent_session",
+  "checks": { "coverage": true, "meaning": true, "terminology": true,
+              "style": true, "structure": true },
+  "findings": [{
+    "id": "modality-1", "category": "modality", "severity": "major",
+    "detail": "Possibility was turned into certainty.", "resolved": false,
+    "source_anchor": {"quote": "She might have recognized him.", "occurrence": 0},
+    "translation_anchor": {"quote": "Она узнала его.", "occurrence": 0},
+    "resolves": null
+  }]
+}
+```
+
+Occurrences are zero-based. Repeated quotes require a more specific excerpt or
+an explicitly selected nonzero occurrence. Excerpts contain at most 300 characters.
+An unresolved omission may use a null translation anchor; resolved issues require a
+current translation anchor.
+
+A follow-up to same-source v2 CORRECTIONS_REQUIRED evidence must explicitly recheck
+EVERY unresolved prior finding in a new v2 report. Each recheck has its own id and
+resolves: {"record_id": "<prior-32-hex-record-id>", "finding_id": "modality-1"}.
+To mark a recheck resolved, source/translation anchors must match current artifacts
+and the translation SHA-256 must differ from the earlier rejected version.
+Otherwise keep the issue unresolved with outcome CORRECTIONS_REQUIRED.
+
+This is citation and correction-lineage verification, not automated literary judgment.
+An independent Reviewer must still compare meaning, style and every relevant passage.
+Historical v1 evidence remains valid and is not silently upgraded.
