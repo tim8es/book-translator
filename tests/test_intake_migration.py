@@ -77,7 +77,8 @@ class IntakeMigrationTests(unittest.TestCase):
     def test_valid_source_sha_and_explicit_offset(self):
         source = self.source()
         draft = self.book / "incoming/chapter-001-ru-draft.md"
-        draft.write_text("Глава 1\n", encoding="utf-8")
+        draft.write_text("<!-- source-block 0 -->\\nГлава 1\\n"
+                         "<!-- source-block 1 -->\\nПеревод\\n", encoding="utf-8")
         report = migration.audit(self.book, source, offset=1)
         self.assertTrue(report["source_verified"])
         self.assertEqual(report["source_units"], 2)
