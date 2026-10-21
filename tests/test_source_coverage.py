@@ -87,7 +87,11 @@ class CoverageAuditTests(unittest.TestCase):
             with self.subTest(element=element):
                 epub(self.path, "<html><body>" + element + "</body></html>")
                 with self.assertRaises(SourceCoverageError):
-                    certify(self.path)
+                    audit_epub(
+                        self.path, [book.Chapter("Dummy", "Dummy")],
+                        extract_document=lambda text, title: [],
+                        decode_text=book.decode_text,
+                    )
 
     def test_unmanifested_xhtml_file_is_rejected(self):
         epub(self.path, "<html><body><p>Alpha.</p></body></html>")
