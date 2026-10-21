@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import subprocess
+from uuid import uuid4
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -208,7 +209,8 @@ def plan_sessions_command(args: argparse.Namespace, root: Path, preflight: Prefl
             if unit["lifecycle"] != "reviewed":
                 sizes[unit["unit_id"]] = len(reader(unit["source_path"]))
         plan = plan_sessions(
-            status, sessions=args.sessions, source_sizes=sizes, base_commit=base_commit
+            status, sessions=args.sessions, source_sizes=sizes,
+            base_commit=base_commit, dispatch_id=args.dispatch_id or uuid4().hex,
         )
     except (OSError, SessionPlanError) as exc:
         raise StatusCliError(str(exc)) from exc
@@ -341,6 +343,9 @@ def register_status_commands(
     sessions.add_argument("slug", help="Book slug under books/.")
     sessions.add_argument("--sessions", type=int, required=True, metavar="N")
     sessions.add_argument("--base-commit", help="Explicit repository HEAD SHA when local Git is unavailable.")
+    sessions.add_argument(
+        "--dispatch-id", help="Reuse the 32-hex ID only when replaying the SAME saved plan."
+    )
     sessions.add_argument("--json", action="store_true")
     sessions.set_defaults(
         func=_adapt_errors(

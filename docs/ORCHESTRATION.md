@@ -142,6 +142,10 @@ python scripts/book.py plan-sessions <book-slug> --sessions 3 --json
 
 The command partitions available translation/review work by extracted-source
 byte size into contiguous groups; it skips reviewed and currently claimed units.
+Every new planning invocation creates a fresh cryptographic dispatch ID so
+independently opened chats cannot accidentally share a claim owner identity.
+To reconstruct the **same saved dispatch** only, pass its exact
+`--dispatch-id <32-hex-id>`; never reuse that ID for a new dispatch.
 The response contains stable unit IDs, current operations, a session identifier,
 the pinned workflow revision, Git HEAD, glossary/style revisions, and instructions
 to paste into separate conversations. Each chat must re-read authoritative

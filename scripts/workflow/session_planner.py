@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,6 +23,7 @@ def plan_sessions(
     sessions: int,
     source_sizes: Mapping[str, int],
     base_commit: str,
+    dispatch_id: str,
 ) -> dict[str, Any]:
     if type(sessions) is not int or sessions < 1:
         raise SessionPlanError("sessions must be a positive integer")
@@ -29,6 +31,8 @@ def plan_sessions(
         raise SessionPlanError("cannot plan sessions without a valid preflight")
     if status.get("finalization", {}).get("active"):
         raise SessionPlanError("cannot plan during finalization")
+    if not isinstance(dispatch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+        raise SessionPlanError("dispatch_id must be a 32-character lowercase hexadecimal identifier")
     if not isinstance(base_commit, str) or not base_commit.strip():
         raise SessionPlanError("base_commit is required; resolve the repository HEAD")
     revisions = status.get("state_revisions")
@@ -71,7 +75,8 @@ def plan_sessions(
 
     if not work:
         return {"schema_version": 1, "book_slug": status.get("book_slug"),
-                "sessions": [], "remaining_units": 0, "base_commit": base_commit}
+                "sessions": [], "remaining_units": 0,
+                "dispatch_id": dispatch_id, "base_commit": base_commit}
     count = min(sessions, len(work))
     # Greedy contiguous partitioning; adapt target to the remaining total.
     groups: list[list[dict[str, Any]]] = []
@@ -101,6 +106,7 @@ def plan_sessions(
         units = [item["unit_id"] for item in group]
         identity = json.dumps({
             "book": status.get("book_slug"), "base_commit": base_commit,
+            "dispatch_id": dispatch_id,
             "units": units, "session": number,
         }, sort_keys=True).encode("utf-8")
         session_id = "bt-" + hashlib.sha256(identity).hexdigest()[:16]
@@ -127,6 +133,7 @@ def plan_sessions(
         "schema_version": 1,
         "book_slug": status.get("book_slug"),
         "base_commit": base_commit,
+        "dispatch_id": dispatch_id,
         "remaining_units": len(work),
         "sessions": assignments,
     }
