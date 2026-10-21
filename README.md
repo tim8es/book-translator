@@ -456,3 +456,7 @@ MIT. See [`LICENSE`](LICENSE).
 Optional v2 review evidence binds literary review findings to verifiable original
 and translated excerpts, with explicit follow-up tracking. See
 [translation contract](docs/TRANSLATION.md). Historical v1 reports are preserved.
+
+## Literary Memory & Waves
+
+The optional wave runtime coordinates source-pinned multi-chat translation, bounded source-grounded literary memory, and explicit consistency reviews. See [docs/WAVES.md](docs/WAVES.md). Full GitHub-only execution parity for memory publication is not yet available without a compatible deterministic execution adapter.
