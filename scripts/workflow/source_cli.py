@@ -414,6 +414,9 @@ def register_source_overrides(
     )
     setattr(extract, "_explicit_source_v1_registered", True)
 
+    from .source_coverage_cli import register_coverage_command
+    register_coverage_command(subparsers, root, error_factory)
+
     validate.set_defaults(
         func=_adapt_errors(
             lambda args: source_validate_command(args, root),
