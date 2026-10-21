@@ -22,7 +22,7 @@ class IntakeMigrationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def source(self):
+    def source(self, blank=False):
         path = Path(self.tmp.name) / "original.epub"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("META-INF/container.xml",
@@ -32,7 +32,7 @@ class IntakeMigrationTests(unittest.TestCase):
                 '<item id="two" href="split_002.xhtml" media-type="application/xhtml+xml"/>'
                 '</manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>')
             archive.writestr("split_001.xhtml", "<html><body><h1>Preface</h1><p>Text</p></body></html>")
-            archive.writestr("split_002.xhtml", "<html><body><h1>Chapter 1</h1><p>Content</p></body></html>")
+            archive.writestr("split_002.xhtml", "<html><body><h1>Chapter 1</h1><p>Content</p>" + ("<p></p>" if blank else "") + "</body></html>")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         (self.book / "INTAKE.md").write_text(
             "Original EPUB SHA-256: " + chr(96) + digest + chr(96) + "\n", encoding="utf-8")
@@ -140,6 +140,29 @@ class IntakeMigrationTests(unittest.TestCase):
             migration.stage(self.book, fake, 1)
         self.assertFalse((self.book / "migration-staging").exists())
 
+
+    def test_nonempty_block_index_scheme_accepts_historical_gaps(self):
+        source = self.source(blank=True)
+        (self.book / "incoming/chapter-001-ru-draft.part-01.json").write_text(
+            json.dumps({"source_path": "split_002.xhtml", "draft": {"0": "Заголовок", "1": "Текст"}}),
+            encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        ch = report["chapters"][0]
+        self.assertEqual(ch["status"], "candidate_unreviewed")
+        self.assertEqual(ch["indexing_scheme"], "nonempty_blocks")
+        self.assertEqual(ch["source_blocks"], 2)
+        self.assertEqual(ch["source_blocks_all"], 3)
+
+    def test_all_block_index_scheme_with_empty_source_blocks(self):
+        source = self.source(blank=True)
+        (self.book / "incoming/chapter-001-ru-draft.part-01.json").write_text(
+            json.dumps({"source_path": "split_002.xhtml",
+                        "draft": {"0": "Заголовок", "1": "Текст", "2": ""}}),
+            encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["chapters"][0]["status"], "candidate_unreviewed")
+        self.assertEqual(report["chapters"][0]["indexing_scheme"], "all_blocks")
+        self.assertEqual(report["chapters"][0]["source_blocks"], 3)
 
     def test_missing_chapter_cannot_be_promoted(self):
         source = self.source()
