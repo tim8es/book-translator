@@ -426,6 +426,9 @@ def register_status_commands(
         func=_adapt_errors(benchmark_sessions_command, error_factory)
     )
 
+    from .wave_cli import register_wave_commands
+    register_wave_commands(subparsers, root, resolved_preflight, error_factory)
+
     from .finalize_cli import register_finalize_command
 
     register_finalize_command(
