@@ -173,56 +173,67 @@ class WaveManager:
 
     def start(self, status: Mapping[str, Any], metadata: Mapping[str, Any], *,
               count: int, wave_id: str | None = None) -> dict[str, Any]:
-        self._admit(status, book_slug=status.get("book_slug"))
-        if self.storage.list(".workflow/claims"):
-            raise WaveError("cannot start wave with durable chapter claims")
-        from .coordination import SOURCE_PROMOTION_PATH, FINALIZATION_PATH
-        for barrier in (SOURCE_PROMOTION_PATH, FINALIZATION_PATH):
-            try:
-                self.storage.read(barrier)
-            except StorageNotFound:
-                pass
-            else:
-                raise WaveError(f"wave start blocked by {barrier}")
-        plan = self.plan(status, count=count)
-        source = metadata.get("source")
-        if not isinstance(source, Mapping) or not source.get("revision_id"):
-            raise WaveError("source revision identity required")
-        shared = status.get("state_revisions", {})
-        if any(not isinstance(shared.get(k), str) for k in ("glossary", "style_guide")):
-            raise WaveError("glossary/style SHA-bound snapshots required")
-        mem = self._ensure_memory(source_revision=source["revision_id"], shared=shared)
-        if mem["source_revision_id"] != source["revision_id"]:
-            raise WaveError("memory is bound to an older source edition; migrate explicitly")
-        if (mem["glossary_revision"] != shared["glossary"]
-                or mem["style_guide_revision"] != shared["style_guide"]):
-            raise WaveError("shared glossary/style changed without reconciled memory")
-        wave_id = wave_id or uuid4().hex
-        _manifest(wave_id)
-        source_sha = source.get("sha256")
-        if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha):
-            raise WaveError("valid original source SHA-256 required")
-        manifest = {
-            **plan, "wave_id": wave_id,
-            "source_revision_id": source["revision_id"],
-            "source_sha256": source_sha,
-            "workflow_revision": status["workflow_revision"],
-            "memory_revision": mem["revision"],
-            "shared_state_revisions": {k: shared[k] for k in ("glossary", "style_guide")},
-            "created_at": _now(),
-        }
-        state = {"schema_version": 1, "wave_id": wave_id, "phase": "ACTIVE",
-                 "decisions_sha256": None, "next_memory_revision": None}
-        _create(self.storage, _manifest(wave_id), manifest)
-        _create(self.storage, _state(wave_id), state)
+        coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
         try:
-            self.storage.create_if_absent(ACTIVE, canonical({
-                "wave_id": wave_id, "book_slug": plan["book_slug"]
-            }))
-        except StorageAlreadyExists as exc:
-            if self.active() != {"wave_id": wave_id, "book_slug": plan["book_slug"]}:
-                raise WaveError("another wave started concurrently") from exc
-        return manifest
+            lease = coordinator.acquire(operation="wave_transition", session_id="wave-start")
+        except CoordinationError as exc:
+            raise WaveError(f"wave transition cannot acquire coordination: {exc}") from exc
+        try:
+            self._admit(status, book_slug=status.get("book_slug"))
+            if self.storage.list(".workflow/claims"):
+                raise WaveError("cannot start wave with durable chapter claims")
+            from .coordination import SOURCE_PROMOTION_PATH, FINALIZATION_PATH
+            for barrier in (SOURCE_PROMOTION_PATH, FINALIZATION_PATH):
+                try:
+                    self.storage.read(barrier)
+                except StorageNotFound:
+                    pass
+                else:
+                    raise WaveError(f"wave start blocked by {barrier}")
+            plan = self.plan(status, count=count)
+            source = metadata.get("source")
+            if not isinstance(source, Mapping) or not source.get("revision_id"):
+                raise WaveError("source revision identity required")
+            shared = status.get("state_revisions", {})
+            if any(not isinstance(shared.get(k), str) for k in ("glossary", "style_guide")):
+                raise WaveError("glossary/style SHA-bound snapshots required")
+            mem = self._ensure_memory(source_revision=source["revision_id"], shared=shared)
+            if mem["source_revision_id"] != source["revision_id"]:
+                raise WaveError("memory is bound to an older source edition; migrate explicitly")
+            if (mem["glossary_revision"] != shared["glossary"]
+                    or mem["style_guide_revision"] != shared["style_guide"]):
+                raise WaveError("shared glossary/style changed without reconciled memory")
+            wave_id = wave_id or uuid4().hex
+            _manifest(wave_id)
+            source_sha = source.get("sha256")
+            if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha):
+                raise WaveError("valid original source SHA-256 required")
+            manifest = {
+                **plan, "wave_id": wave_id,
+                "source_revision_id": source["revision_id"],
+                "source_sha256": source_sha,
+                "workflow_revision": status["workflow_revision"],
+                "memory_revision": mem["revision"],
+                "shared_state_revisions": {k: shared[k] for k in ("glossary", "style_guide")},
+                "created_at": _now(),
+            }
+            state = {"schema_version": 1, "wave_id": wave_id, "phase": "ACTIVE",
+                     "decisions_sha256": None, "next_memory_revision": None}
+            _create(self.storage, _manifest(wave_id), manifest)
+            _create(self.storage, _state(wave_id), state)
+            try:
+                self.storage.create_if_absent(ACTIVE, canonical({
+                    "wave_id": wave_id, "book_slug": plan["book_slug"]
+                }))
+            except StorageAlreadyExists as exc:
+                if self.active() != {"wave_id": wave_id, "book_slug": plan["book_slug"]}:
+                    raise WaveError("another wave started concurrently") from exc
+            return manifest
+        finally:
+            try:
+                coordinator.release(lease)
+            except CoordinationError as exc:
+                raise WaveError(f"wave transition could not release coordination: {exc}") from exc
 
     def status(self, status: Mapping[str, Any]) -> dict[str, Any]:
         pointer = self.active()
@@ -346,48 +357,59 @@ class WaveManager:
         return preview
 
     def close(self, *, expected_wave: str) -> dict[str, Any]:
-        """Idempotent ordered publication, with visible RECONCILING barrier."""
-        manifest, state, state_version = self._active_state()
-        if expected_wave != manifest["wave_id"] or state["phase"] != "RECONCILING":
-            raise WaveError("wave must match active reconciling manifest")
-        path = f".workflow/waves/{expected_wave}/reconciliation.json"
-        frozen, _ = _json_read(self.storage, path)
-        if frozen["previous_memory_revision"] != manifest["memory_revision"]:
-            raise WaveError("frozen reconciliation uses another memory revision")
-        next_snapshot = validate_snapshot(frozen["next_snapshot"])
-        if next_snapshot["revision"] != state["next_memory_revision"]:
-            raise WaveError("reconciliation plan differs from pinned wave state")
-        pointer, pointer_version = _json_read(self.storage, MEMORY_ACTIVE)
-        if pointer["revision"] not in {manifest["memory_revision"], next_snapshot["revision"]}:
-            raise WaveError("memory changed outside the current wave")
-
-        # Publish immutable artifacts before switching the authoritative pointer.
-        _create(self.storage, _snapshot(next_snapshot["revision"]), next_snapshot)
-        impacts = {
-            "schema_version": 1, "wave_id": expected_wave,
-            "memory_revision": next_snapshot["revision"],
-            "candidates": frozen["impact_candidates"],
-        }
-        _create(self.storage, f".workflow/literary-memory/impacts/{expected_wave}.json", impacts)
-        if pointer["revision"] != next_snapshot["revision"]:
-            _write(self.storage, MEMORY_ACTIVE, {"revision": next_snapshot["revision"]},
-                   pointer_version)
-
-        state = {**state, "phase": "CLOSED"}
-        _write(self.storage, _state(expected_wave), state, state_version)
+        coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
         try:
-            active = self.storage.read(ACTIVE)
-            pointer_data = json.loads(active.content.decode("utf-8"))
-            if pointer_data["wave_id"] != expected_wave:
-                raise WaveError("active wave changed before closure")
-            self.storage.delete_if_version(ACTIVE, active.version)
-        except StorageNotFound:
-            pass
-        except StorageVersionConflict as exc:
-            raise WaveError("active pointer changed before closure; recover") from exc
-        return {"state": "CLOSED", "wave_id": expected_wave,
+            lease = coordinator.acquire(operation="wave_transition", session_id="wave-close")
+        except CoordinationError as exc:
+            raise WaveError(f"wave transition cannot acquire coordination: {exc}") from exc
+        try:
+            """Idempotent ordered publication, with visible RECONCILING barrier."""
+            manifest, state, state_version = self._active_state()
+            if expected_wave != manifest["wave_id"] or state["phase"] != "RECONCILING":
+                raise WaveError("wave must match active reconciling manifest")
+            path = f".workflow/waves/{expected_wave}/reconciliation.json"
+            frozen, _ = _json_read(self.storage, path)
+            if frozen["previous_memory_revision"] != manifest["memory_revision"]:
+                raise WaveError("frozen reconciliation uses another memory revision")
+            next_snapshot = validate_snapshot(frozen["next_snapshot"])
+            if next_snapshot["revision"] != state["next_memory_revision"]:
+                raise WaveError("reconciliation plan differs from pinned wave state")
+            pointer, pointer_version = _json_read(self.storage, MEMORY_ACTIVE)
+            if pointer["revision"] not in {manifest["memory_revision"], next_snapshot["revision"]}:
+                raise WaveError("memory changed outside the current wave")
+
+            # Publish immutable artifacts before switching the authoritative pointer.
+            _create(self.storage, _snapshot(next_snapshot["revision"]), next_snapshot)
+            impacts = {
+                "schema_version": 1, "wave_id": expected_wave,
                 "memory_revision": next_snapshot["revision"],
-                "impact_count": len(impacts["candidates"])}
+                "candidates": frozen["impact_candidates"],
+            }
+            _create(self.storage, f".workflow/literary-memory/impacts/{expected_wave}.json", impacts)
+            if pointer["revision"] != next_snapshot["revision"]:
+                _write(self.storage, MEMORY_ACTIVE, {"revision": next_snapshot["revision"]},
+                       pointer_version)
+
+            state = {**state, "phase": "CLOSED"}
+            _write(self.storage, _state(expected_wave), state, state_version)
+            try:
+                active = self.storage.read(ACTIVE)
+                pointer_data = json.loads(active.content.decode("utf-8"))
+                if pointer_data["wave_id"] != expected_wave:
+                    raise WaveError("active wave changed before closure")
+                self.storage.delete_if_version(ACTIVE, active.version)
+            except StorageNotFound:
+                pass
+            except StorageVersionConflict as exc:
+                raise WaveError("active pointer changed before closure; recover") from exc
+            return {"state": "CLOSED", "wave_id": expected_wave,
+                    "memory_revision": next_snapshot["revision"],
+                    "impact_count": len(impacts["candidates"])}
+        finally:
+            try:
+                coordinator.release(lease)
+            except CoordinationError as exc:
+                raise WaveError(f"wave transition could not release coordination: {exc}") from exc
 
     def recover(self, *, wave_id: str) -> dict[str, Any]:
         """Do not manufacture reconciliation plans; finish an existing frozen transition."""
