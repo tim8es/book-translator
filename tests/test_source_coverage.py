@@ -268,6 +268,35 @@ class CoverageCliTests(unittest.TestCase):
         new_report = json.loads((book_dir / "source-coverage.json").read_text())
         self.assertEqual(new_report["source_sha256"], metadata["source"]["sha256"])
 
+    def test_real_source_edition_promotion_requires_fresh_coverage(self):
+        original = self.sample()
+        self.run_book("extract", str(original), "--slug", "sample",
+                      "--target-language", "ru", "--private-source")
+        book_dir = self.root / "books" / "sample"
+        old_report = (book_dir / "source-coverage.json").read_bytes()
+        old_sha = json.loads(old_report)["source_sha256"]
+
+        newer_dir = self.root / "later"
+        newer_dir.mkdir()
+        newer = newer_dir / "novel.epub"
+        epub(newer, "<html><body><h1>One</h1><p>Changed content.</p></body></html>")
+        promoted = json.loads(
+            self.run_book("update-source", "sample", str(newer), "--json").stdout
+        )
+        self.assertEqual(promoted["state"], "promoted")
+        self.assertEqual((book_dir / "source-coverage.json").read_bytes(), old_report)
+        self.run_book("validate", "sample", ok=False)
+        self.run_corpus("verify", "sample", ok=False)
+
+        self.run_book("source-coverage", "sample", "--source", str(newer),
+                      "--record", "--replace-stale")
+        self.run_book("validate", "sample")
+        self.run_corpus("verify", "sample")
+        self.assertEqual(
+            (book_dir / "source-coverage-history" / (old_sha + ".json")).read_bytes(),
+            old_report,
+        )
+
     def test_private_source_can_certify_using_original_without_storing_epub(self):
         source = self.sample()
         self.run_book("extract", str(source), "--slug", "sample",
