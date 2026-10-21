@@ -421,7 +421,7 @@ def _validate_coordination_lock(data: Mapping[str, Any], schema: SchemaKind) -> 
     lock_id = _require_nonempty_string(data, "lock_id", schema)
     _validate_hex_id(lock_id, schema, "lock_id")
     operation = _require_nonempty_string(data, "operation", schema)
-    if operation not in {"claim_admission", "finalize_admission", "proposal_reconcile", "translation_acceptance", "source_promotion"}:
+    if operation not in {"claim_admission", "finalize_admission", "proposal_reconcile", "translation_acceptance", "source_promotion", "wave_transition"}:
         raise _field(
             schema,
             "operation",

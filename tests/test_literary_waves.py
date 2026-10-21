@@ -137,6 +137,8 @@ class WaveTests(unittest.TestCase):
             read_translation=lambda _: "Страж".encode(),
         )
         self.manager.close(expected_wave=WAVE)
+        self.status["units"][0]["lifecycle"] = "extracted"
+        self.status["units"][0]["review"] = "untranslated"
         updated = {"source": {"revision_id": "source-000002", "sha256": "b" * 64}}
         with self.assertRaisesRegex(WaveError, "older source edition"):
             self.manager.start(self.status, updated, count=1)

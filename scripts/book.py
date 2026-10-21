@@ -745,6 +745,17 @@ def build_command(args: argparse.Namespace) -> int:
         raise BookError("Book structure is invalid; run validate first:\n- " + "\n- ".join(errors))
 
     book_dir, _, progress = load_book(args.slug)
+    if not args.allow_unreviewed:
+        from workflow.waves import WaveManager, WaveError
+        from workflow.filesystem import FilesystemStorage
+        try:
+            waves = WaveManager(FilesystemStorage(book_dir))
+            if waves.active() is not None:
+                raise BookError("Cannot build final output while a literary wave is active")
+            if waves.impact_queue():
+                raise BookError("Cannot build final output with pending literary impact reviews")
+        except WaveError as exc:
+            raise BookError(f"Cannot verify literary wave completion: {exc}") from exc
     parts: list[str] = []
     incomplete: list[int] = []
 

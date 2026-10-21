@@ -21,6 +21,8 @@ from .literary_memory import (
 from .session_planner import plan_sessions
 from .session_runtime import save_dispatch, next_action, load_dispatch
 from .storage import StorageBackend, StorageNotFound, StorageAlreadyExists, StorageVersionConflict, StorageError
+from .coordination import BookCoordinationManager, CoordinationError
+from .repository import WorkflowStateRepository
 
 ACTIVE = ".workflow/waves/active.json"
 MEMORY_ACTIVE = ".workflow/literary-memory/active.json"
@@ -172,6 +174,16 @@ class WaveManager:
     def start(self, status: Mapping[str, Any], metadata: Mapping[str, Any], *,
               count: int, wave_id: str | None = None) -> dict[str, Any]:
         self._admit(status, book_slug=status.get("book_slug"))
+        if self.storage.list(".workflow/claims"):
+            raise WaveError("cannot start wave with durable chapter claims")
+        from .coordination import SOURCE_PROMOTION_PATH, FINALIZATION_PATH
+        for barrier in (SOURCE_PROMOTION_PATH, FINALIZATION_PATH):
+            try:
+                self.storage.read(barrier)
+            except StorageNotFound:
+                pass
+            else:
+                raise WaveError(f"wave start blocked by {barrier}")
         plan = self.plan(status, count=count)
         source = metadata.get("source")
         if not isinstance(source, Mapping) or not source.get("revision_id"):
@@ -264,7 +276,7 @@ class WaveManager:
             raise WaveError("wave cannot reconcile from its current phase")
         if not status.get("valid"):
             raise WaveError("preflight failed during wave reconciliation")
-        if status.get("claims"):
+        if status.get("claims") or self.storage.list(".workflow/claims"):
             raise WaveError("active chapter claims prevent memory reconciliation")
         by_id = {u["unit_id"]: u for u in status["units"]}
         for uid in manifest["unit_ids"]:

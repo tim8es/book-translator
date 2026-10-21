@@ -151,6 +151,15 @@ def finalize_command(
     storage = FilesystemStorage(book_dir)
     repository = WorkflowStateRepository(storage)
     artifact_reader = _artifact_reader(book_dir)
+    from .waves import WaveManager, WaveError
+    try:
+        waves = WaveManager(storage)
+        if waves.active() is not None:
+            raise FinalizeCliError("cannot finalize while literary wave is active")
+        if waves.impact_queue():
+            raise FinalizeCliError("cannot finalize with pending literary impact reviews")
+    except WaveError as exc:
+        raise FinalizeCliError(f"cannot inspect literary wave state: {exc}") from exc
     session_id = args.session_id or uuid4().hex
 
     manager = FinalizationManager(
