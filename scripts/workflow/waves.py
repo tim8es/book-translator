@@ -365,7 +365,7 @@ class WaveManager:
         try:
             """Idempotent ordered publication, with visible RECONCILING barrier."""
             manifest, state, state_version = self._active_state()
-            if expected_wave != manifest["wave_id"] or state["phase"] != "RECONCILING":
+            if expected_wave != manifest["wave_id"] or state["phase"] not in {"RECONCILING", "CLOSED"}:
                 raise WaveError("wave must match active reconciling manifest")
             path = f".workflow/waves/{expected_wave}/reconciliation.json"
             frozen, _ = _json_read(self.storage, path)
@@ -390,8 +390,9 @@ class WaveManager:
                 _write(self.storage, MEMORY_ACTIVE, {"revision": next_snapshot["revision"]},
                        pointer_version)
 
-            state = {**state, "phase": "CLOSED"}
-            _write(self.storage, _state(expected_wave), state, state_version)
+            if state["phase"] != "CLOSED":
+                state = {**state, "phase": "CLOSED", "closed_at": _now()}
+                _write(self.storage, _state(expected_wave), state, state_version)
             try:
                 active = self.storage.read(ACTIVE)
                 pointer_data = json.loads(active.content.decode("utf-8"))
@@ -416,7 +417,7 @@ class WaveManager:
         manifest, state, _ = self._active_state()
         if manifest["wave_id"] != wave_id:
             raise WaveError("requested wave is not active")
-        if state["phase"] != "RECONCILING":
+        if state["phase"] not in {"RECONCILING", "CLOSED"}:
             raise WaveError("no recoverable reconciliation in progress")
         return self.close(expected_wave=wave_id)
 
@@ -468,10 +469,17 @@ class WaveManager:
         if expires <= datetime.now(timezone.utc):
             raise WaveError("reviewer claim expired before impact resolution")
         reviewed = datetime.fromisoformat(review_record["reviewed_at"].replace("Z", "+00:00"))
-        manifest, _ = _json_read(self.storage, _manifest(wave_id))
-        created = datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
-        if reviewed <= created:
-            raise WaveError("impact re-review must be newer than the wave")
+        closed, _ = _json_read(self.storage, _state(wave_id))
+        if closed.get("phase") != "CLOSED" or not closed.get("closed_at"):
+            raise WaveError("impact review cannot precede wave closure")
+        cutoff = datetime.fromisoformat(closed["closed_at"].replace("Z", "+00:00"))
+        if reviewed <= cutoff:
+            raise WaveError("impact re-review must be later than memory publication")
+        quality = review_record.get("quality_report")
+        if (not isinstance(quality, Mapping)
+                or quality.get("evidence_version") != 2
+                or quality.get("context") != "independent_session"):
+            raise WaveError("impact resolution requires independent anchored v2 review")
         path = f".workflow/literary-memory/resolutions/{wave_id}/{memory_id}-{unit_id}.json"
         data = {
             "schema_version": 1, "wave_id": wave_id, "memory_id": memory_id,

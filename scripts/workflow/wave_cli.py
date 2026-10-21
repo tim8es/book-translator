@@ -162,6 +162,11 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                 manifest, state, _ = manager._active_state()
                 if not snapshot["valid"] or snapshot["claims"]:
                     raise WaveError("cannot recover wave during invalid preflight or active claims")
+                by_id = {u["unit_id"]: u for u in snapshot["units"]}
+                if any(by_id.get(uid, {}).get("lifecycle") != "reviewed"
+                       or by_id[uid].get("review") != "pass"
+                       for uid in manifest["unit_ids"]):
+                    raise WaveError("cannot recover while some wave units lack current PASS")
                 result = manager.recover(wave_id=manifest["wave_id"])
             elif action == "memory-impact":
                 result = {"pending": manager.impact_queue()}
@@ -175,9 +180,15 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                     raise WaveError("unit not in current book")
                 import hashlib
                 sha = hashlib.sha256(reader(unit["translation_path"])).hexdigest()
-                claim, _ = manager._active_state() if False else (None, None)
                 from .waves import _json_read
                 claim, _ = _json_read(storage, f".workflow/claims/{args.unit_id}.json")
+                from .reviews import ReviewLedgerManager
+                latest = ReviewLedgerManager(
+                    repository, artifact_reader=reader
+                ).resolve_unit(progress, metadata, unit["chapter_number"])
+                if (latest.state != "pass" or latest.current_record is None
+                        or latest.current_record["record_id"] != args.record_id):
+                    raise WaveError("impact resolution requires the latest current PASS")
                 path = manager.resolve_impact(
                     wave_id=args.wave_id, memory_id=args.memory_id,
                     unit_id=args.unit_id, review_record=selected[0],
