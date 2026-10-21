@@ -24,6 +24,7 @@ def status():
         "valid": True, "book_slug": "sample", "workflow_revision": "rev",
         "state_revisions": {"glossary": "g1", "style_guide": "s1"},
         "finalization": {"active": False}, "claims": [],
+        "corpus": {"state": "verified", "source_sha256": "a" * 64},
         "units": [
             {"unit_id": f"chapter-{i:06d}", "chapter_number": i,
              "lifecycle": "extracted", "review": "untranslated"}
@@ -101,6 +102,13 @@ class SessionRuntimeTests(unittest.TestCase):
         decision = next_action(saved, snapshot, session_id, now=NOW)
         self.assertEqual((decision["action"], decision["reason"]),
                          ("blocked", "claim_expired"))
+
+    def test_source_revision_change_blocks_stale_chapter_claim(self):
+        snapshot = status()
+        saved = plan(snapshot)
+        snapshot["corpus"]["source_sha256"] = "b" * 64
+        decision = next_action(saved, snapshot, saved["sessions"][0]["session_id"], now=NOW)
+        self.assertEqual(decision["reason"], "source_revision_changed")
 
     def test_revision_drift_and_preflight_block_work(self):
         snapshot = status()

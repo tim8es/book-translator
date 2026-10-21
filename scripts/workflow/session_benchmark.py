@@ -67,6 +67,7 @@ def evaluate(observations: Mapping[str, Any]) -> dict[str, Any]:
             raise BenchmarkError(f"{prefix}.unit_ids must be unique non-empty strings")
         complete = item.get("reviewed_unit_ids")
         if (not isinstance(complete, list) or len(complete) != len(units)
+                or any(not isinstance(u, str) for u in complete)
                 or set(complete) != set(units)):
             raise BenchmarkError(
                 f"{prefix} must have independently reviewed every assigned unit"
@@ -81,6 +82,7 @@ def evaluate(observations: Mapping[str, Any]) -> dict[str, Any]:
             "elapsed_seconds": seconds, **values,
             "reviewed_units": len(units),
             "words_per_hour": round(words * 3600.0 / seconds, 2),
+            "_raw_words_per_hour": words * 3600.0 / seconds,
         })
     grouped: dict[int, list[dict[str, Any]]] = {}
     for run in normalized:
@@ -92,7 +94,7 @@ def evaluate(observations: Mapping[str, Any]) -> dict[str, Any]:
     for count, samples in sorted(grouped.items()):
         summary.append({
             "sessions": count, "samples": len(samples),
-            "median_words_per_hour": round(statistics.median(x["words_per_hour"] for x in samples), 2),
+            "median_words_per_hour": round(statistics.median(x["_raw_words_per_hour"] for x in samples), 2),
             **{
                 "median_" + key: statistics.median(x[key] for x in samples)
                 for key in _METRICS
@@ -103,7 +105,11 @@ def evaluate(observations: Mapping[str, Any]) -> dict[str, Any]:
     for candidate in summary:
         if candidate["sessions"] == 1:
             continue
-        rate = candidate["median_words_per_hour"] / baseline["median_words_per_hour"]
+        raw_baseline = statistics.median(x["_raw_words_per_hour"] for x in grouped[1])
+        raw_candidate = statistics.median(
+            x["_raw_words_per_hour"] for x in grouped[candidate["sessions"]]
+        )
+        rate = raw_candidate / raw_baseline
         comparisons.append({
             "sessions": candidate["sessions"],
             "throughput_speedup": round(rate, 3),
@@ -124,7 +130,11 @@ def evaluate(observations: Mapping[str, Any]) -> dict[str, Any]:
         "dataset_id": dataset,
         "evaluation_protocol": protocol,
         "complete_review_required": True,
-        "runs": sorted(normalized, key=lambda x: (x["sessions"], x["run_id"])),
+        "runs": sorted(
+            [{key: value for key, value in run.items() if not key.startswith("_")}
+             for run in normalized],
+            key=lambda x: (x["sessions"], x["run_id"]),
+        ),
         "summary": summary,
         "comparisons": comparisons,
         "qualification": (

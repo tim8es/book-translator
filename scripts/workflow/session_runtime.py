@@ -21,6 +21,7 @@ DISPATCH_PREFIX = ".workflow/session-dispatches"
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
 UNIT_ID = re.compile(r"^chapter-[0-9]{6}$")
 SESSION_ID = re.compile(r"^bt-[0-9a-f]{16}$")
+SOURCE_SHA = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SessionRuntimeError(ValueError):
@@ -87,6 +88,8 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
             raise SessionRuntimeError("workpack missing pinned context")
         revisions = context.get("shared_state_revisions")
         if (context.get("base_commit") != plan["base_commit"]
+                or not isinstance(context.get("source_sha256"), str)
+                or SOURCE_SHA.fullmatch(context["source_sha256"]) is None
                 or not isinstance(context.get("workflow_revision"), str)
                 or not isinstance(revisions, Mapping)
                 or any(not isinstance(revisions.get(key), str) for key in ("glossary", "style_guide"))):
@@ -178,6 +181,10 @@ def next_action(
     context = pack["context"]
     if context["workflow_revision"] != status.get("workflow_revision"):
         return result("blocked", reason="workflow_revision_changed")
+    corpus = status.get("corpus")
+    if not isinstance(corpus, Mapping) or corpus.get("source_sha256") != context["source_sha256"]:
+        return result("blocked", reason="source_revision_changed",
+                      instruction="Replan under the new source revision; never reuse an old workpack")
     revisions = status.get("state_revisions")
     if not isinstance(revisions, Mapping) or any(
         revisions.get(key) != context["shared_state_revisions"][key]
@@ -196,6 +203,8 @@ def next_action(
         if not isinstance(current, Mapping):
             return result("blocked", reason="unit_missing_or_source_revised", unit_id=unit_id)
         chapter_number = current.get("chapter_number")
+        if chapter_number != assigned["chapter_number"]:
+            return result("blocked", reason="chapter_reading_order_changed", unit_id=unit_id)
         if current["lifecycle"] == "reviewed":
             finished += 1
             continue

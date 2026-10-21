@@ -20,6 +20,7 @@ def book_status():
     return {
         "valid": True, "book_slug": "novel", "workflow_revision": "revision",
         "finalization": {"active": False}, "claims": [],
+        "corpus": {"state": "verified", "source_sha256": "a" * 64},
         "units": units, "state_revisions": {"glossary": "g1", "style_guide": "s1"},
     }
 

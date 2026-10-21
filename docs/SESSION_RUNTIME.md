@@ -16,7 +16,8 @@ In a new or restarted chat, query the next step:
 
 The read-only command recomputes the current next step from progress, claims, frozen glossary/style revisions, review ledger and verified source state. It returns claim (acquire the specified role's durable claim), work (only when the live claim is held by this session), wait (review/correction/promotion belongs to another role), blocked (unsafe current state), or complete (all assigned units are reviewed). Never treat this dispatch as permission to modify files. Claim, accept and release each unit using the existing orchestrator protocol. Translator and Reviewer roles must remain distinct.
 
-There is no duplicate progress state or fabricated checkpoint. Only accepted translations, hash-bound reviews, and current reviewed states survive as authoritative checkpoints. An expired claim or shared-state revision change blocks instead of silently reviving stale work.
+There is no duplicate progress state or fabricated checkpoint. Only accepted translations, hash-bound reviews, and current reviewed states survive as authoritative checkpoints. An expired claim, changed source edition, changed reading order, or shared-state
+revision drift blocks instead of silently reviving stale work.
 
 When only GitHub tools are available, the stored dispatch JSON and state can be inspected through GitHub. This Python CLI does not create chat sessions or claim to run within ChatGPT without executable tools.
 
