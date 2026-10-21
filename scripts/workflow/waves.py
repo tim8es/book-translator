@@ -306,3 +306,143 @@ class WaveManager:
             "previous_memory_revision": manifest["memory_revision"],
             "next_snapshot": next_snapshot, "impact_candidates": candidates,
         }
+
+
+    def prepare_close(self, status: Mapping[str, Any], *,
+                      decisions: Mapping[str, str],
+                      read_source, read_translation) -> dict[str, Any]:
+        """Freeze the exact planned publication and enter RECONCILING (recoverable)."""
+        manifest, state, version = self._active_state()
+        if state["phase"] == "RECONCILING":
+            frozen, _ = _json_read(self.storage, f".workflow/waves/{manifest['wave_id']}/reconciliation.json")
+            if frozen["decisions"] != dict(sorted(decisions.items())):
+                raise WaveError("reconciling wave already has another frozen decision set")
+            return frozen
+        if state["phase"] != "ACTIVE":
+            raise WaveError("wave must be ACTIVE before reconciliation")
+        preview = self.reconcile_preview(
+            status, decisions=decisions, read_source=read_source,
+            read_translation=read_translation,
+        )
+        path = f".workflow/waves/{manifest['wave_id']}/reconciliation.json"
+        _create(self.storage, path, preview)
+        _write(self.storage, _state(manifest["wave_id"]), {
+            **state, "phase": "RECONCILING",
+            "decisions_sha256": __import__("hashlib").sha256(canonical(preview["decisions"])).hexdigest(),
+            "next_memory_revision": preview["next_snapshot"]["revision"],
+        }, version)
+        return preview
+
+    def close(self, *, expected_wave: str) -> dict[str, Any]:
+        """Idempotent ordered publication, with visible RECONCILING barrier."""
+        manifest, state, state_version = self._active_state()
+        if expected_wave != manifest["wave_id"] or state["phase"] != "RECONCILING":
+            raise WaveError("wave must match active reconciling manifest")
+        path = f".workflow/waves/{expected_wave}/reconciliation.json"
+        frozen, _ = _json_read(self.storage, path)
+        if frozen["previous_memory_revision"] != manifest["memory_revision"]:
+            raise WaveError("frozen reconciliation uses another memory revision")
+        next_snapshot = validate_snapshot(frozen["next_snapshot"])
+        if next_snapshot["revision"] != state["next_memory_revision"]:
+            raise WaveError("reconciliation plan differs from pinned wave state")
+        pointer, pointer_version = _json_read(self.storage, MEMORY_ACTIVE)
+        if pointer["revision"] not in {manifest["memory_revision"], next_snapshot["revision"]}:
+            raise WaveError("memory changed outside the current wave")
+
+        # Publish immutable artifacts before switching the authoritative pointer.
+        _create(self.storage, _snapshot(next_snapshot["revision"]), next_snapshot)
+        impacts = {
+            "schema_version": 1, "wave_id": expected_wave,
+            "memory_revision": next_snapshot["revision"],
+            "candidates": frozen["impact_candidates"],
+        }
+        _create(self.storage, f".workflow/literary-memory/impacts/{expected_wave}.json", impacts)
+        if pointer["revision"] != next_snapshot["revision"]:
+            _write(self.storage, MEMORY_ACTIVE, {"revision": next_snapshot["revision"]},
+                   pointer_version)
+
+        state = {**state, "phase": "CLOSED"}
+        _write(self.storage, _state(expected_wave), state, state_version)
+        try:
+            active = self.storage.read(ACTIVE)
+            pointer_data = json.loads(active.content.decode("utf-8"))
+            if pointer_data["wave_id"] != expected_wave:
+                raise WaveError("active wave changed before closure")
+            self.storage.delete_if_version(ACTIVE, active.version)
+        except StorageNotFound:
+            pass
+        except StorageVersionConflict as exc:
+            raise WaveError("active pointer changed before closure; recover") from exc
+        return {"state": "CLOSED", "wave_id": expected_wave,
+                "memory_revision": next_snapshot["revision"],
+                "impact_count": len(impacts["candidates"])}
+
+    def recover(self, *, wave_id: str) -> dict[str, Any]:
+        """Do not manufacture reconciliation plans; finish an existing frozen transition."""
+        manifest, state, _ = self._active_state()
+        if manifest["wave_id"] != wave_id:
+            raise WaveError("requested wave is not active")
+        if state["phase"] != "RECONCILING":
+            raise WaveError("no recoverable reconciliation in progress")
+        return self.close(expected_wave=wave_id)
+
+    def impact_queue(self) -> list[dict[str, Any]]:
+        """All unresolved historical impact references must be explicitly reviewed."""
+        results = []
+        prefix = ".workflow/literary-memory/impacts"
+        for path in self.storage.list(prefix):
+            if not path.endswith(".json"):
+                continue
+            doc, _ = _json_read(self.storage, path)
+            for impact in doc.get("candidates", []):
+                key = f"{impact['memory_id']}-{impact['unit_id']}.json"
+                resolution_path = (
+                    f".workflow/literary-memory/resolutions/{doc['wave_id']}/{key}"
+                )
+                try:
+                    resolved, _ = _json_read(self.storage, resolution_path)
+                except WaveError:
+                    try:
+                        self.storage.read(resolution_path)
+                    except StorageNotFound:
+                        results.append({**impact, "wave_id": doc["wave_id"]})
+                        continue
+                    raise
+                if resolved.get("reviewed") is not True:
+                    results.append({**impact, "wave_id": doc["wave_id"]})
+        return results
+
+    def resolve_impact(self, *, wave_id: str, memory_id: str, unit_id: str,
+                       review_record: Mapping[str, Any],
+                       current_translation_sha256: str,
+                       reviewer_claim: Mapping[str, Any]) -> str:
+        doc, _ = _json_read(self.storage, f".workflow/literary-memory/impacts/{wave_id}.json")
+        if not any(
+            x["memory_id"] == memory_id and x["unit_id"] == unit_id
+            for x in doc["candidates"]
+        ):
+            raise WaveError("impact candidate is not recorded in this wave")
+        if review_record.get("outcome") != "PASS" or review_record.get("unit_id") != unit_id:
+            raise WaveError("impact resolution needs independent current PASS record")
+        if review_record.get("translation_sha256") != current_translation_sha256:
+            raise WaveError("PASS review references another translation artifact")
+        if reviewer_claim.get("role") != "reviewer" or reviewer_claim.get("unit_id") != unit_id:
+            raise WaveError("impact resolution requires a reviewer claim for this unit")
+        if reviewer_claim.get("session_id") != review_record.get("reviewer_session_id"):
+            raise WaveError("reviewer claim and accepted reviewer record disagree")
+        expires = datetime.fromisoformat(reviewer_claim["expires_at"].replace("Z", "+00:00"))
+        if expires <= datetime.now(timezone.utc):
+            raise WaveError("reviewer claim expired before impact resolution")
+        reviewed = datetime.fromisoformat(review_record["reviewed_at"].replace("Z", "+00:00"))
+        manifest, _ = _json_read(self.storage, _manifest(wave_id))
+        created = datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
+        if reviewed <= created:
+            raise WaveError("impact re-review must be newer than the wave")
+        path = f".workflow/literary-memory/resolutions/{wave_id}/{memory_id}-{unit_id}.json"
+        data = {
+            "schema_version": 1, "wave_id": wave_id, "memory_id": memory_id,
+            "unit_id": unit_id, "reviewed": True,
+            "review_record_id": review_record["record_id"],
+            "translation_sha256": current_translation_sha256,
+        }
+        return _create(self.storage, path, data)
