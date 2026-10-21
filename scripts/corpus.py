@@ -32,6 +32,7 @@ from workflow import (
 )
 from workflow.schemas import SCHEMA_VERSION, parse_document
 from workflow.source_cli import normalize_structural_errors
+from workflow.source_coverage import coverage_integrity_errors
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -420,6 +421,11 @@ def verify_command(args: argparse.Namespace) -> int:
         raise book.BookError("source-manifest.json is missing; seal the corpus before verification")
 
     verified = verify_manifest(book_dir, metadata, progress, data)
+    coverage_errors = coverage_integrity_errors(book_dir, metadata, progress)
+    if coverage_errors:
+        raise book.BookError(
+            "Cannot verify EPUB source coverage:\n- " + "\n- ".join(coverage_errors)
+        )
     print(
         f"Verified source corpus for books/{args.slug}: "
         f"{verified['chapter_count']} extracted artifact(s), SHA-256 {verified['source_sha256']}"
