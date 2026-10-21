@@ -27,7 +27,7 @@ blocked. Do not trust a filename, preview EPUB, or old chat as source proof.
    using scripts/book.py extract, scripts/corpus.py seal, validate, verify.
    Preserve all incoming files and the expected pinned workflow SHA.
 3. Compare extracted reading order and filenames against the staged draft
-   indexes. Resolve ambiguous, partial and conflicting fragments.
+   indexes. Resolve ambiguous, partial and conflicting fragments; full indexed Markdown/JSON batches may be reassembled, but plain Markdown titles alone cannot prove completeness.
 4. Use --stage with the verified original **only after** canonical metadata,
    source manifest and source revision files have been correctly initialized.
    This writes merely to migration-staging; it never sets translated/reviewed.

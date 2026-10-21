@@ -97,6 +97,25 @@ def merge_indexed(parts: list[Path]):
     return result, sorted(sources), issues
 
 
+
+def merge_markdown(parts: list[Path]):
+    """Reassemble source-indexed Markdown fragments without trusting ordering names."""
+    merged = {}
+    errors = []
+    for file in sorted(parts):
+        text = file.read_text(encoding="utf-8")
+        markers = list(INDEX.finditer(text))
+        for i, marker in enumerate(markers):
+            idx = int(marker.group(1))
+            end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
+            value = text[marker.end():end].strip()
+            if idx in merged and merged[idx] != value:
+                errors.append(f"{file.name}: conflicting Markdown block {idx}")
+            else:
+                merged[idx] = value
+    return merged, errors
+
+
 def audit(book: Path, source: Path | None = None, offset: int | None = None) -> dict:
     intake = book / "incoming"
     if not intake.is_dir():
@@ -128,13 +147,23 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             numbered.setdefault(int(match.group(1)), []).append(path)
     for number, paths in sorted(numbered.items()):
         full = [p for p in paths if FULL_MD.fullmatch(p.name)]
-        json_parts = [p for p in paths if CHAPTER.fullmatch(p.name) and p.suffix == ".json"]
+        json_parts = [p for p in paths if p.suffix == ".json" and "-ru-" in p.name]
+        md_parts = [p for p in paths if p.suffix == ".md" and p not in full]
         indexed, sources, problems = merge_indexed(json_parts)
+        md_indexed, md_issues = merge_markdown(md_parts)
+        problems.extend(md_issues)
+        if indexed and md_indexed:
+            for idx in set(indexed) & set(md_indexed):
+                if indexed[idx] != md_indexed[idx]:
+                    problems.append(f"Cross-format conflict at block {idx}")
+            indexed = {**md_indexed, **indexed}
+        elif md_indexed:
+            indexed = md_indexed
         candidate = str(full[0].relative_to(book)) if len(full) == 1 else None
         method = "markdown" if candidate else None
         if not candidate and indexed and not problems:
-            candidate = "indexed_json_parts"
-            method = "indexed_json"
+            candidate = "indexed_parts"
+            method = "indexed_parts"
         if len(full) > 1:
             problems.append("Multiple full draft files")
         unit = None
@@ -148,7 +177,7 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
                 blocks = spine[pos]["blocks"]
                 if sources and any(s != spine[pos]["basename"] for s in sources):
                     problems.append("Draft source path differs from verified EPUB")
-                if method == "indexed_json" and set(indexed) != set(range(blocks)):
+                if method == "indexed_parts" and set(indexed) != set(range(blocks)):
                     problems.append(f"Indexed coverage {len(indexed)}/{blocks}")
                 if method == "markdown":
                     markers = [int(x) for x in INDEX.findall((book / candidate).read_text(encoding="utf-8"))]
@@ -163,7 +192,34 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             state["ready_candidates"] += 1
         state["chapters"].append({"chapter": number, "unit_number": unit, "status": status,
                                   "candidate": candidate, "method": method, "source_blocks": blocks,
-                                  "indexed_blocks": len(indexed), "files": len(paths), "issues": problems})
+                                  "indexed_blocks": len(indexed),
+                                  "indexed_min": min(indexed) if indexed else None,
+                                  "indexed_max": max(indexed) if indexed else None,
+                                  "files": len(paths), "issues": problems})
+    auxiliary = book / "incoming" / "afterword-ru-draft.json"
+    if auxiliary.is_file():
+        try:
+            payload = json.loads(auxiliary.read_text(encoding="utf-8"))
+            block_map = payload.get("draft", {})
+            if not isinstance(block_map, dict) or not all(str(i).isdigit() and isinstance(v, str) for i, v in block_map.items()):
+                raise MigrationError("afterword has invalid indexed mapping")
+            afterword = {"path": "incoming/afterword-ru-draft.json",
+                         "indexed_blocks": len(block_map), "status": "source_unverified",
+                         "unit_number": None, "issues": []}
+            if spine is not None and offset is not None:
+                matches = [i for i, unit in enumerate(spine)
+                           if unit["basename"] == PurePosixPath(payload.get("source_path", "")).name]
+                if len(matches) != 1 or matches[0] != len(spine) - 1:
+                    afterword["issues"].append("Afterword must uniquely match final source spine unit")
+                else:
+                    pos = matches[0]
+                    afterword["unit_number"] = pos + 1
+                    if set(map(int, block_map)) != set(range(spine[pos]["blocks"])):
+                        afterword["issues"].append("Afterword coverage mismatch")
+                    afterword["status"] = "needs_reconciliation" if afterword["issues"] else "candidate_unreviewed"
+            state["afterword"] = afterword
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            state["afterword"] = {"status": "needs_reconciliation", "issues": [str(exc)]}
     return state
 
 
@@ -186,8 +242,16 @@ def stage(book: Path, state: dict, offset: int) -> list[str]:
         if ch["method"] == "markdown":
             data = (book / ch["candidate"]).read_bytes()
         else:
-            paths = sorted((book / "incoming").glob(f"chapter-{ch['chapter']:03d}-ru-draft*.json"))
-            parts, _, issues = merge_indexed(paths)
+            paths = sorted((book / "incoming").glob(f"chapter-{ch['chapter']:03d}-ru-*"))
+            json_parts = [p for p in paths if p.suffix == ".json"]
+            md_parts = [p for p in paths if p.suffix == ".md"]
+            parts, _, issues = merge_indexed(json_parts)
+            md, md_issues = merge_markdown(md_parts)
+            issues.extend(md_issues)
+            for idx in set(parts) & set(md):
+                if parts[idx] != md[idx]:
+                    issues.append(f"Cross-format conflict at block {idx}")
+            parts = {**md, **parts}
             if issues or set(parts) != set(range(ch["source_blocks"])):
                 raise MigrationError("Indexed draft changed since audit")
             data = ("\n\n".join(f"<!-- source-block {i} -->\n{parts[i]}"
@@ -201,6 +265,21 @@ def stage(book: Path, state: dict, offset: int) -> list[str]:
             with dest.open("xb") as out:
                 out.write(data)
         staged.append(str(dest.relative_to(book)))
+    afterword = state.get("afterword")
+    if afterword and afterword["status"] == "candidate_unreviewed":
+        obj = json.loads((book / afterword["path"]).read_text(encoding="utf-8"))
+        mapped = {int(k): v for k, v in obj["draft"].items()}
+        data = ("\n\n".join(f"<!-- source-block {i} -->\n{mapped[i]}"
+                           for i in sorted(mapped)) + "\n").encode("utf-8")
+        target = book / "migration-staging" / f"{afterword['unit_number']:03d}-afterword-UNREVIEWED.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.read_bytes() != data:
+                raise MigrationError("Staging conflict: " + str(target))
+        else:
+            with target.open("xb") as out:
+                out.write(data)
+        staged.append(str(target.relative_to(book)))
     return staged
 
 

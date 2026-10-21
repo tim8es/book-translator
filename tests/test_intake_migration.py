@@ -103,6 +103,44 @@ class IntakeMigrationTests(unittest.TestCase):
         report = migration.audit(self.book, source, offset=1)
         self.assertEqual(report["chapters"][0]["status"], "needs_reconciliation")
 
+
+    def test_indexed_markdown_fragments_can_be_reassembled(self):
+        source = self.source()
+        (self.book / "incoming/chapter-001-ru-draft.part-01.md").write_text(
+            "<!-- source-block 0 -->\nГлава\n"
+            "<!-- source-block 1 -->\nТекст\n", encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["chapters"][0]["status"], "candidate_unreviewed")
+        self.assertEqual(report["chapters"][0]["indexed_blocks"], 2)
+        self.assertEqual(report["chapters"][0]["method"], "indexed_parts")
+
+    def test_incomplete_indexed_markdown_remains_unaccepted(self):
+        source = self.source()
+        (self.book / "incoming/chapter-001-ru-draft.part-01.md").write_text(
+            "<!-- source-block 0 -->\nГлава\n", encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["chapters"][0]["status"], "needs_reconciliation")
+
+    def test_afterword_candidate_is_always_unreviewed(self):
+        source = self.source()
+        (self.book / "incoming/afterword-ru-draft.json").write_text(
+            json.dumps({"source_path": "split_002.xhtml",
+                        "draft": {"0": "Конец", "1": "Спасибо"}}), encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["afterword"]["status"], "candidate_unreviewed")
+        self.assertEqual(report["afterword"]["unit_number"], 2)
+        self.assertEqual(report["reviewed_promotions"], 0)
+
+    def test_staging_refuses_invalid_canonical_state(self):
+        for name in migration.CANONICAL:
+            (self.book / name).write_text("{}", encoding="utf-8")
+        fake = {"source_verified": True, "missing_canonical_files": [],
+                "blockers": [], "chapters": []}
+        with self.assertRaises(migration.MigrationError):
+            migration.stage(self.book, fake, 1)
+        self.assertFalse((self.book / "migration-staging").exists())
+
+
     def test_missing_chapter_cannot_be_promoted(self):
         source = self.source()
         report = migration.audit(self.book, source, offset=1)
