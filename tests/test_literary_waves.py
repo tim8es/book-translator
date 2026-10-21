@@ -189,6 +189,29 @@ class WaveTests(unittest.TestCase):
         self.assertEqual(self.manager.memory()["entries"][0]["memory_id"], "term-warden")
         self.assertEqual(len(self.manager.impact_queue()), 1)
 
+    def test_between_wave_shared_state_sync_creates_impact_review_queue(self):
+        self.start()
+        self.accept()
+        self.manager.prepare_close(
+            self.status, decisions={},
+            read_source=lambda _: b"some text",
+            read_translation=lambda _: b"translated",
+        )
+        self.manager.close(expected_wave=WAVE)
+        self.status["state_revisions"]["glossary"] = "new-glossary-hash"
+        updated = self.manager.sync_shared_memory(self.status, META)
+        self.assertEqual(updated["state"], "synchronized")
+        self.assertEqual(updated["impact_count"], 2)
+        self.assertEqual(len(self.manager.impact_queue()), 2)
+        self.assertEqual(self.manager.memory()["glossary_revision"], "new-glossary-hash")
+        self.assertEqual(
+            self.manager.sync_shared_memory(self.status, META)["state"], "unchanged"
+        )
+        self.status["units"][0]["lifecycle"] = "extracted"
+        self.status["units"][0]["review"] = "untranslated"
+        next_wave = self.manager.start(self.status, META, count=1, wave_id="c" * 32)
+        self.assertEqual(next_wave["memory_revision"], updated["memory_revision"])
+
     def test_snapshot_no_silent_overwrite(self):
         snap = snapshot_from([], source_revision_id="source-000001",
                              glossary_revision="g", style_guide_revision="s")
