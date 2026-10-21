@@ -188,6 +188,12 @@ If one book needs stronger privacy or organizational isolation, putting that boo
 
 ## Parallel translation across separate chats
 
+Persisted workpacks, restart-safe step selection, and the empirical benchmark format
+are documented in [Session Runtime and Benchmark](docs/SESSION_RUNTIME.md).
+The runtime reuses durable claims and review evidence; it does not spawn chats
+or bypass source-admission checks.
+
+
 You create the chats manually. Each session uses the same private working
 repository and the same pinned workflow revision, but processes its own units.
 

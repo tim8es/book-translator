@@ -42,6 +42,11 @@ def plan_sessions(
     if not all(isinstance(value, str) and value for value in frozen.values()):
         raise SessionPlanError("glossary and style guide revisions are required")
 
+    corpus = status.get("corpus")
+    source_sha256 = corpus.get("source_sha256") if isinstance(corpus, Mapping) else None
+    if not isinstance(source_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None:
+        raise SessionPlanError("verified source SHA-256 is required for a session dispatch")
+
     claimed = {item["unit_id"] for item in status.get("claims", ())}
     work: list[dict[str, Any]] = []
     for unit in sorted(status.get("units", ()), key=lambda entry: entry["chapter_number"]):
@@ -117,6 +122,7 @@ def plan_sessions(
             "source_bytes": sum(item["source_bytes"] for item in group),
             "context": {
                 "workflow_revision": status.get("workflow_revision"),
+                "source_sha256": source_sha256,
                 "base_commit": base_commit,
                 "shared_state_revisions": dict(frozen),
             },
