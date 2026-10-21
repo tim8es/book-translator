@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
@@ -169,6 +170,15 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
 def stage(book: Path, state: dict, offset: int) -> list[str]:
     if not state["source_verified"] or state["missing_canonical_files"] or state["blockers"]:
         raise MigrationError("Refusing to stage before verified source and canonical initialization")
+    root = book.parent.parent
+    for command in (
+        [sys.executable, "scripts/book.py", "validate", book.name],
+        [sys.executable, "scripts/corpus.py", "verify", book.name],
+    ):
+        result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+        if result.returncode:
+            raise MigrationError("Canonical preflight failed: " + " ".join(command[1:]) +
+                                 " " + (result.stdout + result.stderr)[-600:])
     staged = []
     for ch in state["chapters"]:
         if ch["status"] != "candidate_unreviewed":
