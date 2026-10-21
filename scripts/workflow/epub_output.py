@@ -346,7 +346,7 @@ def resolve_output_status(
     }
 
 
-_INLINE_MARKUP = re.compile(r"(`[^`\\n]+`|\\*\\*.+?\\*\\*|\\*[^*\\n]+?\\*)")
+_INLINE_MARKUP = re.compile(r"(`[^`\n]+`|\*\*.+?\*\*(?!\*)|\*[^*\n]+?\*)")
 
 
 def _render_inline(text: str) -> str:
