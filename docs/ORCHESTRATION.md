@@ -165,6 +165,11 @@ pass `--base-commit <sha>` to the planner or `resume --parallel`. A GitHub-only
 chat may assemble equivalent workpacks from the same repository state without
 pretending it executed a local command.
 
+Persisted dispatches and read-only restart recovery are documented in
+[Session Runtime and Benchmark](SESSION_RUNTIME.md). Use plan-sessions --save
+to preserve workpacks and session-next to re-evaluate live state. Neither
+command authorizes a chapter mutation or substitutes accepted checkpoints.
+
 A workpack is advisory: use the claim/acceptance protocol below to coordinate
 real concurrent writes. If a snapshot changes, re-plan or refresh affected
 chapters. Do not reserve an entire range for the duration of a lengthy session.

@@ -15,6 +15,7 @@ from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
 from .session_planner import SessionPlanError, plan_sessions
 from .session_runtime import SessionRuntimeError, save_dispatch, load_dispatch, next_action
+from .session_benchmark import BenchmarkError, evaluate_file
 from .schemas import SchemaError
 from .source_cli import normalize_structural_errors, register_source_overrides, source_storage_mode
 from .source_coverage import coverage_integrity_errors
@@ -229,6 +230,30 @@ def plan_sessions_command(args: argparse.Namespace, root: Path, preflight: Prefl
     return 0
 
 
+def benchmark_sessions_command(args: argparse.Namespace) -> int:
+    """Analyze supplied observations; no timers, LLM calls or workspace writes."""
+    try:
+        payload = evaluate_file(Path(args.record).expanduser())
+    except (OSError, BenchmarkError) as exc:
+        raise StatusCliError(str(exc)) from exc
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"dataset={payload['dataset_id']} protocol={payload['evaluation_protocol']}")
+        for row in payload["summary"]:
+            print(
+                f"sessions={row['sessions']} samples={row['samples']} "
+                f"words_per_hour={row['median_words_per_hour']}"
+            )
+        for comparison in payload["comparisons"]:
+            print(
+                f"sessions={comparison['sessions']} speedup={comparison['throughput_speedup']} "
+                f"provisional_target={comparison['meets_provisional_2x_target']}"
+            )
+        print(payload["qualification"])
+    return 0
+
+
 def session_next_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
     """Read a saved workpack and derive the next safe step from current state."""
     status = _snapshot(args, root, preflight)
@@ -390,6 +415,15 @@ def register_status_commands(
             lambda args: session_next_command(args, root, resolved_preflight),
             error_factory,
         )
+    )
+
+    benchmark = subparsers.add_parser(
+        "benchmark-sessions", help="Compare measured 1/N-chat runs on an identical book corpus."
+    )
+    benchmark.add_argument("record", help="JSON file containing measured, independently reviewed runs.")
+    benchmark.add_argument("--json", action="store_true")
+    benchmark.set_defaults(
+        func=_adapt_errors(benchmark_sessions_command, error_factory)
     )
 
     from .finalize_cli import register_finalize_command

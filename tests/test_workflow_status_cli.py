@@ -122,6 +122,33 @@ class WorkflowStatusCliTests(unittest.TestCase):
         self.assertEqual(saved["operation"], "translate")
         self.assertEqual((book / "progress.json").read_bytes(), progress)
 
+    def test_benchmark_cli_reports_only_supplied_measurements(self):
+        observations = {
+            "schema_version": 1, "dataset_id": "test-only",
+            "evaluation_protocol": "independent-review",
+            "runs": [
+                {
+                    "run_id": label, "sessions": sessions,
+                    "unit_ids": ["chapter-000001"],
+                    "reviewed_unit_ids": ["chapter-000001"],
+                    "source_words": 100, "elapsed_seconds": seconds,
+                    "github_requests": 10, "manual_interventions": 2,
+                    "major_findings": 0, "critical_findings": 0,
+                }
+                for label, sessions, seconds in (
+                    ("baseline", 1, 1000), ("candidate", 2, 450)
+                )
+            ],
+        }
+        path = self.repo / "observations.json"
+        path.write_text(json.dumps(observations), encoding="utf-8")
+        report = self.canonical_json(self.run_book(
+            "benchmark-sessions", str(path), "--json"
+        ))
+        self.assertEqual(report["dataset_id"], "test-only")
+        self.assertTrue(report["comparisons"][0]["meets_provisional_2x_target"])
+        self.assertEqual(json.loads(path.read_text()), observations)
+
     def test_status_and_resume_json_are_deterministic_bounded_and_read_only(self):
         book = self.initialize_book()
         progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
