@@ -91,7 +91,7 @@ def resolve_block_scheme(indexes: set[int], spine_unit: dict):
     # XHTML h2 chapter heading was intentionally handled outside block markers.
     # This is an UNREVIEWED candidate, not proof that a translated title exists.
     if (spine_unit.get("first_block_tag") in {"h1", "h2", "h3", "h4"}
-            and all_count > 1 and indexes == set(range(all_count - 1))):
+            and all_count > 2 and indexes == set(range(all_count - 1))):
         return "all_xhtml_blocks_excluding_heading"
     return None
 
