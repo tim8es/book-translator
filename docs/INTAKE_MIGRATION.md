@@ -56,3 +56,15 @@ the verified original and records the matching convention per chapter; a partial
 range or a mixture that satisfies neither convention remains blocked. A direct
 Markdown draft without source indexes is an UNREVIEWED candidate only and still
 requires sequential source-comparison verification.
+
+## Metadata-only source reference for public workspace audits
+
+After verifying the exact original EPUB in a private environment, publish only
+its original SHA-256, per-document SHA-256, and both all-block/nonempty-block
+counts. Do not publish the EPUB or extracted source text. Run:
+
+    python scripts/migrate_intake.py the-claiming-moon --chapter-offset 2 --source-reference docs/migrations/the-claiming-moon-source-reference.json
+
+Reference-only results are NOT canonical state: `source_verified` stays false,
+`--stage` remains blocked and no Reviewer PASS is inferred. Restoring a sealed
+corpus later requires the original EPUB in an authorized private workspace.
