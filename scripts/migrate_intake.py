@@ -62,9 +62,12 @@ def spine_entries(epub: Path) -> list[dict]:
                 entry = (PurePosixPath(opf_name).parent /
                          unquote(item.get("href", "").split("#")[0])).as_posix()
                 document = ET.fromstring(archive.read(entry))
-                blocks = sum(n.tag.split("}")[-1] in {"h1", "h2", "h3", "h4", "p"}
-                             for n in document.iter())
-                entries.append({"basename": PurePosixPath(entry).name, "blocks": blocks})
+                elements = [n for n in document.iter()
+                            if n.tag.split("}")[-1].lower() in {"h1", "h2", "h3", "h4", "p"}]
+                all_blocks = len(elements)
+                nonempty_blocks = sum(bool("".join(n.itertext()).strip()) for n in elements)
+                entries.append({"basename": PurePosixPath(entry).name, "blocks": all_blocks,
+                                "nonempty_blocks": nonempty_blocks})
             if not entries:
                 raise MigrationError("No readable EPUB spine units")
             return entries
@@ -114,6 +117,25 @@ def merge_markdown(parts: list[Path]):
             else:
                 merged[idx] = value
     return merged, errors
+
+
+
+def classify_indices(indices, source):
+    """Classify historical indexing without assuming blanks were kept.
+
+    Index completeness is structural only: never use it as literary PASS.
+    """
+    actual = set(indices)
+    if not actual or len(actual) != len(indices):
+        return None
+    all_count = source["blocks"]
+    nonempty_count = source["nonempty_blocks"]
+    if actual == set(range(all_count)):
+        return "all_xhtml_elements"
+    if actual == set(range(nonempty_count)):
+        return "nonempty_xhtml_elements"
+    return None
+
 
 
 def audit(book: Path, source: Path | None = None, offset: int | None = None) -> dict:
@@ -168,6 +190,8 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             problems.append("Multiple full draft files")
         unit = None
         blocks = None
+        nonempty_blocks = None
+        index_scheme = None
         if spine is not None and offset is not None:
             pos = number - 1 + offset
             if pos < 0 or pos >= len(spine):
@@ -175,14 +199,26 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             else:
                 unit = pos + 1
                 blocks = spine[pos]["blocks"]
+                nonempty_blocks = spine[pos]["nonempty_blocks"]
                 if sources and any(s != spine[pos]["basename"] for s in sources):
                     problems.append("Draft source path differs from verified EPUB")
-                if method == "indexed_parts" and set(indexed) != set(range(blocks)):
-                    problems.append(f"Indexed coverage {len(indexed)}/{blocks}")
+                if method == "indexed_parts":
+                    index_scheme = classify_indices(indexed.keys(), spine[pos])
+                    if index_scheme is None:
+                        problems.append(
+                            f"Indexed coverage {len(indexed)}: neither all={blocks} "
+                            f"nor nonempty={nonempty_blocks} source blocks match")
                 if method == "markdown":
                     markers = [int(x) for x in INDEX.findall((book / candidate).read_text(encoding="utf-8"))]
-                    if markers and (len(markers) != len(set(markers)) or set(markers) != set(range(blocks))):
-                        problems.append(f"Markdown index coverage mismatch: {len(markers)}/{blocks}")
+                    if markers:
+                        if len(markers) != len(set(markers)):
+                            problems.append("Duplicate Markdown source indices")
+                        else:
+                            index_scheme = classify_indices(markers, spine[pos])
+                            if index_scheme is None:
+                                problems.append(
+                                    f"Markdown indexed coverage {len(markers)}: "
+                                    f"all={blocks}, nonempty={nonempty_blocks}")
         if not candidate:
             problems.append("No unambiguous complete candidate")
         status = ("source_unverified" if spine is None else
@@ -192,6 +228,8 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             state["ready_candidates"] += 1
         state["chapters"].append({"chapter": number, "unit_number": unit, "status": status,
                                   "candidate": candidate, "method": method, "source_blocks": blocks,
+                                  "nonempty_source_blocks": nonempty_blocks,
+                                  "index_scheme": index_scheme,
                                   "indexed_blocks": len(indexed),
                                   "indexed_min": min(indexed) if indexed else None,
                                   "indexed_max": max(indexed) if indexed else None,
@@ -252,7 +290,12 @@ def stage(book: Path, state: dict, offset: int) -> list[str]:
                 if parts[idx] != md[idx]:
                     issues.append(f"Cross-format conflict at block {idx}")
             parts = {**md, **parts}
-            if issues or set(parts) != set(range(ch["source_blocks"])):
+            if issues or ch.get("index_scheme") not in {
+                    "all_xhtml_elements", "nonempty_xhtml_elements"}:
+                raise MigrationError("Unsupported or ambiguous source indexing")
+            required_count = (ch["source_blocks"] if ch["index_scheme"] == "all_xhtml_elements"
+                              else ch["nonempty_source_blocks"])
+            if set(parts) != set(range(required_count)):
                 raise MigrationError("Indexed draft changed since audit")
             data = ("\n\n".join(f"<!-- source-block {i} -->\n{parts[i]}"
                                  for i in sorted(parts)) + "\n").encode("utf-8")

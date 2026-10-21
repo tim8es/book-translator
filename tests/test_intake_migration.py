@@ -32,7 +32,7 @@ class IntakeMigrationTests(unittest.TestCase):
                 '<item id="two" href="split_002.xhtml" media-type="application/xhtml+xml"/>'
                 '</manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>')
             archive.writestr("split_001.xhtml", "<html><body><h1>Preface</h1><p>Text</p></body></html>")
-            archive.writestr("split_002.xhtml", "<html><body><h1>Chapter 1</h1><p>Content</p></body></html>")
+            archive.writestr("split_002.xhtml", "<html><body><h1>Chapter 1</h1><p>Content</p><p> </p></body></html>")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         (self.book / "INTAKE.md").write_text(
             "Original EPUB SHA-256: " + chr(96) + digest + chr(96) + "\n", encoding="utf-8")
@@ -103,6 +103,28 @@ class IntakeMigrationTests(unittest.TestCase):
         report = migration.audit(self.book, source, offset=1)
         self.assertEqual(report["chapters"][0]["status"], "needs_reconciliation")
 
+
+    def test_source_indexing_detects_both_nonempty_and_all_elements(self):
+        source = self.source()
+        units = migration.spine_entries(source)
+        self.assertEqual(units[1]["blocks"], 3)
+        self.assertEqual(units[1]["nonempty_blocks"], 2)
+        self.assertEqual(migration.classify_indices([0, 1], units[1]), "nonempty_xhtml_elements")
+        self.assertEqual(migration.classify_indices([0, 1, 2], units[1]), "all_xhtml_elements")
+        self.assertIsNone(migration.classify_indices([0, 2], units[1]))
+        self.assertIsNone(migration.classify_indices([0, 1, 4], units[1]))
+
+    def test_complete_indexed_draft_with_blank_source_blocks(self):
+        source = self.source()
+        path = self.book / "incoming/chapter-001-ru-draft.part-01.json"
+        path.write_text(
+            json.dumps({"source_path": "split_002.xhtml",
+                        "draft": {"0": "Глава", "1": "Текст"}}), encoding="utf-8")
+        report = migration.audit(self.book, source, offset=1)
+        self.assertEqual(report["chapters"][0]["status"], "candidate_unreviewed")
+        self.assertEqual(report["chapters"][0]["index_scheme"], "nonempty_xhtml_elements")
+        self.assertEqual(report["chapters"][0]["source_blocks"], 3)
+        self.assertEqual(report["chapters"][0]["nonempty_source_blocks"], 2)
 
     def test_indexed_markdown_fragments_can_be_reassembled(self):
         source = self.source()

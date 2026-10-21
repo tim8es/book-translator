@@ -47,3 +47,12 @@ or use the documented private-external source mechanism.
 IMPORTANT: --stage does not certify literary quality, completeness of plain
 Markdown files, or Reviewer PASS. Partial draft stages must be reconciled
 outside the production workflow, not relabeled as reviewed.
+
+## Historical block-index conventions
+
+The Claiming Moon source contains empty XHTML paragraph elements. Historical drafts
+were produced with two different index systems: all h1-h4/p elements, or only
+nonempty h1-h4/p elements. The verifier classifies these *per chapter*, never
+assumes a single scheme for the whole book, and fails closed if neither
+contiguous index range matches. Matching index counts proves only mechanical
+coverage: it does **not** establish text fidelity or Reviewer PASS.
