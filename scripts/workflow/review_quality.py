@@ -19,7 +19,7 @@ def validate_quality_report(report: Any, *, outcome: str) -> dict[str, Any]:
     if not isinstance(report, Mapping) or set(report) != {"context", "checks", "findings"}:
         raise ReviewQualityError("quality report needs context, checks and findings")
     context = report["context"]
-    if context not in CONTEXTS:
+    if not isinstance(context, str) or context not in CONTEXTS:
         raise ReviewQualityError("context must be independent_session or bounded_context")
     checks = report["checks"]
     if not isinstance(checks, Mapping) or set(checks) != set(REQUIRED_CHECKS):
@@ -35,7 +35,7 @@ def validate_quality_report(report: Any, *, outcome: str) -> dict[str, Any]:
     for i, finding in enumerate(findings):
         if not isinstance(finding, Mapping) or set(finding) != {"severity", "detail", "resolved"}:
             raise ReviewQualityError(f"finding {i} needs severity, detail and resolved")
-        if finding["severity"] not in SEVERITIES:
+        if not isinstance(finding["severity"], str) or finding["severity"] not in SEVERITIES:
             raise ReviewQualityError(f"finding {i} severity is invalid")
         detail = finding["detail"]
         if not isinstance(detail, str) or not 1 <= len(detail.strip()) <= 1000:

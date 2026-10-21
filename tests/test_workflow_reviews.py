@@ -146,6 +146,24 @@ class WorkflowReviewTests(unittest.TestCase):
             review_commit=None,
         )
 
+    def test_structured_review_evidence_is_bound_to_record(self):
+        self.claim()
+        evidence = {
+            "context": "bounded_context",
+            "checks": dict.fromkeys(
+                ["coverage", "meaning", "terminology", "style", "structure"], True
+            ),
+            "findings": [],
+        }
+        result = self.manager().record(
+            self.progress, self.progress_revision, self.metadata, 1,
+            outcome="PASS", reviewer_session_id="reviewer-a",
+            quality_report=evidence,
+        )
+        self.assertEqual(result.record["quality_report"], evidence)
+        saved = self.repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER)
+        self.assertEqual(saved.data["records"][0]["quality_report"], evidence)
+
     def test_bulk_resolution_reads_review_ledger_once(self):
         manager = self.manager()
         original = manager._load_ledger
