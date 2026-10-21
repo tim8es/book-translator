@@ -38,6 +38,7 @@ from workflow.review_cli import ReviewCliError, register_review_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
+from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub
 
 
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -60,7 +61,7 @@ class BlockHTMLParser(HTMLParser):
 
     BLOCK_TAGS = {"p", "div", "li", "blockquote", "pre"}
     HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-    SKIP_TAGS = {"script", "style", "svg"}
+    SKIP_TAGS = {"script", "style", "svg", "head"}
     INLINE_MARKERS = {"em": "*", "i": "*", "strong": "**", "b": "**", "code": "`"}
     # The plain-text extractor cannot represent these structures faithfully.
     UNSUPPORTED_SEMANTICS = {"a", "img", "table", "figure", "figcaption", "aside",
@@ -466,6 +467,16 @@ def extract_command(args: argparse.Namespace) -> int:
         shutil.copy2(source, stored_source)
 
     chapters, detected = extract_chapters(stored_source, source_format)
+    coverage = None
+    if source_format == "epub":
+        try:
+            coverage = audit_epub(
+                stored_source, chapters,
+                extract_document=split_html_document,
+                decode_text=decode_text,
+            )
+        except SourceCoverageError as exc:
+            raise BookError(f"EPUB source coverage blocked: {exc}") from exc
     chapter_records: list[dict] = []
     used_slugs: set[str] = set()
 
@@ -528,6 +539,11 @@ def extract_command(args: argparse.Namespace) -> int:
     except (SchemaError, RepositoryError, StorageError) as exc:
         raise BookError(f"Cannot write workflow state for books/{slug}: {exc}") from exc
     create_support_files(book_dir)
+    if coverage is not None:
+        (book_dir / COVERAGE_PATH).write_text(
+            json.dumps(coverage, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     print(f"Extracted {len(chapter_records)} chapter(s) into books/{slug}/extracted/")
     return 0

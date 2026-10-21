@@ -16,6 +16,7 @@ from .claims import unit_id_for_chapter
 from .repository import RepositoryError
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
+from .source_coverage import coverage_integrity_errors
 from .source_updates import (
     SOURCE_PROMOTION_PATH,
     SOURCE_REVISIONS_PATH,
@@ -275,6 +276,7 @@ def _current_workspace_errors(book_module: Any, slug: str) -> list[str]:
         except (SchemaError, RepositoryError, StorageError):
             manifest = {}
         errors.extend(source_revision_integrity_errors(repository, metadata, progress, manifest))
+    errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
     errors.extend(translation_acceptance_errors(metadata, progress))
     return errors
 
@@ -411,6 +413,9 @@ def register_source_overrides(
         )
     )
     setattr(extract, "_explicit_source_v1_registered", True)
+
+    from .source_coverage_cli import register_coverage_command
+    register_coverage_command(subparsers, root, error_factory)
 
     validate.set_defaults(
         func=_adapt_errors(
