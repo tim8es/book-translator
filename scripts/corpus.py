@@ -413,7 +413,6 @@ def verify_command(args: argparse.Namespace) -> int:
     book_dir, metadata, progress = book.load_book(args.slug)
     errors, _ = book.validate_book(args.slug)
     errors = normalize_structural_errors(book_dir, metadata, errors)
-    errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
     if errors:
         raise book.BookError("Cannot verify invalid book structure:\n- " + "\n- ".join(errors))
 
@@ -422,6 +421,11 @@ def verify_command(args: argparse.Namespace) -> int:
         raise book.BookError("source-manifest.json is missing; seal the corpus before verification")
 
     verified = verify_manifest(book_dir, metadata, progress, data)
+    coverage_errors = coverage_integrity_errors(book_dir, metadata, progress)
+    if coverage_errors:
+        raise book.BookError(
+            "Cannot verify EPUB source coverage:\n- " + "\n- ".join(coverage_errors)
+        )
     print(
         f"Verified source corpus for books/{args.slug}: "
         f"{verified['chapter_count']} extracted artifact(s), SHA-256 {verified['source_sha256']}"

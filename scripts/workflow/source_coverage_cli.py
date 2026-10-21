@@ -43,8 +43,8 @@ def coverage_command(args: argparse.Namespace, root: Path) -> int:
         raise CoverageCliError("original EPUB SHA-256 differs from sealed source")
     if len(data) != identity.get("size_bytes"):
         raise CoverageCliError("original EPUB size differs from sealed source")
-    if source.name != metadata.get("source_file"):
-        raise CoverageCliError("original EPUB filename differs from metadata")
+    # Content identity is authoritative. Source editions may rename their
+    # original file when promoting a new revision; SHA-256 and size still bind it.
 
     chapters = []
     for item in progress.get("chapters", []):
