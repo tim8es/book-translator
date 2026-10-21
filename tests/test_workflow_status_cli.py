@@ -23,6 +23,7 @@ class WorkflowStatusCliTests(unittest.TestCase):
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
         shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
+        shutil.copy2(PROJECT_ROOT / "agent-manifest.json", self.repo / "agent-manifest.json")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {
@@ -182,6 +183,52 @@ class WorkflowStatusCliTests(unittest.TestCase):
             )
         )
         self.assertEqual(action["action"], "claim")
+        load = action["load_plan"]
+        self.assertEqual(load["role"], "translator")
+        self.assertEqual(load["phase"], "after_claim")
+        self.assertEqual(load["instruction_paths"], [
+            "AGENTS.md", "docs/TRANSLATION.md", "docs/WAVE_WORKER.md",
+        ])
+        self.assertEqual(
+            [item["kind"] for item in load["inputs"]],
+            ["original", "glossary", "style_guide"],
+        )
+        self.assertEqual(
+            load["inputs"][0]["path"], "books/sample/extracted/001-one.md",
+        )
+        self.assertFalse(load["source_content_included"])
+        self.assertNotIn("Alpha.", json.dumps(load, ensure_ascii=False))
+        self.assertEqual(load["memory"]["revision"], started["memory_revision"])
+        self.assertEqual(
+            load["memory"]["snapshot_path"],
+            (f"books/sample/.workflow/literary-memory/snapshots/"
+             f"{started['memory_revision']}.json"),
+        )
+        # Restarting the same chat is a read-only, identical context plan.
+        self.assertEqual(
+            self.canonical_json(self.run_book(
+                "wave-next", "sample",
+                "--dispatch-id", dispatch["dispatch_id"],
+                "--session-id", dispatch["sessions"][0]["session_id"],
+            )),
+            action,
+        )
+        pinned = action["context"]["shared_state_revisions"]
+        self.canonical_json(self.run_book(
+            "claim", "sample", "1", "--role", "translator",
+            "--session-id", dispatch["sessions"][0]["session_id"],
+            "--base-commit", REVISION,
+            "--glossary-revision", pinned["glossary"],
+            "--style-guide-revision", pinned["style_guide"], "--json",
+        ))
+        resumed = self.canonical_json(self.run_book(
+            "wave-next", "sample",
+            "--dispatch-id", dispatch["dispatch_id"],
+            "--session-id", dispatch["sessions"][0]["session_id"],
+        ))
+        self.assertEqual(resumed["action"], "work")
+        self.assertEqual(resumed["load_plan"]["phase"], "live_claim")
+        self.assertEqual(resumed["load_plan"]["inputs"], load["inputs"])
         self.assertEqual(
             self.canonical_json(self.run_book("wave-status", "sample"))["state"]["phase"],
             "ACTIVE",
@@ -190,6 +237,26 @@ class WorkflowStatusCliTests(unittest.TestCase):
             self.run_book("wave-start", "sample", "--count", "1", expect=1).returncode,
             1,
         )
+
+    def test_wave_next_fails_closed_if_active_memory_pointer_drifts(self):
+        book = self.initialize_book()
+        self.canonical_json(self.run_book(
+            "wave-start", "sample", "--count", "1",
+        ))
+        dispatch = self.canonical_json(self.run_book(
+            "wave-dispatch", "sample", "--sessions", "1",
+            "--base-commit", REVISION,
+        ))
+        pointer = book / ".workflow" / "literary-memory" / "active.json"
+        pointer.write_text(json.dumps({"revision": "e" * 64}) + "\n", encoding="utf-8")
+        response = self.run_book(
+            "wave-next", "sample",
+            "--dispatch-id", dispatch["dispatch_id"],
+            "--session-id", dispatch["sessions"][0]["session_id"],
+            expect=1,
+        )
+        self.assertIn("literary memory", response.stderr)
+        self.assertNotIn('"load_plan"', response.stdout)
 
     def test_status_and_resume_json_are_deterministic_bounded_and_read_only(self):
         book = self.initialize_book()
