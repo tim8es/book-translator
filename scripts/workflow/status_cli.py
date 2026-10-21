@@ -16,6 +16,7 @@ from .repository import RepositoryError, WorkflowStateRepository
 from .session_planner import SessionPlanError, plan_sessions
 from .schemas import SchemaError
 from .source_cli import normalize_structural_errors, register_source_overrides, source_storage_mode
+from .source_coverage import coverage_integrity_errors
 from .status import StatusError, StatusResolver
 from .storage import StorageError
 
@@ -72,6 +73,7 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
         structural_errors, _ = book_module.validate_book(slug)
         book_dir, metadata, progress = book_module.load_book(slug)
         structural_errors = normalize_structural_errors(book_dir, metadata, structural_errors)
+        structural_errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
     except Exception as exc:
         raise StatusCliError(f"cannot run structural preflight: {exc}") from exc
 
