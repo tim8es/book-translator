@@ -274,10 +274,41 @@ def coverage_integrity_errors(
     if report.get("chapter_count") != len(chapters) or len(recorded) != len(chapters):
         return errors + ["EPUB source-coverage chapter count mismatch"]
     docs = report.get("documents")
-    if not isinstance(docs, list) or not any(
-        isinstance(d, dict) and d.get("state") == "verified" for d in docs
-    ):
-        errors.append("EPUB source-coverage lacks verified spine documents")
+    if not isinstance(docs, list) or not docs:
+        errors.append("EPUB source-coverage has no documents")
+    else:
+        paths: set[str] = set()
+        covered_count = 0
+        for doc in docs:
+            if not isinstance(doc, Mapping):
+                errors.append("Invalid EPUB source-coverage document entry")
+                continue
+            path = doc.get("path")
+            if not isinstance(path, str) or not path or path in paths:
+                errors.append("Duplicate or invalid EPUB coverage document path")
+                continue
+            paths.add(path)
+            state = doc.get("state")
+            if state == "verified":
+                covered_count += 1
+                if (not isinstance(doc.get("xhtml_sha256"), str)
+                        or not SHA_RE.fullmatch(doc["xhtml_sha256"])
+                        or not isinstance(doc.get("reference_sha256"), str)
+                        or not SHA_RE.fullmatch(doc["reference_sha256"])
+                        or type(doc.get("text_tokens")) is not int or doc["text_tokens"] < 1
+                        or type(doc.get("text_blocks")) is not int or doc["text_blocks"] < 0
+                        or type(doc.get("chapter_count")) is not int or doc["chapter_count"] < 1):
+                    errors.append(f"Invalid coverage inventory for {path}")
+            elif state not in {"excluded_navigation", "excluded_empty"}:
+                errors.append(f"Unsupported EPUB coverage state for {path}")
+        if covered_count == 0:
+            errors.append("EPUB source-coverage lacks verified spine documents")
+        if sum(
+            d.get("chapter_count", 0) for d in docs
+            if isinstance(d, Mapping) and d.get("state") == "verified"
+            and type(d.get("chapter_count")) is int
+        ) != len(chapters):
+            errors.append("EPUB coverage document chapter totals disagree with progress")
     for chapter, record in zip(chapters, recorded):
         if not isinstance(chapter, Mapping) or not isinstance(record, Mapping):
             errors.append("Invalid EPUB source-coverage chapter entry")

@@ -365,6 +365,11 @@ The Reviewer compares source and translation. The Orchestrator owns durable shar
 
 When the source corpus is sealed, `source-manifest.json` records SHA-256 identities for the preserved source and extracted artifacts. Before literary work resumes, those hashes can be checked so incomplete or changed source material is detected rather than silently accepted.
 
+For EPUB, a separate independent [text coverage audit](docs/SOURCE_COVERAGE.md)
+compares the original XHTML inventory with the extracted chapters. Only the
+strict supported textual subset can be marked verified. Missing, lossy or
+unsupported content blocks the workflow rather than being silently omitted.
+
 ## Supported source formats
 
 The included standard-library helper can automatically extract:
@@ -387,6 +392,7 @@ Typical commands:
 ```bash
 python scripts/book.py extract /path/to/book.epub --target-language ru
 python scripts/book.py validate <book-slug>
+python scripts/book.py source-coverage <book-slug> --source /path/to/original.epub --json
 python scripts/book.py update-source <book-slug> /path/to/later-edition.epub --json
 python scripts/book.py build <book-slug> --format epub
 ```

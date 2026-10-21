@@ -37,6 +37,13 @@ Never overwrite, rewrite, normalize in place, or replace the user's preserved or
 
 A later edition with a different source identity is a new source revision, not a replacement of the preserved original. Only the `orchestrator` may stage or promote that revision under its routed source-update contract.
 
+For EPUB books, never infer extraction completeness from source-manifest hashes alone.
+Before translation or review admission require a current, original-SHA-bound
+`source-coverage.json` from independent EPUB text verification. Missing/stale
+evidence or unsupported XHTML is blocking; do not manufacture or recreate
+evidence from an already-extracted corpus without the exact original EPUB.
+See `docs/SOURCE_COVERAGE.md`.
+
 ## Capability honesty
 
 Use only capabilities that are actually available in the active environment.

@@ -39,6 +39,7 @@ books/<book-slug>/
 ├── progress.json
 ├── review-ledger.json
 ├── source-manifest.json
+├── source-coverage.json (required for verified EPUB)
 ├── source-revisions.json
 ├── glossary.md
 └── style-guide.md
@@ -65,6 +66,14 @@ python scripts/corpus.py verify <book-slug>
 ```
 
 The preflight verifies chapter counts and paths, preserved source identity, every extracted artifact, and the SHA-256 values in `source-manifest.json`. A mismatch is blocking; never regenerate a manifest merely to bless changed bytes.
+
+For EPUB, SHA seals alone do not prove extraction completeness. The current
+workflow additionally requires an independent `source-coverage.json` attestation
+bound to the original EPUB and every extracted chapter. Missing or stale
+coverage blocks translation, review dispatch, and build. Before migrating an
+older EPUB workspace, use `book.py source-coverage <slug> --source <exact-epub>`
+without writing, then `--record` only on success; see
+[coverage contract](SOURCE_COVERAGE.md). Never treat an unrun command as proof.
 
 If the exact trusted source is available but the extracted tree is damaged, restore the complete source corpus in one batch:
 
