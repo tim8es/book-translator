@@ -170,7 +170,7 @@ class WaveTests(unittest.TestCase):
             self.manager.reconcile_preview(
                 self.status | {"claims": [claim]},
                 decisions={"term-warden": "accepted"},
-                read_source=lambda _: b"Warden", read_translation=lambda _: b"Страж",
+                read_source=lambda _: b"Warden", read_translation=lambda _: b"rank",
             )
         claim_path = ".workflow/claims/chapter-000001.json"
         current = self.storage.read(claim_path)
