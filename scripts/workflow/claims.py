@@ -320,6 +320,57 @@ class ClaimManager:
             raise ClaimError(f"claim admission could not release coordination mutex: {exc}") from exc
         return created
 
+    def renew(
+        self,
+        progress: Mapping[str, Any],
+        selector: str,
+        *,
+        session_id: str,
+        lease_seconds: int = 3600,
+    ) -> list[ActiveClaim]:
+        """Extend live claims held by this session; never revive expired claims.
+
+        An auditable request precedes each conditional write. The existing claim
+        identity and snapshots remain unchanged; competing renew/release attempts
+        must win the same storage version.
+        """
+        session_id = self._require_nonempty(session_id, "session_id")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 86400:
+            raise ClaimError("lease_seconds must be between 1 and 86400")
+        unit_ids = resolve_selector(progress, selector)
+        updated: list[ActiveClaim] = []
+        for unit_id in unit_ids:
+            try:
+                previous = self._read_claim(unit_id)
+            except StorageNotFound as exc:
+                raise ClaimConflict(unit_id, f"unit {unit_id} has no active claim") from exc
+            if previous.data["session_id"] != session_id:
+                raise ClaimOwnershipError(unit_id, previous.data["session_id"])
+            now = self._now()
+            old_expiry = _parse_claim_timestamp(previous.data["expires_at"])
+            if old_expiry <= now:
+                raise ClaimConflict(unit_id, f"unit {unit_id} claim has expired; cleanup and reacquire")
+            extended = dict(previous.data)
+            extended["expires_at"] = _format_utc(
+                max(old_expiry, now) + timedelta(seconds=lease_seconds)
+            )
+            request_id = self._request_event(
+                action="renew_requested", claim=previous, occurred_at=now,
+                reason="owner_renewal",
+            )
+            try:
+                new_version = self.repository.write_if_version(
+                    previous.path, SchemaKind.CLAIM, extended, previous.version
+                )
+            except (StorageNotFound, StorageVersionConflict) as exc:
+                raise ClaimConflict(unit_id, f"unit {unit_id} claim changed before renewal") from exc
+            self._completion_event(
+                action="renewed", unit_id=unit_id,
+                request_event_id=request_id, occurred_at=self._now(),
+            )
+            updated.append(ActiveClaim(previous.path, extended, new_version))
+        return updated
+
     def _rollback_created(self, created: list[ActiveClaim], cause: Exception) -> None:
         unresolved: list[str] = []
         for claim in reversed(created):

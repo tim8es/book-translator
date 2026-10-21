@@ -172,6 +172,19 @@ Inspect ownership with:
 python scripts/book.py claims <book-slug>
 ```
 
+Long-running sessions should renew a live claim before the lease expires:
+
+```bash
+python scripts/book.py renew-claim <book-slug> <chapter> \
+  --session-id <session-id> --lease-seconds 3600
+```
+
+Renewal preserves the original claim identity, recorded workflow revision, and
+frozen glossary/style snapshot. It cannot resurrect an expired claim or take
+another session's claim. After an interruption, inspect claims and the existing
+translation draft; an expired claim requires explicit cleanup followed by fresh
+admission and revalidation before acceptance.
+
 Expired claims remain occupied until auditable cleanup:
 
 ```bash
