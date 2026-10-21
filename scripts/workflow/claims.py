@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -255,6 +256,52 @@ class ClaimManager:
                     raise ClaimError("claim admission blocked while finalization is active")
             except CoordinationError as exc:
                 raise ClaimError(f"claim admission blocked: {exc}") from exc
+
+            # When a literary wave exists, only its pinned saved workpacks
+            # authorize new claims; an old ad-hoc plan cannot bypass the wave.
+            try:
+                wave = self.repository.storage.read(".workflow/waves/active.json")
+            except StorageNotFound:
+                wave = None
+            if wave is not None:
+                try:
+                    pointer = json.loads(wave.content.decode("utf-8"))
+                    wave_id = pointer["wave_id"]
+                    manifest = json.loads(self.repository.storage.read(
+                        f".workflow/waves/{wave_id}/manifest.json"
+                    ).content.decode("utf-8"))
+                    phase = json.loads(self.repository.storage.read(
+                        f".workflow/waves/{wave_id}/state.json"
+                    ).content.decode("utf-8"))["phase"]
+                except (ValueError, KeyError, StorageError, UnicodeError) as exc:
+                    raise ClaimError(f"invalid pinned wave state: {exc}") from exc
+                if phase != "ACTIVE" or not set(unit_ids).issubset(set(manifest["unit_ids"])):
+                    raise ClaimError("chapter claims must be inside ACTIVE literary wave")
+                if frozen_shared_state != manifest["shared_state_revisions"]:
+                    raise ClaimError("wave claims require exact pinned glossary/style revisions")
+                if workflow_revision != manifest["workflow_revision"]:
+                    raise ClaimError("wave claim references another workflow revision")
+                authorized: set[str] = set()
+                for dispatch_path in self.repository.storage.list(".workflow/session-dispatches"):
+                    if not dispatch_path.endswith(".json"):
+                        continue
+                    try:
+                        plan = json.loads(self.repository.storage.read(dispatch_path).content.decode("utf-8"))
+                    except (ValueError, UnicodeError, StorageError):
+                        continue
+                    for pack in plan.get("sessions", []):
+                        ctx = pack.get("context", {})
+                        if (pack.get("session_id") != session_id
+                                or ctx.get("wave_id") != wave_id
+                                or ctx.get("base_commit") != base_commit
+                                or ctx.get("memory_revision") != manifest["memory_revision"]):
+                            continue
+                        authorized.update(
+                            unit["unit_id"] for unit in pack.get("units", [])
+                            if unit.get("role") == role
+                        )
+                if not set(unit_ids).issubset(authorized):
+                    raise ClaimError("session is not authorized by a pinned wave dispatch")
 
             if frozen_shared_state is not None:
                 try:

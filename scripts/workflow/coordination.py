@@ -95,6 +95,7 @@ class BookCoordinationManager:
             "proposal_reconcile",
             "translation_acceptance",
             "source_promotion",
+            "wave_transition",
         }
         if operation not in allowed:
             raise CoordinationError(
@@ -109,6 +110,33 @@ class BookCoordinationManager:
             raise CoordinationConflict(
                 "book admission is blocked while source promotion is active; recover or finish the promotion first"
             )
+
+        if operation != "wave_transition":
+            from .storage import StorageNotFound
+            try:
+                wave = self.repository.storage.read(".workflow/waves/active.json")
+            except StorageNotFound:
+                wave = None
+            except StorageError as exc:
+                raise CoordinationError(f"cannot inspect active wave: {exc}") from exc
+            if wave is not None:
+                if operation in {"source_promotion", "finalize_admission"}:
+                    raise CoordinationConflict("operation blocked by active literary wave")
+                if operation == "proposal_reconcile":
+                    raise CoordinationConflict(
+                        "glossary/style proposals are frozen while a wave is active; reconcile after closure"
+                    )
+                if operation in {"claim_admission", "translation_acceptance"}:
+                    try:
+                        pointer = __import__("json").loads(wave.content)
+                        wave_id = pointer["wave_id"]
+                        state = __import__("json").loads(
+                            self.repository.storage.read(f".workflow/waves/{wave_id}/state.json").content
+                        )
+                    except (ValueError, KeyError, StorageError) as exc:
+                        raise CoordinationError(f"invalid wave admission state: {exc}") from exc
+                    if state.get("phase") != "ACTIVE":
+                        raise CoordinationConflict("new claims/translation acceptance blocked during wave reconciliation")
 
         now = self._now()
         document = {
