@@ -249,29 +249,40 @@ class WaveManager:
 
     def submit(self, wave_id: str, session_id: str, entry: Mapping[str, Any],
                *, source: bytes, source_revision: str) -> str:
-        manifest, state, _ = self._active_state()
-        if manifest["wave_id"] != wave_id or state["phase"] != "ACTIVE":
-            raise WaveError("memory proposal requires an active matching wave")
-        item = validate_entry(entry, source_revision=source_revision)
-        if item["source_revision_id"] != manifest["source_revision_id"]:
-            raise WaveError("proposal uses wrong edition")
-        if item["evidence"]["unit_id"] not in manifest["unit_ids"]:
-            raise WaveError("proposal evidence outside active wave")
+        coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
         try:
-            if item["evidence"]["quote"] not in source.decode("utf-8"):
-                raise WaveError("memory evidence quote not present in original source")
-        except UnicodeError as exc:
-            raise WaveError("source text is not UTF-8") from exc
-        path = f".workflow/claims/{item['evidence']['unit_id']}.json"
-        claim, _ = _json_read(self.storage, path)
-        if claim.get("session_id") != session_id or claim.get("role") not in {"translator", "reviewer"}:
-            raise WaveError("only current claimed worker may propose literary memory")
-        expires_at = datetime.fromisoformat(claim["expires_at"].replace("Z", "+00:00"))
-        if expires_at <= datetime.now(timezone.utc):
-            raise WaveError("memory proposal claim has expired")
-        payload = {"schema_version": 1, "wave_id": wave_id, "session_id": session_id,
-                   "entry": item}
-        return _create(self.storage, _proposal(wave_id, item["memory_id"]), payload)
+            lease = coordinator.acquire(operation="wave_transition", session_id="wave-submit")
+        except CoordinationError as exc:
+            raise WaveError(f"cannot acquire wave transition guard: {exc}") from exc
+        try:
+            manifest, state, _ = self._active_state()
+            if manifest["wave_id"] != wave_id or state["phase"] != "ACTIVE":
+                raise WaveError("memory proposal requires an active matching wave")
+            item = validate_entry(entry, source_revision=source_revision)
+            if item["source_revision_id"] != manifest["source_revision_id"]:
+                raise WaveError("proposal uses wrong edition")
+            if item["evidence"]["unit_id"] not in manifest["unit_ids"]:
+                raise WaveError("proposal evidence outside active wave")
+            try:
+                if item["evidence"]["quote"] not in source.decode("utf-8"):
+                    raise WaveError("memory evidence quote not present in original source")
+            except UnicodeError as exc:
+                raise WaveError("source text is not UTF-8") from exc
+            path = f".workflow/claims/{item['evidence']['unit_id']}.json"
+            claim, _ = _json_read(self.storage, path)
+            if claim.get("session_id") != session_id or claim.get("role") not in {"translator", "reviewer"}:
+                raise WaveError("only current claimed worker may propose literary memory")
+            expires_at = datetime.fromisoformat(claim["expires_at"].replace("Z", "+00:00"))
+            if expires_at <= datetime.now(timezone.utc):
+                raise WaveError("memory proposal claim has expired")
+            payload = {"schema_version": 1, "wave_id": wave_id, "session_id": session_id,
+                       "entry": item}
+            return _create(self.storage, _proposal(wave_id, item["memory_id"]), payload)
+        finally:
+            try:
+                coordinator.release(lease)
+            except CoordinationError as exc:
+                raise WaveError(f"wave transition guard release failed: {exc}") from exc
 
     def proposals(self, wave_id: str) -> list[dict[str, Any]]:
         _manifest(wave_id)
@@ -334,27 +345,38 @@ class WaveManager:
     def prepare_close(self, status: Mapping[str, Any], *,
                       decisions: Mapping[str, str],
                       read_source, read_translation) -> dict[str, Any]:
-        """Freeze the exact planned publication and enter RECONCILING (recoverable)."""
-        manifest, state, version = self._active_state()
-        if state["phase"] == "RECONCILING":
-            frozen, _ = _json_read(self.storage, f".workflow/waves/{manifest['wave_id']}/reconciliation.json")
-            if frozen["decisions"] != dict(sorted(decisions.items())):
-                raise WaveError("reconciling wave already has another frozen decision set")
-            return frozen
-        if state["phase"] != "ACTIVE":
-            raise WaveError("wave must be ACTIVE before reconciliation")
-        preview = self.reconcile_preview(
-            status, decisions=decisions, read_source=read_source,
-            read_translation=read_translation,
-        )
-        path = f".workflow/waves/{manifest['wave_id']}/reconciliation.json"
-        _create(self.storage, path, preview)
-        _write(self.storage, _state(manifest["wave_id"]), {
-            **state, "phase": "RECONCILING",
-            "decisions_sha256": __import__("hashlib").sha256(canonical(preview["decisions"])).hexdigest(),
-            "next_memory_revision": preview["next_snapshot"]["revision"],
-        }, version)
-        return preview
+        coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
+        try:
+            lease = coordinator.acquire(operation="wave_transition", session_id="wave-prepare_close")
+        except CoordinationError as exc:
+            raise WaveError(f"cannot acquire wave transition guard: {exc}") from exc
+        try:
+            """Freeze the exact planned publication and enter RECONCILING (recoverable)."""
+            manifest, state, version = self._active_state()
+            if state["phase"] == "RECONCILING":
+                frozen, _ = _json_read(self.storage, f".workflow/waves/{manifest['wave_id']}/reconciliation.json")
+                if frozen["decisions"] != dict(sorted(decisions.items())):
+                    raise WaveError("reconciling wave already has another frozen decision set")
+                return frozen
+            if state["phase"] != "ACTIVE":
+                raise WaveError("wave must be ACTIVE before reconciliation")
+            preview = self.reconcile_preview(
+                status, decisions=decisions, read_source=read_source,
+                read_translation=read_translation,
+            )
+            path = f".workflow/waves/{manifest['wave_id']}/reconciliation.json"
+            _create(self.storage, path, preview)
+            _write(self.storage, _state(manifest["wave_id"]), {
+                **state, "phase": "RECONCILING",
+                "decisions_sha256": __import__("hashlib").sha256(canonical(preview["decisions"])).hexdigest(),
+                "next_memory_revision": preview["next_snapshot"]["revision"],
+            }, version)
+            return preview
+        finally:
+            try:
+                coordinator.release(lease)
+            except CoordinationError as exc:
+                raise WaveError(f"wave transition guard release failed: {exc}") from exc
 
     def close(self, *, expected_wave: str) -> dict[str, Any]:
         coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
@@ -365,6 +387,8 @@ class WaveManager:
         try:
             """Idempotent ordered publication, with visible RECONCILING barrier."""
             manifest, state, state_version = self._active_state()
+            if self.storage.list(".workflow/claims"):
+                raise WaveError("cannot publish while durable literary claims exist")
             if expected_wave != manifest["wave_id"] or state["phase"] not in {"RECONCILING", "CLOSED"}:
                 raise WaveError("wave must match active reconciling manifest")
             path = f".workflow/waves/{expected_wave}/reconciliation.json"
