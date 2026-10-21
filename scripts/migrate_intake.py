@@ -252,7 +252,9 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
                 else:
                     pos = matches[0]
                     afterword["unit_number"] = pos + 1
-                    if set(map(int, block_map)) != set(range(spine[pos]["blocks"])):
+                    afterword["index_scheme"] = classify_indices(
+                        [int(i) for i in block_map], spine[pos])
+                    if afterword["index_scheme"] is None:
                         afterword["issues"].append("Afterword coverage mismatch")
                     afterword["status"] = "needs_reconciliation" if afterword["issues"] else "candidate_unreviewed"
             state["afterword"] = afterword
