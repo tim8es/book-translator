@@ -185,6 +185,47 @@ class CoverageCliTests(unittest.TestCase):
         self.assertEqual(payload["state"], "blocked")
         self.assertFalse((book_dir / "source-coverage.json").exists())
 
+    def test_new_source_edition_archives_prior_coverage_before_replace(self):
+        original = self.sample()
+        self.run_book("extract", str(original), "--slug", "sample",
+                      "--target-language", "ru", "--private-source")
+        book_dir = self.root / "books" / "sample"
+        before_progress = (book_dir / "progress.json").read_bytes()
+        old_report = (book_dir / "source-coverage.json").read_bytes()
+        old_sha = json.loads(old_report)["source_sha256"]
+
+        next_dir = self.root / "new-edition"
+        next_dir.mkdir()
+        newer = next_dir / "novel.epub"
+        epub(newer, "<html><body><h1>One</h1><p>Revised.</p></body></html>")
+        metadata_path = book_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        import hashlib
+        data = newer.read_bytes()
+        metadata["source"]["sha256"] = hashlib.sha256(data).hexdigest()
+        metadata["source"]["size_bytes"] = len(data)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        progress = json.loads(before_progress.decode("utf-8"))
+        chapter = book_dir / progress["chapters"][0]["source_path"]
+        chapter.write_text("# One\n\nRevised.\n", encoding="utf-8")
+
+        refused = self.run_book(
+            "source-coverage", "sample", "--source", str(newer), "--record", ok=False
+        )
+        self.assertIn("replace-stale", refused.stderr)
+        self.assertEqual((book_dir / "source-coverage.json").read_bytes(), old_report)
+
+        self.run_book(
+            "source-coverage", "sample", "--source", str(newer),
+            "--record", "--replace-stale"
+        )
+        self.assertEqual((book_dir / "progress.json").read_bytes(), before_progress)
+        archive = book_dir / "source-coverage-history" / f"{old_sha}.json"
+        self.assertEqual(archive.read_bytes(), old_report)
+        new_report = json.loads((book_dir / "source-coverage.json").read_text())
+        self.assertEqual(new_report["source_sha256"], metadata["source"]["sha256"])
+
     def test_private_source_can_certify_using_original_without_storing_epub(self):
         source = self.sample()
         self.run_book("extract", str(source), "--slug", "sample",
