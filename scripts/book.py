@@ -225,6 +225,9 @@ def split_markdown(text: str, fallback_title: str) -> list[Chapter]:
 
     starts = [(index, title) for index, level, title in headings if level == split_level]
     chapters: list[Chapter] = []
+    preamble = "\n".join(lines[:starts[0][0]]).strip()
+    if preamble:
+        chapters.append(Chapter(f"{fallback_title} — front matter", preamble + "\n"))
     for item_index, (start, title) in enumerate(starts):
         end = starts[item_index + 1][0] if item_index + 1 < len(starts) else len(lines)
         content = "\n".join(lines[start:end]).strip()
@@ -246,6 +249,9 @@ def split_txt(text: str, fallback_title: str) -> list[Chapter]:
         return [Chapter(fallback_title, text.strip() + "\n")]
 
     chapters: list[Chapter] = []
+    preamble = "\n".join(lines[:starts[0][0]]).strip()
+    if preamble:
+        chapters.append(Chapter(f"{fallback_title} — front matter", preamble + "\n"))
     for item_index, (start, title) in enumerate(starts):
         end = starts[item_index + 1][0] if item_index + 1 < len(starts) else len(lines)
         content = "\n".join(lines[start:end]).strip()
@@ -309,10 +315,12 @@ def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
         for idref in spine_ids:
             item = manifest.get(idref)
             if not item:
-                continue
+                raise BookError(f"EPUB spine references unknown manifest item: {idref}")
             href, media_type, properties = item
-            if "nav" in properties.split() or media_type not in {"application/xhtml+xml", "text/html"}:
+            if "nav" in properties.split():
                 continue
+            if media_type not in {"application/xhtml+xml", "text/html"}:
+                raise BookError(f"Unsupported EPUB spine media type {media_type!r}: {idref}")
             epub_path = (opf_dir / unquote(href.split("#", 1)[0])).as_posix()
             try:
                 raw = zf.read(epub_path)
@@ -322,8 +330,8 @@ def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
             fallback = Path(epub_path).stem.replace("_", " ").replace("-", " ").strip() or idref
             try:
                 chapters.extend(split_html_document(text, fallback))
-            except BookError:
-                continue
+            except BookError as exc:
+                raise BookError(f"Cannot extract EPUB spine document {epub_path}: {exc}") from exc
 
         if not chapters:
             raise BookError("No readable XHTML/HTML chapters found in EPUB spine.")
