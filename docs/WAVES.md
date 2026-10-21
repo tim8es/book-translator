@@ -30,3 +30,24 @@ Glossary and style-guide remain authoritative; proposals to those existing docum
 ## GitHub-native ChatGPT limitation
 
 ChatGPT GitHub sessions can inspect authoritatively stored files, workpacks, claims and artifacts. They cannot assume Python ran or manufacture SHA-256 memory revisions. Before any mutation, validate the contract, verify current state, use create-if-absent or compare-and-swap, then read back results. If the connector cannot execute a required deterministic transition or perform its cryptographic checks, stop and request execution by a verified runtime. Full GitHub-only feature parity requires a dedicated execution adapter and equivalence tests; it is not yet implemented by instructions alone.
+
+## Worker context routing and lazy chapter loading
+
+`agent-manifest.json.context_profiles` selects base instructions by role; when
+an ACTIVE wave exists, apply only that role's `context_overlays.waves`. For
+Translator/Reviewer this adds the short [WAVE_WORKER.md](WAVE_WORKER.md) contract.
+
+`wave-next` now includes `load_plan` for `claim` and `work` actions.
+It lists instruction paths, pinned glossary/style revisions, original source,
+translation/review input paths as applicable, the immutable memory snapshot,
+and the command to prepare bounded `memory-context`. **It does not include
+chapter bytes, full prior chapters, or memory contents.** With `claim`, fetch
+that chapter working context only *after* successfully acquiring the matching
+claim. With `work`, verify ownership/expiry before loading. No work context
+is returned for `wait`, `blocked`, or `complete`.
+
+For consecutive chapters, re-run `wave-next` to revalidate authority; reuse
+unchanged role instructions already in the same chat but reload current
+chapter-specific source, target and bounded memory. Role changes require
+reloading the corresponding role contract. The response is advisory metadata,
+not a runtime claim or a complete GitHub-native execution adapter.
