@@ -14,6 +14,7 @@ from typing import Any
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
 from .session_planner import SessionPlanError, plan_sessions
+from .session_runtime import SessionRuntimeError, save_dispatch, load_dispatch, next_action
 from .schemas import SchemaError
 from .source_cli import normalize_structural_errors, register_source_overrides, source_storage_mode
 from .source_coverage import coverage_integrity_errors
@@ -214,7 +215,9 @@ def plan_sessions_command(args: argparse.Namespace, root: Path, preflight: Prefl
             status, sessions=args.sessions, source_sizes=sizes,
             base_commit=base_commit, dispatch_id=args.dispatch_id or uuid4().hex,
         )
-    except (OSError, SessionPlanError) as exc:
+        if args.save:
+            save_dispatch(FilesystemStorage(_book_directory(root, args.slug)), plan)
+    except (OSError, SessionPlanError, SessionRuntimeError) as exc:
         raise StatusCliError(str(exc)) from exc
     if args.json:
         _print_json(plan)
@@ -224,6 +227,24 @@ def plan_sessions_command(args: argparse.Namespace, root: Path, preflight: Prefl
             chapters = ",".join(str(number) for number in assignment["chapter_numbers"])
             print(f"session={assignment['session_id']} chapters={chapters} source_bytes={assignment['source_bytes']}")
     return 0
+
+
+def session_next_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
+    """Read a saved workpack and derive the next safe step from current state."""
+    status = _snapshot(args, root, preflight)
+    storage = FilesystemStorage(_book_directory(root, args.slug))
+    try:
+        plan = load_dispatch(storage, args.dispatch_id)
+        decision = next_action(plan, status, args.session_id)
+    except SessionRuntimeError as exc:
+        raise StatusCliError(str(exc)) from exc
+    if args.json:
+        _print_json(decision)
+    else:
+        print(f"session={decision['session_id']} next={decision['action']}"
+              + (f" unit={decision['unit_id']}" if "unit_id" in decision else "")
+              + (f" reason={decision['reason']}" if "reason" in decision else ""))
+    return 1 if decision["action"] == "blocked" else 0
 
 
 def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
@@ -348,10 +369,25 @@ def register_status_commands(
     sessions.add_argument(
         "--dispatch-id", help="Reuse the 32-hex ID only when replaying the SAME saved plan."
     )
+    sessions.add_argument("--save", action="store_true", help="Atomically persist workpacks for chat restarts.")
     sessions.add_argument("--json", action="store_true")
     sessions.set_defaults(
         func=_adapt_errors(
             lambda args: plan_sessions_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
+
+    next_session = subparsers.add_parser(
+        "session-next", help="Resume one saved chat workpack from authoritative GitHub/file state."
+    )
+    next_session.add_argument("slug", help="Book slug under books/.")
+    next_session.add_argument("--dispatch-id", required=True)
+    next_session.add_argument("--session-id", required=True)
+    next_session.add_argument("--json", action="store_true")
+    next_session.set_defaults(
+        func=_adapt_errors(
+            lambda args: session_next_command(args, root, resolved_preflight),
             error_factory,
         )
     )

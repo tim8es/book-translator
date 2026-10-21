@@ -104,6 +104,24 @@ class WorkflowStatusCliTests(unittest.TestCase):
         self.assertEqual(plan["sessions"][0]["context"]["base_commit"], REVISION)
         self.assertEqual(progress_path.read_bytes(), before)
 
+    def test_saved_workpack_next_step_does_not_mutate_progress(self):
+        book = self.initialize_book()
+        progress = (book / "progress.json").read_bytes()
+        payload = self.canonical_json(self.run_book(
+            "plan-sessions", "sample", "--sessions", "2",
+            "--base-commit", REVISION, "--save", "--json",
+        ))
+        plan_path = (book / ".workflow" / "session-dispatches"
+                     / (payload["dispatch_id"] + ".json"))
+        self.assertTrue(plan_path.is_file())
+        saved = self.canonical_json(self.run_book(
+            "session-next", "sample", "--dispatch-id", payload["dispatch_id"],
+            "--session-id", payload["sessions"][0]["session_id"], "--json",
+        ))
+        self.assertEqual(saved["action"], "claim")
+        self.assertEqual(saved["operation"], "translate")
+        self.assertEqual((book / "progress.json").read_bytes(), progress)
+
     def test_status_and_resume_json_are_deterministic_bounded_and_read_only(self):
         book = self.initialize_book()
         progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
