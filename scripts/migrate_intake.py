@@ -62,14 +62,30 @@ def spine_entries(epub: Path) -> list[dict]:
                 entry = (PurePosixPath(opf_name).parent /
                          unquote(item.get("href", "").split("#")[0])).as_posix()
                 document = ET.fromstring(archive.read(entry))
-                blocks = sum(n.tag.split("}")[-1] in {"h1", "h2", "h3", "h4", "p"}
-                             for n in document.iter())
-                entries.append({"basename": PurePosixPath(entry).name, "blocks": blocks})
+                block_elements = [n for n in document.iter()
+                                  if n.tag.split("}")[-1] in {"h1", "h2", "h3", "h4", "p"}]
+                all_blocks = len(block_elements)
+                nonempty_blocks = sum(bool("".join(n.itertext()).strip()) for n in block_elements)
+                entries.append({"basename": PurePosixPath(entry).name, "blocks": all_blocks,
+                                "all_blocks": all_blocks, "nonempty_blocks": nonempty_blocks})
             if not entries:
                 raise MigrationError("No readable EPUB spine units")
             return entries
     except (OSError, KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
         raise MigrationError("Unusable source EPUB: " + str(exc)) from exc
+
+
+def resolve_block_scheme(indexes: set[int], spine_unit: dict):
+    """Identify source-block numbering; do not silently mix empty and nonempty schemes."""
+    if not indexes:
+        return None
+    all_count = spine_unit["all_blocks"]
+    nonempty_count = spine_unit["nonempty_blocks"]
+    if indexes == set(range(all_count)):
+        return "all_xhtml_blocks"
+    if indexes == set(range(nonempty_count)):
+        return "nonempty_xhtml_blocks"
+    return None
 
 
 def merge_indexed(parts: list[Path]):
@@ -168,21 +184,34 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             problems.append("Multiple full draft files")
         unit = None
         blocks = None
+        all_blocks = None
+        nonempty_blocks = None
+        block_scheme = None
         if spine is not None and offset is not None:
             pos = number - 1 + offset
             if pos < 0 or pos >= len(spine):
                 problems.append("Chapter outside source spine")
             else:
                 unit = pos + 1
-                blocks = spine[pos]["blocks"]
+                all_blocks = spine[pos]["all_blocks"]
+                nonempty_blocks = spine[pos]["nonempty_blocks"]
                 if sources and any(s != spine[pos]["basename"] for s in sources):
                     problems.append("Draft source path differs from verified EPUB")
-                if method == "indexed_parts" and set(indexed) != set(range(blocks)):
-                    problems.append(f"Indexed coverage {len(indexed)}/{blocks}")
-                if method == "markdown":
+                if method == "indexed_parts":
+                    block_scheme = resolve_block_scheme(set(indexed), spine[pos])
+                    if block_scheme is None:
+                        problems.append(f"Indexed coverage {len(indexed)}/{all_blocks} all blocks "
+                                        f"or {nonempty_blocks} nonempty blocks")
+                elif method == "markdown":
                     markers = [int(x) for x in INDEX.findall((book / candidate).read_text(encoding="utf-8"))]
-                    if markers and (len(markers) != len(set(markers)) or set(markers) != set(range(blocks))):
-                        problems.append(f"Markdown index coverage mismatch: {len(markers)}/{blocks}")
+                    if markers:
+                        block_scheme = resolve_block_scheme(set(markers), spine[pos])
+                        if len(markers) != len(set(markers)) or block_scheme is None:
+                            problems.append(f"Markdown indexed coverage mismatch: {len(markers)}/"
+                                            f"{all_blocks} all or {nonempty_blocks} nonempty")
+                blocks = (all_blocks if block_scheme == "all_xhtml_blocks"
+                          else nonempty_blocks if block_scheme == "nonempty_xhtml_blocks"
+                          else all_blocks)
         if not candidate:
             problems.append("No unambiguous complete candidate")
         status = ("source_unverified" if spine is None else
@@ -193,6 +222,9 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
         state["chapters"].append({"chapter": number, "unit_number": unit, "status": status,
                                   "candidate": candidate, "method": method, "source_blocks": blocks,
                                   "indexed_blocks": len(indexed),
+                                  "all_source_blocks": all_blocks,
+                                  "nonempty_source_blocks": nonempty_blocks,
+                                  "index_scheme": block_scheme,
                                   "indexed_min": min(indexed) if indexed else None,
                                   "indexed_max": max(indexed) if indexed else None,
                                   "files": len(paths), "issues": problems})
