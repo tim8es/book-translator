@@ -149,6 +149,48 @@ class WorkflowStatusCliTests(unittest.TestCase):
         self.assertTrue(report["comparisons"][0]["meets_provisional_2x_target"])
         self.assertEqual(json.loads(path.read_text()), observations)
 
+    def test_wave_cli_plans_starts_pins_context_and_blocks_second_wave(self):
+        book_dir = self.initialize_book()
+        preview = self.canonical_json(
+            self.run_book("wave-plan", "sample", "--count", "1")
+        )
+        self.assertEqual(preview["unit_ids"], ["chapter-000001"])
+        started = self.canonical_json(
+            self.run_book("wave-start", "sample", "--count", "1")
+        )
+        wave_id = started["wave_id"]
+        self.assertEqual(len(wave_id), 32)
+        self.assertEqual(
+            self.canonical_json(self.run_book("wave-status", "sample"))["manifest"]["wave_id"],
+            wave_id,
+        )
+        context = self.canonical_json(
+            self.run_book("memory-context", "sample", "--unit-id", "chapter-000001")
+        )
+        self.assertEqual(context["entries"], [])
+        dispatch = self.canonical_json(
+            self.run_book(
+                "wave-dispatch", "sample", "--sessions", "2",
+                "--base-commit", REVISION
+            )
+        )
+        action = self.canonical_json(
+            self.run_book(
+                "wave-next", "sample",
+                "--dispatch-id", dispatch["dispatch_id"],
+                "--session-id", dispatch["sessions"][0]["session_id"]
+            )
+        )
+        self.assertEqual(action["action"], "claim")
+        self.assertEqual(
+            self.canonical_json(self.run_book("wave-status", "sample"))["state"]["phase"],
+            "ACTIVE",
+        )
+        self.assertEqual(
+            self.run_book("wave-start", "sample", "--count", "1", expect=1).returncode,
+            1,
+        )
+
     def test_status_and_resume_json_are_deterministic_bounded_and_read_only(self):
         book = self.initialize_book()
         progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))

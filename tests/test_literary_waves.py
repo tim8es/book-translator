@@ -172,6 +172,9 @@ class WaveTests(unittest.TestCase):
                 decisions={"term-warden": "accepted"},
                 read_source=lambda _: b"Warden", read_translation=lambda _: b"Страж",
             )
+        claim_path = ".workflow/claims/chapter-000001.json"
+        current = self.storage.read(claim_path)
+        self.storage.delete_if_version(claim_path, current.version)
         preview = self.manager.reconcile_preview(
             self.status, decisions={"term-warden": "accepted"},
             read_source=lambda _: b"Warden", read_translation=lambda _: "Страж".encode(),
