@@ -241,8 +241,9 @@ class ReviewLedgerManager:
         chapter_number: int,
         *,
         allow_untranslated: bool,
+        chapter_record: Mapping[str, Any] | None = None,
     ) -> tuple[str, Mapping[str, Any], str, str | None]:
-        chapter = self._chapter(progress, chapter_number)
+        chapter = chapter_record if chapter_record is not None else self._chapter(progress, chapter_number)
         unit_id = unit_id_for_chapter(chapter)
         source = self._read_artifact(
             chapter.get("source_path"),
@@ -267,15 +268,22 @@ class ReviewLedgerManager:
         progress: Mapping[str, Any],
         metadata: Mapping[str, Any],
         chapter_number: int,
+        *,
+        chapter_record: Mapping[str, Any] | None = None,
+        indexed_history: list[dict[str, Any]] | None = None,
     ) -> ReviewResolution:
         workflow_revision, contract_revision = self._workflow_context(metadata)
         unit_id, _, source_sha256, translation_sha256 = self._artifact_identity(
             progress,
             chapter_number,
             allow_untranslated=True,
+            chapter_record=chapter_record,
         )
-        ledger = self._load_ledger(progress).data
-        history = self._history_for(ledger, unit_id)
+        history = (
+            copy.deepcopy(indexed_history)
+            if indexed_history is not None
+            else self._history_for(self._load_ledger(progress).data, unit_id)
+        )
 
         if translation_sha256 is None:
             return ReviewResolution(
@@ -324,7 +332,13 @@ class ReviewLedgerManager:
         chapters = progress.get("chapters") if isinstance(progress, Mapping) else None
         if not isinstance(chapters, list):
             raise ReviewEvidenceError("progress state must contain a chapters array")
-        numbers: list[int] = []
+        # Load and index the append-only ledger only once for an entire book.
+        ledger = self._load_ledger(progress).data
+        by_unit: dict[str, list[dict[str, Any]]] = {}
+        for record in ledger["records"]:
+            by_unit.setdefault(record["unit_id"], []).append(record)
+
+        resolutions: list[ReviewResolution] = []
         seen: set[int] = set()
         for index, chapter in enumerate(chapters):
             if not isinstance(chapter, Mapping):
@@ -335,8 +349,15 @@ class ReviewLedgerManager:
             if number in seen:
                 raise ReviewEvidenceError(f"progress contains duplicate chapter number {number}")
             seen.add(number)
-            numbers.append(number)
-        return [self.resolve_unit(progress, metadata, number) for number in sorted(numbers)]
+            unit_id = unit_id_for_chapter(chapter)
+            resolutions.append(
+                self.resolve_unit(
+                    progress, metadata, number,
+                    chapter_record=chapter,
+                    indexed_history=by_unit.get(unit_id, []),
+                )
+            )
+        return sorted(resolutions, key=lambda resolution: resolution.chapter_number)
 
     @staticmethod
     def _correction_round(history: list[dict[str, Any]], outcome: str) -> int:
