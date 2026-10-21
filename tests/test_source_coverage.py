@@ -105,6 +105,34 @@ class CoverageAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceCoverageError, "<del>"):
             certify(self.path)
 
+    def test_navigation_with_content_outside_nav_blocks_coverage(self):
+        epub(self.path, "<html><body><p>Alpha.</p></body></html>")
+        with zipfile.ZipFile(self.path, "a") as z:
+            z.writestr("OPS/navigation.xhtml",
+                "<html><body><nav><p>Contents</p></nav><p>Hidden appendix.</p></body></html>")
+        with zipfile.ZipFile(self.path, "r") as z:
+            contents = z.read("OPS/content.opf").decode("utf-8")
+        contents = contents.replace(
+            "</manifest>",
+            '<item id="navigation" href="navigation.xhtml" '
+            'media-type="application/xhtml+xml" properties="nav"/></manifest>'
+        )
+        # Rebuild once to avoid duplicate entries when modifying a ZIP member.
+        with tempfile.NamedTemporaryFile(suffix=".epub") as tmp:
+            with zipfile.ZipFile(self.path, "r") as old, zipfile.ZipFile(tmp.name, "w") as new:
+                for info in old.infolist():
+                    new.writestr(info, contents if info.filename == "OPS/content.opf" else old.read(info.filename))
+            shutil.copy2(tmp.name, self.path)
+        with self.assertRaisesRegex(SourceCoverageError, "outside its nav"):
+            certify(self.path)
+
+    def test_duplicate_archive_members_block_coverage(self):
+        epub(self.path, "<html><body><p>Alpha.</p></body></html>")
+        with zipfile.ZipFile(self.path, "a") as z:
+            z.writestr("OPS/chapter.xhtml", "<html><body><p>Duplicated.</p></body></html>")
+        with self.assertRaisesRegex(SourceCoverageError, "duplicate archive"):
+            certify(self.path)
+
     def test_mismatched_chapter_corpus_is_rejected(self):
         epub(self.path, "<html><body><p>Alpha.</p></body></html>")
         with self.assertRaisesRegex(SourceCoverageError, "chapter list differs"):
@@ -121,6 +149,7 @@ class CoverageCliTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts" / "book.py", self.root / "scripts" / "book.py")
+        shutil.copy2(ROOT / "scripts" / "corpus.py", self.root / "scripts" / "corpus.py")
         shutil.copytree(ROOT / "scripts" / "workflow", self.root / "scripts" / "workflow")
         (self.root / "docs" / "templates").mkdir(parents=True)
 
@@ -130,6 +159,17 @@ class CoverageCliTests(unittest.TestCase):
     def run_book(self, *args, ok=True):
         result = subprocess.run(
             [sys.executable, str(self.root / "scripts" / "book.py"), *args],
+            cwd=self.root, capture_output=True, text=True,
+        )
+        if ok:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0)
+        return result
+
+    def run_corpus(self, *args, ok=True):
+        result = subprocess.run(
+            [sys.executable, str(self.root / "scripts" / "corpus.py"), *args],
             cwd=self.root, capture_output=True, text=True,
         )
         if ok:
@@ -164,12 +204,14 @@ class CoverageCliTests(unittest.TestCase):
         (book_dir / "source-coverage.json").unlink()
         progress = (book_dir / "progress.json").read_bytes()
         self.run_book("validate", "sample", ok=False)
+        self.run_corpus("verify", "sample", ok=False)
         report = json.loads(self.run_book("source-coverage", "sample", "--json").stdout)
         self.assertEqual(report["state"], "verified")
         self.assertFalse((book_dir / "source-coverage.json").exists())
         self.run_book("source-coverage", "sample", "--record")
         self.assertEqual((book_dir / "progress.json").read_bytes(), progress)
         self.run_book("validate", "sample")
+        self.run_corpus("verify", "sample")
 
     def test_json_failure_is_machine_readable_and_never_writes(self):
         source = self.sample()
