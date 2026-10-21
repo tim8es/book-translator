@@ -138,7 +138,41 @@ def classify_indices(indices, source):
 
 
 
-def audit(book: Path, source: Path | None = None, offset: int | None = None) -> dict:
+def load_source_reference(path: Path, book: Path, expected: str | None):
+    """Read metadata-only source index, never authorizing canonical staging."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise MigrationError("Unreadable source reference: " + str(exc)) from exc
+    if not expected or payload.get("schema_version") != 1 or payload.get("book_slug") != book.name:
+        raise MigrationError("Reference schema/book identity mismatch")
+    if payload.get("source_sha256") != expected:
+        raise MigrationError("Reference original EPUB digest mismatch")
+    spine = payload.get("spine")
+    if not isinstance(spine, list) or not spine or payload.get("source_units") != len(spine):
+        raise MigrationError("Reference spine is invalid")
+    seen = set()
+    result = []
+    for i, obj in enumerate(spine):
+        if not isinstance(obj, dict):
+            raise MigrationError("Invalid source reference unit " + str(i))
+        basename = obj.get("basename")
+        count = obj.get("blocks")
+        nonempty = obj.get("nonempty_blocks")
+        digest = obj.get("sha256")
+        if (not isinstance(basename, str) or not basename or "/" in basename or
+                basename in seen or not isinstance(count, int) or count < 1 or
+                not isinstance(nonempty, int) or not (0 <= nonempty <= count) or
+                not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise MigrationError("Invalid source reference unit " + str(i))
+        seen.add(basename)
+        result.append({"basename": basename, "blocks": count,
+                       "nonempty_blocks": nonempty, "sha256": digest})
+    return result
+
+
+def audit(book: Path, source: Path | None = None, offset: int | None = None,
+          source_reference: Path | None = None) -> dict:
     intake = book / "incoming"
     if not intake.is_dir():
         raise MigrationError("Missing incoming directory")
@@ -148,7 +182,15 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
              [p for p in CANONICAL if not (book / p).is_file()],
              "chapters": [], "ready_candidates": 0, "reviewed_promotions": 0}
     spine = None
-    if source is None:
+    state["source_map_loaded"] = False
+    if source is not None and source_reference is not None:
+        raise MigrationError("Choose either a trusted EPUB or a metadata reference, not both")
+    if source is None and source_reference is not None:
+        spine = load_source_reference(source_reference, book, expected)
+        state["source_map_loaded"] = True
+        state["source_units"] = len(spine)
+        state["blockers"].append("Reference-only audit: original EPUB not provided for canonical preflight")
+    elif source is None:
         state["blockers"].append("Trusted original EPUB is not available")
     elif not source.is_file() or not expected:
         state["blockers"].append("Original source file or trusted digest missing")
@@ -223,9 +265,13 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
             problems.append("No unambiguous complete candidate")
         status = ("source_unverified" if spine is None else
                   "needs_chapter_offset" if offset is None else
-                  "needs_reconciliation" if problems else "candidate_unreviewed")
+                  "needs_reconciliation" if problems else
+                  "reference_candidate_unreviewed" if state["source_map_loaded"] else
+                  "candidate_unreviewed")
         if status == "candidate_unreviewed":
             state["ready_candidates"] += 1
+        elif status == "reference_candidate_unreviewed":
+            state["reference_candidates"] = state.get("reference_candidates", 0) + 1
         state["chapters"].append({"chapter": number, "unit_number": unit, "status": status,
                                   "candidate": candidate, "method": method, "source_blocks": blocks,
                                   "nonempty_source_blocks": nonempty_blocks,
@@ -256,7 +302,9 @@ def audit(book: Path, source: Path | None = None, offset: int | None = None) -> 
                         [int(i) for i in block_map], spine[pos])
                     if afterword["index_scheme"] is None:
                         afterword["issues"].append("Afterword coverage mismatch")
-                    afterword["status"] = "needs_reconciliation" if afterword["issues"] else "candidate_unreviewed"
+                    afterword["status"] = ("needs_reconciliation" if afterword["issues"] else
+                                           "reference_candidate_unreviewed" if state["source_map_loaded"] else
+                                           "candidate_unreviewed")
             state["afterword"] = afterword
         except (OSError, UnicodeError, ValueError, TypeError) as exc:
             state["afterword"] = {"status": "needs_reconciliation", "issues": [str(exc)]}
@@ -332,7 +380,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("slug")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--source", type=Path)
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument("--source", type=Path)
+    sources.add_argument("--source-reference", type=Path,
+                         help="Metadata-only source index for read-only reporting; never authorizes staging")
     parser.add_argument("--chapter-offset", type=int)
     parser.add_argument("--stage", action="store_true")
     args = parser.parse_args(argv)
@@ -342,7 +393,8 @@ def main(argv=None):
         if args.chapter_offset is not None and args.chapter_offset < 0:
             raise MigrationError("Negative chapter offset")
         book = args.root / "books" / args.slug
-        report = audit(book, args.source, args.chapter_offset)
+        report = audit(book, args.source, args.chapter_offset,
+                       source_reference=args.source_reference)
         if args.stage:
             if args.chapter_offset is None:
                 raise MigrationError("Staging requires explicit chapter offset")

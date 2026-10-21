@@ -56,3 +56,22 @@ nonempty h1-h4/p elements. The verifier classifies these *per chapter*, never
 assumes a single scheme for the whole book, and fails closed if neither
 contiguous index range matches. Matching index counts proves only mechanical
 coverage: it does **not** establish text fidelity or Reviewer PASS.
+
+
+## Safe structural audit while the book workspace is public
+
+If the original EPUB has been privately verified once, export a metadata-only
+source index with book slug, exact source SHA-256, per-XHTML SHA-256 and separate
+all-elements/nonempty block counts. This index must contain no copyrighted
+source paragraphs or translated paragraphs.
+
+Then run:
+
+    python scripts/migrate_intake.py the-claiming-moon --chapter-offset 2 \
+      --source-reference docs/migrations/the-claiming-moon-source-reference.json
+
+This is **reference-only**: its per-chapter status is
+reference_candidate_unreviewed (or needs_reconciliation); it does not set
+source_verified, unlock --stage, initialize a sealed corpus, or issue PASS.
+For canonical transitions, the exact original EPUB and matching extracted
+source corpus must exist in an authorized private workspace.
