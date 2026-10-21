@@ -369,6 +369,10 @@ For EPUB, a separate independent [text coverage audit](docs/SOURCE_COVERAGE.md)
 compares the original XHTML inventory with the extracted chapters. Only the
 strict supported textual subset can be marked verified. Missing, lossy or
 unsupported content blocks the workflow rather than being silently omitted.
+A verified report certifies ordered text tokens for the supported XHTML subset,
+not visual layout, images, footnote semantics, or arbitrary EPUB markup.
+Previously imported EPUB books must be independently re-audited against their
+exact original file before translation can resume; nothing is auto-certified.
 
 ## Supported source formats
 

@@ -62,3 +62,8 @@ XHTML subset, not proof of typography, reading order defined by CSS, visual
 layout, illustration semantics, or rendering correctness. A real-world EPUB
 may be rejected until its structure is supported rather than be given an
 unjustified 100% score.
+
+A navigation XHTML is excluded only when its body has no prose outside the
+navigation elements. Duplicate ZIP entry names also block certification.
+The `corpus.py verify` command checks EPUB coverage alongside its existing
+cryptographic source-corpus integrity checks.

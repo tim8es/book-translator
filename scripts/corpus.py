@@ -32,6 +32,7 @@ from workflow import (
 )
 from workflow.schemas import SCHEMA_VERSION, parse_document
 from workflow.source_cli import normalize_structural_errors
+from workflow.source_coverage import coverage_integrity_errors
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -412,6 +413,7 @@ def verify_command(args: argparse.Namespace) -> int:
     book_dir, metadata, progress = book.load_book(args.slug)
     errors, _ = book.validate_book(args.slug)
     errors = normalize_structural_errors(book_dir, metadata, errors)
+    errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
     if errors:
         raise book.BookError("Cannot verify invalid book structure:\n- " + "\n- ".join(errors))
 

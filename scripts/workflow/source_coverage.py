@@ -111,6 +111,38 @@ def _from_markdown(chapters: Sequence[Any]) -> list[str]:
     return _tokens(" ".join(parts))
 
 
+def _navigation_is_exclusive(raw: bytes, path: str) -> None:
+    """Navigation XHTML is excludable only if body has no non-navigation prose."""
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise SourceCoverageError(f"{path}: invalid navigation XHTML: {exc}") from exc
+    bodies = [node for node in root.iter() if _name(node.tag) == "body"]
+    if len(bodies) != 1:
+        raise SourceCoverageError(f"{path}: navigation XHTML must have one body")
+    outer: list[str] = []
+    navigation_count = 0
+
+    def visit(node: ET.Element) -> None:
+        nonlocal navigation_count
+        if _name(node.tag) == "nav":
+            navigation_count += 1
+            return
+        if node.text:
+            outer.append(node.text)
+        for child in node:
+            visit(child)
+            if child.tail:
+                outer.append(child.tail)
+
+    visit(bodies[0])
+    if not navigation_count or _tokens(" ".join(outer)):
+        raise SourceCoverageError(
+            f"{path}: navigation document contains text outside its nav elements "
+            "or has no nav; cannot exclude it from coverage"
+        )
+
+
 def _archive_path(opf_path: str, href: str) -> str:
     decoded = unquote(href.split("#", 1)[0].split("?", 1)[0])
     if not decoded or decoded.startswith("/") or "\\" in decoded:
@@ -133,6 +165,9 @@ def audit_epub(
         raise SourceCoverageError("Original EPUB is not a valid ZIP archive")
     source_bytes = source.read_bytes()
     with zipfile.ZipFile(source) as archive:
+        members = archive.namelist()
+        if len(members) != len(set(members)):
+            raise SourceCoverageError("EPUB ZIP has duplicate archive paths")
         try:
             container = ET.fromstring(archive.read("META-INF/container.xml"))
             opf_path = next(
@@ -174,6 +209,10 @@ def audit_epub(
                 raise SourceCoverageError(f"Duplicate spine document {path}")
             covered.add(path)
             if "nav" in item["properties"].split():
+                try:
+                    _navigation_is_exclusive(archive.read(path), path)
+                except KeyError as exc:
+                    raise SourceCoverageError(f"Missing navigation XHTML {path}") from exc
                 documents.append({"path": path, "state": "excluded_navigation"})
                 continue
             if item["media"] not in TEXT_MEDIA:
@@ -208,6 +247,10 @@ def audit_epub(
             if item["media"] not in TEXT_MEDIA or item["path"] in covered:
                 continue
             if "nav" in item["properties"].split():
+                try:
+                    _navigation_is_exclusive(archive.read(item["path"]), item["path"])
+                except KeyError as exc:
+                    raise SourceCoverageError(f"Missing off-spine navigation XHTML {item['path']}") from exc
                 documents.append({"path": item["path"], "state": "excluded_navigation"})
                 continue
             try:
