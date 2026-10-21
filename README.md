@@ -186,6 +186,29 @@ Advanced users or agents may use temporary branches/worktrees when they need iso
 
 If one book needs stronger privacy or organizational isolation, putting that book in its own private repository is usually easier to understand than using a permanent branch as storage.
 
+## Parallel translation across separate chats
+
+You create the chats manually. Each session uses the same private working
+repository and the same pinned workflow revision, but processes its own units.
+
+For environments with the Python helper, create advisory, source-size-balanced
+workpacks (without creating any agents or modifying book state):
+
+```bash
+python scripts/book.py plan-sessions <book-slug> --sessions 3 --json
+```
+
+Paste each workpack's `instructions`, `session_id`, and `units` into its own
+chat. The workpacks are **not** locks: each chat must acquire a durable claim
+before translating or reviewing a specific unit, then accept and release its
+result. A long-running chapter claim can be extended by the owning session
+with `renew-claim`.
+
+If the chat has only GitHub tools, it can inspect and coordinate the same
+repository state without inventing local Python execution; conditional GitHub
+writes and the pinned version/claim contracts remain mandatory. See
+[the orchestration protocol](docs/ORCHESTRATION.md) for the precise rules.
+
 ## How resuming works
 
 Book Translator stores the state needed to continue in files, not only in chat history.

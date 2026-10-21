@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Avoid burning minutes on superseded PR commits; keep the full test matrix.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests:
     runs-on: ubuntu-latest

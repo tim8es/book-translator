@@ -146,6 +146,20 @@ class WorkflowReviewTests(unittest.TestCase):
             review_commit=None,
         )
 
+    def test_bulk_resolution_reads_review_ledger_once(self):
+        manager = self.manager()
+        original = manager._load_ledger
+        loaded = []
+
+        def counted(progress):
+            loaded.append(True)
+            return original(progress)
+
+        manager._load_ledger = counted
+        resolutions = manager.resolve_all(self.progress, self.metadata)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual([item.chapter_number for item in resolutions], [1, 2])
+
     def test_pass_binds_exact_source_and_translation_bytes_and_restores_when_bytes_restore(self):
         self.claim()
         manager = self.manager()
