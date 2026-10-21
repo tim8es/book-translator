@@ -168,6 +168,8 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                        for uid in manifest["unit_ids"]):
                     raise WaveError("cannot recover while some wave units lack current PASS")
                 result = manager.recover(wave_id=manifest["wave_id"])
+            elif action == "memory-sync":
+                result = manager.sync_shared_memory(snapshot, metadata)
             elif action == "memory-impact":
                 result = {"pending": manager.impact_queue()}
             elif action == "memory-impact-resolve":
@@ -214,6 +216,7 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
         "wave-reconcile": "Preview or prepare frozen wave reconciliation",
         "wave-close": "Publish verified memory and close a reconciled wave",
         "wave-recover": "Finish a frozen interrupted wave reconciliation",
+        "memory-sync": "Rebase literary memory on reconciled glossary/style between waves",
         "memory-impact": "List pending consistency checks",
         "memory-impact-resolve": "Bind impact resolution to an independent PASS",
     }
