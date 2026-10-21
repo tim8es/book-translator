@@ -61,6 +61,10 @@ class BlockHTMLParser(HTMLParser):
     BLOCK_TAGS = {"p", "div", "li", "blockquote", "pre"}
     HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
     SKIP_TAGS = {"script", "style", "svg"}
+    INLINE_MARKERS = {"em": "*", "i": "*", "strong": "**", "b": "**", "code": "`"}
+    # The plain-text extractor cannot represent these structures faithfully.
+    UNSUPPORTED_SEMANTICS = {"a", "img", "table", "figure", "figcaption", "aside",
+                             "sup", "sub", "math", "ruby", "audio", "video"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -68,6 +72,7 @@ class BlockHTMLParser(HTMLParser):
         self._tag: str | None = None
         self._parts: list[str] = []
         self._skip_depth = 0
+        self._inline_stack: list[tuple[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
@@ -75,6 +80,13 @@ class BlockHTMLParser(HTMLParser):
             self._skip_depth += 1
             return
         if self._skip_depth:
+            return
+        if tag in self.UNSUPPORTED_SEMANTICS:
+            raise BookError(f"Unsupported semantic HTML element <{tag}>; extraction would lose structure")
+        if tag in self.INLINE_MARKERS:
+            marker = self.INLINE_MARKERS[tag]
+            self._parts.append(marker)
+            self._inline_stack.append((tag, marker))
             return
         if tag in self.HEADING_TAGS or tag in self.BLOCK_TAGS:
             self._flush()
@@ -89,6 +101,11 @@ class BlockHTMLParser(HTMLParser):
             return
         if self._skip_depth:
             return
+        if tag in self.INLINE_MARKERS:
+            if not self._inline_stack or self._inline_stack[-1][0] != tag:
+                raise BookError(f"Unbalanced inline HTML closing tag </{tag}>")
+            self._parts.append(self._inline_stack.pop()[1])
+            return
         if self._tag == tag:
             self._flush()
 
@@ -101,6 +118,8 @@ class BlockHTMLParser(HTMLParser):
         self._flush()
 
     def _flush(self) -> None:
+        if self._inline_stack:
+            raise BookError("Unclosed inline HTML formatting at block boundary")
         if not self._parts:
             self._tag = None
             return
@@ -225,6 +244,9 @@ def split_markdown(text: str, fallback_title: str) -> list[Chapter]:
 
     starts = [(index, title) for index, level, title in headings if level == split_level]
     chapters: list[Chapter] = []
+    preamble = "\n".join(lines[:starts[0][0]]).strip()
+    if preamble:
+        chapters.append(Chapter(f"{fallback_title} — front matter", preamble + "\n"))
     for item_index, (start, title) in enumerate(starts):
         end = starts[item_index + 1][0] if item_index + 1 < len(starts) else len(lines)
         content = "\n".join(lines[start:end]).strip()
@@ -246,6 +268,9 @@ def split_txt(text: str, fallback_title: str) -> list[Chapter]:
         return [Chapter(fallback_title, text.strip() + "\n")]
 
     chapters: list[Chapter] = []
+    preamble = "\n".join(lines[:starts[0][0]]).strip()
+    if preamble:
+        chapters.append(Chapter(f"{fallback_title} — front matter", preamble + "\n"))
     for item_index, (start, title) in enumerate(starts):
         end = starts[item_index + 1][0] if item_index + 1 < len(starts) else len(lines)
         content = "\n".join(lines[start:end]).strip()
@@ -309,10 +334,12 @@ def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
         for idref in spine_ids:
             item = manifest.get(idref)
             if not item:
-                continue
+                raise BookError(f"EPUB spine references unknown manifest item: {idref}")
             href, media_type, properties = item
-            if "nav" in properties.split() or media_type not in {"application/xhtml+xml", "text/html"}:
+            if "nav" in properties.split():
                 continue
+            if media_type not in {"application/xhtml+xml", "text/html"}:
+                raise BookError(f"Unsupported EPUB spine media type {media_type!r}: {idref}")
             epub_path = (opf_dir / unquote(href.split("#", 1)[0])).as_posix()
             try:
                 raw = zf.read(epub_path)
@@ -322,8 +349,8 @@ def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
             fallback = Path(epub_path).stem.replace("_", " ").replace("-", " ").strip() or idref
             try:
                 chapters.extend(split_html_document(text, fallback))
-            except BookError:
-                continue
+            except BookError as exc:
+                raise BookError(f"Cannot extract EPUB spine document {epub_path}: {exc}") from exc
 
         if not chapters:
             raise BookError("No readable XHTML/HTML chapters found in EPUB spine.")

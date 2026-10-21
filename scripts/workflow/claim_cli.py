@@ -189,6 +189,25 @@ def release_command(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def renew_command(args: argparse.Namespace, root: Path) -> int:
+    repository = _repository(root, args.slug)
+    progress, _ = _load_progress(repository)
+    manager = ClaimManager(repository)
+    try:
+        claims = manager.renew(
+            progress, args.selector, session_id=args.session_id,
+            lease_seconds=args.lease_seconds,
+        )
+    except (ClaimError, SchemaError, RepositoryError, StorageError) as exc:
+        raise ClaimCliError(str(exc)) from exc
+    if args.json:
+        _print_json({"claims": [_claim_json(claim) for claim in claims]})
+    else:
+        for claim in claims:
+            print(f"renewed {claim.data['unit_id']} until {claim.data['expires_at']}")
+    return 0
+
+
 def cleanup_claims_command(args: argparse.Namespace, root: Path) -> int:
     repository = _repository(root, args.slug)
     manager = ClaimManager(repository)
@@ -237,6 +256,14 @@ def register_claim_commands(subparsers: argparse._SubParsersAction, root: Path) 
     release.add_argument("--session-id", required=True, help="Owning session identity.")
     release.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
     release.set_defaults(func=lambda args: release_command(args, root))
+
+    renew = subparsers.add_parser("renew-claim", help="Extend the active session's existing unit claims.")
+    renew.add_argument("slug", help="Book slug under books/.")
+    renew.add_argument("selector", help="One chapter or inclusive range N-M.")
+    renew.add_argument("--session-id", required=True)
+    renew.add_argument("--lease-seconds", type=int, default=3600)
+    renew.add_argument("--json", action="store_true")
+    renew.set_defaults(func=lambda args: renew_command(args, root))
 
     cleanup = subparsers.add_parser("cleanup-claims", help="Clean up expired claims with audit evidence.")
     cleanup.add_argument("slug", help="Book slug under books/.")

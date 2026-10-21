@@ -77,6 +77,24 @@ class WorkflowGitHubRestClientTests(unittest.TestCase):
         self.assertEqual(headers["x-github-api-version"], "2026-03-10")
         self.assertEqual(headers["authorization"], "Bearer secret-token")
 
+    def test_contents_embedded_payload_avoids_second_request(self):
+        payload = b"binary\\x00data"
+        client, opener = self.client(
+            encoded({"type": "file", "sha": "blob-sha",
+                     "encoding": "base64", "content": base64.encodebytes(payload).decode("ascii")}),
+        )
+        result = client.get_file("owner/repo", "part.md", "main")
+        self.assertEqual(result.content, payload)
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_contents_embedded_invalid_base64_is_rejected(self):
+        client, opener = self.client(
+            encoded({"type": "file", "sha": "blob-sha", "encoding": "base64", "content": "%%%"}),
+        )
+        with self.assertRaises(GitHubApiError):
+            client.get_file("owner/repo", "part.md", "main")
+        self.assertEqual(len(opener.requests), 1)
+
     def test_tree_preserves_entries_and_truncated_flag(self):
         client, opener = self.client(
             encoded(

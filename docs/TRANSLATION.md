@@ -303,3 +303,39 @@ When an existing translation is questioned, changed materially, or suspected to 
 Perform a fresh source-to-translation comparison for the affected scope. Pay particular attention to semantic drift, invented explanation, lost ambiguity, changed emotional intensity, homogenized dialogue, polished-away roughness, incorrect pronoun or speaker interpretation, omissions, and elegant wording that no longer matches the source.
 
 Return `PASS` only for the artifact actually reviewed. Otherwise return `CORRECTIONS_REQUIRED` and identify what must change.
+
+## Optional structured quality evidence
+
+The hash-bound review ledger proves which exact artifact was reviewed, but
+a PASS decision alone does not prove literary quality. For new reviews, prefer
+an explicit report with the following compact JSON structure:
+
+```json
+{
+  "context": "independent_session",
+  "checks": {
+    "coverage": true,
+    "meaning": true,
+    "terminology": true,
+    "style": true,
+    "structure": true
+  },
+  "findings": [
+    {"severity": "minor", "detail": "Awkward repetition in paragraph 4", "resolved": true}
+  ]
+}
+```
+
+Pass it as `review-record ... --quality-report report.json` where CLI execution is
+available. The report is stored with the exact source/translation hash-bound
+review record, not as a mutable side note. In GitHub-only operation, the same
+schema must be validated before recording evidence.
+
+`independent_session` means a separate chat context, not merely switching
+role instructions within the translator's existing conversation; use
+`bounded_context` for that fallback. PASS is rejected if a structured report
+contains unresolved major or critical findings. CORRECTIONS_REQUIRED requires
+at least one unresolved finding.
+
+The report is optional to preserve compatibility with historical ledgers.
+An absent report must never be represented as independently audited quality.

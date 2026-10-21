@@ -16,6 +16,8 @@ from enum import Enum
 from pathlib import PurePosixPath
 from typing import Any
 
+from .review_quality import ReviewQualityError, validate_quality_report
+
 
 SCHEMA_VERSION = 1
 ALLOWED_PROGRESS_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -245,15 +247,15 @@ def _validate_claim_event(data: Mapping[str, Any], schema: SchemaKind) -> None:
     event_id = _require_nonempty_string(data, "event_id", schema)
     _validate_hex_id(event_id, schema, "event_id")
     action = _require_nonempty_string(data, "action", schema)
-    allowed = {"release_requested", "cleanup_requested", "released", "cleaned"}
+    allowed = {"release_requested", "cleanup_requested", "renew_requested", "released", "cleaned", "renewed"}
     if action not in allowed:
-        raise _field(schema, "action", "must be release_requested, cleanup_requested, released, or cleaned")
+        raise _field(schema, "action", "must be a supported claim lifecycle event")
     unit_id = _require_nonempty_string(data, "unit_id", schema)
     _validate_unit_id(unit_id, schema, "unit_id")
     occurred_at = _require_nonempty_string(data, "occurred_at", schema)
     _parse_utc_timestamp(occurred_at, schema, "occurred_at")
 
-    if action in {"release_requested", "cleanup_requested"}:
+    if action in {"release_requested", "cleanup_requested", "renew_requested"}:
         _require_nonempty_string(data, "claim_revision", schema)
         claim = _require_mapping(data, "claim", schema)
         parsed_claim = parse_document(SchemaKind.CLAIM, claim).data
@@ -366,6 +368,12 @@ def _validate_review_ledger(data: Mapping[str, Any], schema: SchemaKind) -> None
             else:
                 message = f"must reference the immediately preceding record {expected_supersedes} for this unit"
             raise _field(schema, f"{prefix}.supersedes_record_id", message)
+
+        if "quality_report" in record:
+            try:
+                validate_quality_report(record["quality_report"], outcome=outcome)
+            except ReviewQualityError as exc:
+                raise _field(schema, f"{prefix}.quality_report", str(exc)) from exc
 
         last_by_unit[unit_id] = record_id
 

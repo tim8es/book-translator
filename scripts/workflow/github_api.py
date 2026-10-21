@@ -213,20 +213,26 @@ class GitHubRestClient:
         if metadata.get("type") != "file":
             raise GitHubApiError("GitHub contents entry is not an ordinary file")
         blob_sha = self._nonempty(metadata.get("sha"), "contents.sha")
-        owner, repo = self._repository(repository)
-        blob = self._request_json(
-            "GET",
-            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/blobs/{quote(blob_sha, safe='')}",
-        )
-        if not isinstance(blob, dict):
-            raise GitHubApiError("GitHub blob response must be an object")
-        if blob.get("encoding") != "base64":
+        # Ordinary contents API responses embed file content.
+        source = metadata
+        if source.get("encoding") != "base64" or not isinstance(source.get("content"), str):
+            owner, repo = self._repository(repository)
+            source = self._request_json(
+                "GET",
+                f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/blobs/{quote(blob_sha, safe='')}",
+            )
+            if not isinstance(source, dict):
+                raise GitHubApiError("GitHub blob response must be an object")
+        if source.get("encoding") != "base64":
             raise GitHubApiError("GitHub blob encoding must be base64")
-        encoded = blob.get("content")
+        encoded = source.get("content")
         if not isinstance(encoded, str):
             raise GitHubApiError("GitHub blob content must be a base64 string")
         try:
-            content = base64.b64decode(encoded.encode("ascii"), validate=True)
+            content = base64.b64decode(
+                encoded.replace("\n", "").replace("\r", "").encode("ascii"),
+                validate=True,
+            )
         except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
             raise GitHubApiError("GitHub blob content is not valid base64") from exc
         return GitHubFile(path=path, blob_sha=blob_sha, content=content)

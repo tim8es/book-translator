@@ -6,12 +6,14 @@ import argparse
 import importlib
 import json
 import subprocess
+from uuid import uuid4
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
+from .session_planner import SessionPlanError, plan_sessions
 from .schemas import SchemaError
 from .source_cli import normalize_structural_errors, register_source_overrides, source_storage_mode
 from .status import StatusError, StatusResolver
@@ -141,8 +143,10 @@ def _git_head(root: Path) -> str | None:
 def _parallel_dispatch_snapshot(
     status: Mapping[str, Any],
     root: Path,
+    *,
+    explicit_commit: str | None = None,
 ) -> tuple[str, dict[str, str]]:
-    base_commit = _git_head(root)
+    base_commit = explicit_commit or _git_head(root)
     if base_commit is None:
         raise StatusCliError(
             "parallel resume requires Git HEAD so dispatch can bind a fixed base_commit"
@@ -192,6 +196,34 @@ def status_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
     return 0
 
 
+def plan_sessions_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
+    """Create advisory, balanced workpacks without taking claims or writing state."""
+    status = _snapshot(args, root, preflight)
+    base_commit, _ = _parallel_dispatch_snapshot(
+        status, root, explicit_commit=args.base_commit
+    )
+    reader = _artifact_reader(_book_directory(root, args.slug))
+    sizes: dict[str, int] = {}
+    try:
+        for unit in status["units"]:
+            if unit["lifecycle"] != "reviewed":
+                sizes[unit["unit_id"]] = len(reader(unit["source_path"]))
+        plan = plan_sessions(
+            status, sessions=args.sessions, source_sizes=sizes,
+            base_commit=base_commit, dispatch_id=args.dispatch_id or uuid4().hex,
+        )
+    except (OSError, SessionPlanError) as exc:
+        raise StatusCliError(str(exc)) from exc
+    if args.json:
+        _print_json(plan)
+    else:
+        print(f"book={args.slug} remaining={plan['remaining_units']} sessions={len(plan['sessions'])}")
+        for assignment in plan["sessions"]:
+            chapters = ",".join(str(number) for number in assignment["chapter_numbers"])
+            print(f"session={assignment['session_id']} chapters={chapters} source_bytes={assignment['source_bytes']}")
+    return 0
+
+
 def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
     status = _snapshot(args, root, preflight)
     resolver = _resolver(root, args.slug)
@@ -201,7 +233,9 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
         raise StatusCliError(str(exc)) from exc
 
     if payload["operation"] == "parallel":
-        base_commit, shared_state_revisions = _parallel_dispatch_snapshot(status, root)
+        base_commit, shared_state_revisions = _parallel_dispatch_snapshot(
+            status, root, explicit_commit=getattr(args, "base_commit", None)
+        )
         assignments = payload.get("assignments")
         if not isinstance(assignments, list):
             raise StatusCliError("parallel resume returned invalid assignments")
@@ -287,6 +321,10 @@ def register_status_commands(
     resume.add_argument("slug", help="Book slug under books/.")
     resume.add_argument("--json", action="store_true", help="Emit deterministic machine-readable JSON.")
     resume.add_argument(
+        "--base-commit",
+        help="Explicit HEAD SHA from GitHub for environments without local Git.",
+    )
+    resume.add_argument(
         "--parallel",
         type=int,
         metavar="N",
@@ -295,6 +333,23 @@ def register_status_commands(
     resume.set_defaults(
         func=_adapt_errors(
             lambda args: resume_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
+
+    sessions = subparsers.add_parser(
+        "plan-sessions", help="Generate balanced, read-only workpacks for manually opened chats."
+    )
+    sessions.add_argument("slug", help="Book slug under books/.")
+    sessions.add_argument("--sessions", type=int, required=True, metavar="N")
+    sessions.add_argument("--base-commit", help="Explicit repository HEAD SHA when local Git is unavailable.")
+    sessions.add_argument(
+        "--dispatch-id", help="Reuse the 32-hex ID only when replaying the SAME saved plan."
+    )
+    sessions.add_argument("--json", action="store_true")
+    sessions.set_defaults(
+        func=_adapt_errors(
+            lambda args: plan_sessions_command(args, root, resolved_preflight),
             error_factory,
         )
     )

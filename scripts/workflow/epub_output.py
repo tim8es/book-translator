@@ -346,9 +346,30 @@ def resolve_output_status(
     }
 
 
+_INLINE_MARKUP = re.compile(r"(`[^`\n]+`|\*\*.+?\*\*(?!\*)|\*[^*\n]+?\*)")
+
+
+def _render_inline(text: str) -> str:
+    """Escape plain text while retaining the supported emphasis/code subset."""
+    output: list[str] = []
+    offset = 0
+    for match in _INLINE_MARKUP.finditer(text):
+        output.append(html_escape(text[offset:match.start()]))
+        value = match.group()
+        if value.startswith("**") and value.endswith("**"):
+            output.append(f"<strong>{_render_inline(value[2:-2])}</strong>")
+        elif value.startswith("*") and value.endswith("*"):
+            output.append(f"<em>{_render_inline(value[1:-1])}</em>")
+        elif value.startswith("`") and value.endswith("`"):
+            output.append(f"<code>{html_escape(value[1:-1])}</code>")
+        offset = match.end()
+    output.append(html_escape(text[offset:]))
+    return "".join(output)
+
+
 def _paragraph(lines: list[str]) -> str:
     text = " ".join(part.strip() for part in lines).strip()
-    return f"<p>{html_escape(text)}</p>"
+    return f"<p>{_render_inline(text)}</p>"
 
 
 def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
@@ -383,13 +404,13 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
         heading = _HEADING_RE.match(line)
         if heading:
             level = len(heading.group(1))
-            body.append(f"<h{level}>{html_escape(heading.group(2))}</h{level}>")
+            body.append(f"<h{level}>{_render_inline(heading.group(2))}</h{level}>")
             index += 1
             continue
         if line.startswith("- ") or line.startswith("* "):
             items: list[str] = []
             while index < len(lines) and (lines[index].startswith("- ") or lines[index].startswith("* ")):
-                items.append(f"<li>{html_escape(lines[index][2:].strip())}</li>")
+                items.append(f"<li>{_render_inline(lines[index][2:].strip())}</li>")
                 index += 1
             body.append("<ul>" + "".join(items) + "</ul>")
             continue
@@ -400,7 +421,7 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
                 match = _ORDERED_ITEM_RE.match(lines[index])
                 if not match:
                     break
-                items.append(f"<li>{html_escape(match.group(1).strip())}</li>")
+                items.append(f"<li>{_render_inline(match.group(1).strip())}</li>")
                 index += 1
             body.append("<ol>" + "".join(items) + "</ol>")
             continue

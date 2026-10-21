@@ -89,6 +89,21 @@ class WorkflowStatusCliTests(unittest.TestCase):
         )
         return payload
 
+    def test_plan_sessions_cli_is_read_only_with_remote_head(self):
+        book = self.initialize_book()
+        progress_path = book / "progress.json"
+        before = progress_path.read_bytes()
+        result = self.run_book(
+            "plan-sessions", "sample", "--sessions", "3",
+            "--base-commit", REVISION, "--json",
+        )
+        plan = self.canonical_json(result)
+        self.assertEqual(plan["remaining_units"], 1)
+        self.assertEqual(len(plan["sessions"]), 1)
+        self.assertEqual(plan["sessions"][0]["chapter_numbers"], [1])
+        self.assertEqual(plan["sessions"][0]["context"]["base_commit"], REVISION)
+        self.assertEqual(progress_path.read_bytes(), before)
+
     def test_status_and_resume_json_are_deterministic_bounded_and_read_only(self):
         book = self.initialize_book()
         progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
