@@ -192,7 +192,28 @@ class GitHubRestClient:
             raise GitHubApiError("GitHub API response is not valid JSON") from exc
 
     def _contents_path(self, repository: str, path: str) -> str:
-        # Contents API embeds data for ordinary files; avoid a second request.
+        owner, repo = self._repository(repository)
+        if not isinstance(path, str) or not path:
+            raise GitHubApiError("path must be a non-empty string")
+        return (
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/contents/"
+            f"{quote(path, safe='/')}"
+        )
+
+    def get_file(self, repository: str, path: str, ref: str) -> GitHubFile:
+        if not isinstance(ref, str) or not ref.strip():
+            raise GitHubApiError("ref must be a non-empty string")
+        metadata = self._request_json(
+            "GET",
+            self._contents_path(repository, path),
+            query={"ref": ref},
+        )
+        if not isinstance(metadata, dict):
+            raise GitHubApiError("GitHub contents response must be an object")
+        if metadata.get("type") != "file":
+            raise GitHubApiError("GitHub contents entry is not an ordinary file")
+        blob_sha = self._nonempty(metadata.get("sha"), "contents.sha")
+        # Ordinary contents API responses embed file content.
         source = metadata
         if source.get("encoding") != "base64" or not isinstance(source.get("content"), str):
             owner, repo = self._repository(repository)
