@@ -125,6 +125,27 @@ class EpubStructureTests(unittest.TestCase):
             self.assertIn("Глава первая", archive.read("OEBPS/nav.xhtml").decode())
             self.assertIn("ru", archive.read("OEBPS/content.opf").decode())
 
+    def test_plain_transparent_span_has_no_markers_and_is_preserved(self):
+        from workflow.epub_structure import chapter_text, replace_block
+        from xml.etree import ElementTree as ET
+        source = (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<p class="content"><span>Original paragraph.</span></p>'
+            '</body></html>'
+        ).encode("utf-8")
+        title, markdown, count = chapter_text(source)
+        self.assertEqual(count, 1)
+        self.assertIn("Original paragraph.", markdown)
+        self.assertNotIn("⟦BT:O:", markdown)
+        self.assertNotIn("⟦BT:C:", markdown)
+        root = ET.fromstring(source)
+        paragraph = root.find(".//{*}p")
+        replace_block(paragraph, "Русский абзац.")
+        self.assertEqual(len(paragraph), 1)
+        self.assertEqual(paragraph[0].tag.rsplit("}", 1)[-1], "span")
+        self.assertEqual(paragraph[0].text, "Русский абзац.")
+        self.assertEqual(paragraph.attrib["class"], "content")
+
     def test_missing_inline_marker_fails_closed(self):
         damaged = self.units[0][1].replace("⟦BT:C:0001⟧", "", 1)
         with self.assertRaises(StructureError):
