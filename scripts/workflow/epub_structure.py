@@ -162,7 +162,26 @@ def _leaves(root: ET.Element) -> list[ET.Element]:
     return leaves
 
 
+def _transparent_span(block: ET.Element) -> ET.Element | None:
+    """A no-attribute wrapper enclosing exactly one complete prose segment.
+
+    Preserve the wrapper in XHTML without making the translator copy two
+    otherwise meaningless tokens for every paragraph.
+    """
+    if (len(block) == 1 and not (block.text or "")
+            and name(block[0].tag) == "span" and not block[0].attrib
+            and not len(block[0]) and not (block[0].tail or "")):
+        return block[0]
+    return None
+
+
 def _inline_source(block: ET.Element):
+    wrapper = _transparent_span(block)
+    if wrapper is not None:
+        text = wrapper.text or ""
+        if TOKEN.search(text):
+            raise StructureError("source includes reserved BT marker syntax")
+        return text, {}
     lookup: dict[int, ET.Element] = {}
     counter = 0
 
@@ -255,6 +274,12 @@ def _put_text(parent: ET.Element, text: str):
 
 
 def replace_block(node: ET.Element, translated: str):
+    wrapper = _transparent_span(node)
+    if wrapper is not None:
+        if TOKEN.search(translated):
+            raise StructureError("unexpected protected token in unstyled paragraph")
+        wrapper.text = translated
+        return
     _, originals = _inline_source(node)
     encountered: set[int] = set()
     stack: list[tuple[int, ET.Element]] = [(0, node)]
