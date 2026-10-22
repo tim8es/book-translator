@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from .operations import next_unit_operation
@@ -55,8 +56,19 @@ def next_review(
             continue
         claim = claims.get(uid)
         if claim and claim.get("session_id") == session_id and claim.get("role") == "reviewer":
+            try:
+                expiry = datetime.fromisoformat(
+                    claim["expires_at"].replace("Z", "+00:00")
+                )
+                if expiry.tzinfo is None:
+                    raise ValueError("claim expiry lacks timezone")
+            except (KeyError, AttributeError, ValueError) as exc:
+                return emit("blocked", reason="claim_expiry_invalid", unit_id=uid)
+            if expiry <= datetime.now(timezone.utc):
+                return emit("blocked", reason="claim_expired", unit_id=uid,
+                            instruction="Clean up expired claim and reacquire safely")
             return emit("work", unit_id=uid, chapter_number=unit["chapter_number"],
-                        operation="review")
+                        operation="review", claim_expires_at=claim["expires_at"])
         if claim is None:
             available.append(unit)
     if available:

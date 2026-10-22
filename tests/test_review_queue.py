@@ -30,9 +30,20 @@ class ReviewQueueTests(unittest.TestCase):
         self.assertEqual(result["unit_id"], "chapter-000002")
         self.assertTrue(result["advisory_only"])
         status["claims"] = [{"unit_id": "chapter-000002", "role": "reviewer",
-                             "session_id": "reviewer-b"}]
+                             "session_id": "reviewer-b",
+                             "expires_at": "2999-01-01T00:00:00Z"}]
         self.assertEqual(next_review(status, "reviewer-a")["unit_id"], "chapter-000003")
         self.assertEqual(next_review(status, "reviewer-b")["action"], "work")
+
+    def test_expired_own_claim_does_not_return_work(self):
+        status = book()
+        status["claims"] = [{
+            "unit_id": "chapter-000002", "role": "reviewer",
+            "session_id": "reviewer-a", "expires_at": "2020-01-01T00:00:00Z",
+        }]
+        result = next_review(status, "reviewer-a")
+        self.assertEqual(result["action"], "blocked")
+        self.assertEqual(result["reason"], "claim_expired")
 
     def test_scope_blocks_when_wave_changes_and_filters_units(self):
         status = book()
