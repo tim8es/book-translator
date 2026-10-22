@@ -630,9 +630,36 @@ class WaveManager:
             except CoordinationError as exc:
                 raise WaveError(f"memory synchronization could not release lock: {exc}") from exc
 
+    def _current_impact_reviews(self) -> dict[str, dict[str, Any]]:
+        """Resolve current PASS records from authoritative progress, ledger, and bytes.
+
+        Never trust a historical resolution by its presence alone. This method
+        is only invoked when a previously resolved impact needs validation.
+        """
+        repository = WorkflowStateRepository(self.storage)
+        try:
+            progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+            metadata = repository.read("metadata.json", SchemaKind.METADATA).data
+            reviews = ReviewLedgerManager(
+                repository, artifact_reader=lambda path: self.storage.read(path).content,
+            ).resolve_all(progress, metadata)
+        except Exception as exc:
+            raise WaveError(f"cannot revalidate literary impact against current review state: {exc}") from exc
+        return {
+            review.unit_id: {
+                "record_id": review.current_record["record_id"],
+                "translation_sha256": review.translation_sha256,
+                "source_sha256": review.source_sha256,
+            }
+            for review in reviews
+            if review.state == "pass" and review.current_record is not None
+        }
+
     def impact_queue(self) -> list[dict[str, Any]]:
-        """All unresolved historical impact references must be explicitly reviewed."""
+        """Return unresolved or newly stale impact checks; compare current PASS hashes."""
+
         results = []
+        current_reviews: dict[str, dict[str, Any]] | None = None
         prefix = ".workflow/literary-memory/impacts"
         for path in self.storage.list(prefix):
             if not path.endswith(".json"):
@@ -654,6 +681,16 @@ class WaveManager:
                     raise
                 if resolved.get("reviewed") is not True:
                     results.append({**impact, "wave_id": doc["wave_id"]})
+                    continue
+                if current_reviews is None:
+                    current_reviews = self._current_impact_reviews()
+                current = current_reviews.get(impact["unit_id"])
+                if (current is None
+                        or resolved.get("memory_revision") != doc.get("memory_revision")
+                        or resolved.get("translation_sha256") != current["translation_sha256"]
+                        or resolved.get("review_record_id") != current["record_id"]):
+                    results.append({**impact, "wave_id": doc["wave_id"],
+                                    "state": "pending", "reason": "previous_resolution_stale"})
         return results
 
     def resolve_impact(self, *, wave_id: str, memory_id: str, unit_id: str,
@@ -668,6 +705,11 @@ class WaveManager:
             raise WaveError("impact candidate is not recorded in this wave")
         if review_record.get("outcome") != "PASS" or review_record.get("unit_id") != unit_id:
             raise WaveError("impact resolution needs independent current PASS record")
+        current = self._current_impact_reviews().get(unit_id)
+        if (current is None or current["record_id"] != review_record.get("record_id")
+                or current["translation_sha256"] != current_translation_sha256
+                or current["source_sha256"] != review_record.get("source_sha256")):
+            raise WaveError("impact resolution must bind current PASS and both source/translation hashes")
         if review_record.get("translation_sha256") != current_translation_sha256:
             raise WaveError("PASS review references another translation artifact")
         if reviewer_claim.get("role") != "reviewer" or reviewer_claim.get("unit_id") != unit_id:
@@ -704,6 +746,7 @@ class WaveManager:
             "schema_version": 1, "wave_id": wave_id, "memory_id": memory_id,
             "unit_id": unit_id, "reviewed": True,
             "review_record_id": review_record["record_id"],
+            "memory_revision": doc["memory_revision"],
             "translation_sha256": current_translation_sha256,
         }
         return _create(self.storage, path, data)
