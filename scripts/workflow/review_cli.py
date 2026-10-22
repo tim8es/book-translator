@@ -240,6 +240,38 @@ def _write_review_report(book_dir: Path, markdown: str) -> str:
     return "updated"
 
 
+def review_diff_command(args: argparse.Namespace, root: Path) -> int:
+    """Read-only proposed correction scope; never creates review evidence."""
+    from .review_diff import plan
+
+    book_dir, repository = _repository(root, args.slug)
+    progress, _ = _load_progress(repository)
+    metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    chapter = next(ch for ch in progress["chapters"] if ch["number"] == args.chapter)
+    unit = unit_id_for_chapter(chapter)
+    ledger = repository.read("review-ledger.json", SchemaKind.REVIEW_LEDGER).data
+    previous = next((row for row in ledger["records"]
+                     if row["record_id"] == args.previous_record and row["unit_id"] == unit),
+                    None)
+    if previous is None or previous["outcome"] != "CORRECTIONS_REQUIRED":
+        raise ReviewCliError("previous review must be a CORRECTIONS_REQUIRED record for this unit")
+    if previous["source_sha256"] != chapter["translation_acceptance"]["source_sha256"]:
+        raise ReviewCliError("source revision changed; full independent review required")
+    try:
+        old = Path(args.previous_translation).read_bytes()
+        current = _artifact_reader(book_dir)(chapter["translation_path"])
+        result = plan(old, current,
+                      previous_sha256=previous["translation_sha256"],
+                      current_sha256=chapter["translation_acceptance"]["translation_sha256"])
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ReviewCliError(str(exc)) from exc
+    result["unit_id"] = unit
+    result["previous_record_id"] = args.previous_record
+    _print_json(result)
+    return 0
+
+
 def review_preflight_command(args: argparse.Namespace, root: Path) -> int:
     """Read-only advisory checks after durable translation acceptance."""
     from .review_preflight import inspect
@@ -411,6 +443,16 @@ def _positive_chapter(value: str) -> int:
 
 def register_review_commands(subparsers: argparse._SubParsersAction, root: Path) -> None:
     """Register review evidence and workflow orchestration commands."""
+
+    diff = subparsers.add_parser(
+        "review-diff", help="Read-only, SHA-checked scoped correction review candidate."
+    )
+    diff.add_argument("slug")
+    diff.add_argument("chapter", type=_positive_chapter)
+    diff.add_argument("--previous-record", required=True)
+    diff.add_argument("--previous-translation", required=True, metavar="FILE")
+    diff.add_argument("--json", action="store_true")
+    diff.set_defaults(func=lambda args: review_diff_command(args, root))
 
     preflight = subparsers.add_parser(
         "review-preflight", help="Read-only, hash-bound advisory QA before independent review."

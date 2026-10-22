@@ -185,3 +185,18 @@ Numeral localization, inflected Russian names and intentional structural
 adaptation can yield false positives. Resolve or dismiss each useful warning
 in the independent literary comparison; do not infer that no warnings means
 complete or faithful translation.
+
+## Optional scoped correction re-review
+
+After `CORRECTIONS_REQUIRED` and a *newly accepted* correction, use
+`book.py review-diff BOOK CHAPTER --previous-record ID --previous-translation ORIGINAL_SNAPSHOT --json`
+only if the exact previous translation bytes are available. The CLI verifies
+those bytes against the previous review ledger SHA and current canonical bytes
+against accepted translation SHA. It reports bounded changed regions and
+adjacent context, but does not copy, reconstruct or certify any old text.
+A diff exceeding 20% of lines or eight separate edit regions defaults to
+full independent review. Smaller edits are only **candidates** for scoped
+re-review; the independent Reviewer still checks source-aligned edits,
+surrounding context, whole-chapter continuity, and every unresolved v2 finding.
+If the historical snapshot is unavailable, perform a full review. No automatic
+PASS and no review ledger mutations arise from the diff command.
