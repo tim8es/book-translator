@@ -361,8 +361,11 @@ def coverage_integrity_errors(
                         or not SHA_RE.fullmatch(doc["xhtml_sha256"])
                         or not isinstance(doc.get("reference_sha256"), str)
                         or not SHA_RE.fullmatch(doc["reference_sha256"])
-                        or type(doc.get("text_tokens")) is not int or doc["text_tokens"] < 1
+                        or type(doc.get("text_tokens")) is not int or doc["text_tokens"] < 0
                         or type(doc.get("text_blocks")) is not int or doc["text_blocks"] < 0
+                        or (doc["text_tokens"] == 0 and not (
+                            report.get("validator") == "epub-xhtml-structure-v2"
+                            and doc["text_blocks"] > 0))
                         or type(doc.get("chapter_count")) is not int or doc["chapter_count"] < 1):
                     errors.append(f"Invalid coverage inventory for {path}")
             elif state not in {"excluded_navigation", "excluded_empty"}:
