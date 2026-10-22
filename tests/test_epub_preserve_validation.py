@@ -81,6 +81,14 @@ class PreservationGateTests(unittest.TestCase):
         with self.assertRaisesRegex(EpubPreservationError, "structure changed"):
             verify_preservation(source, corrupted)
 
+    def test_inline_emphasis_attribute_mutation_is_rejected(self):
+        source = fixture()
+        output = build_identity(source)
+        corrupted = tamper(output, "OPS/story.xhtml",
+                           lambda raw: raw.replace(b"<ns0:em>", b'<ns0:em class="tampered">'))
+        with self.assertRaisesRegex(EpubPreservationError, "structure changed"):
+            verify_preservation(source, corrupted)
+
     def test_opf_is_restricted_to_title_language(self):
         source = fixture()
         output = build_identity(source)
