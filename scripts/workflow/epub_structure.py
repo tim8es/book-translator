@@ -61,11 +61,80 @@ def member_path(base: str, href: str) -> str:
     return path
 
 
+_DTD = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+_SVG = re.compile(rb"<(?:[a-zA-Z][\w.-]*:)?svg(?:\s|>)", re.IGNORECASE)
+_REMOTE_CSS = re.compile(
+    rb"(?:url\(\s*['\"]?\s*|@import\s+['\"]?\s*)(?:https?:|//|data:|javascript:)",
+    re.IGNORECASE,
+)
+
+
+def _safe_xml(raw: bytes, path: str = "EPUB XML") -> ET.Element:
+    """Reject DTD/entity declarations in every XML package member."""
+    if _DTD.search(raw):
+        raise StructureError(f"DTD/entity declarations are not supported: {path}")
+    try:
+        return ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise StructureError(f"invalid XML in {path}: {exc}") from exc
+
+
+def _validate_navigation(body: ET.Element, path: str) -> None:
+    """Treat only syntactically constrained EPUB navigation as excluded text."""
+    nav_count = 0
+    text_tags = {"a", "span", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "em", "strong", "i", "b", "small", "abbr", "cite", "sup", "sub"}
+    allowed = text_tags | {"nav", "ol", "ul", "li", "br"}
+
+    def navigation(node: ET.Element) -> None:
+        tag = name(node.tag)
+        if tag not in allowed:
+            raise StructureError(f"unmapped prose/element <{tag}> inside navigation: {path}")
+        if tag == "nav":
+            raise StructureError(f"nested navigation is not supported: {path}")
+        if tag == "a" and not node.get("href"):
+            raise StructureError(f"navigation link without target: {path}")
+        if node.get("hidden") is not None or node.get("aria-hidden") == "true":
+            raise StructureError(f"hidden navigation prose is unsupported: {path}")
+        if re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
+                     node.get("style", ""), re.IGNORECASE):
+            raise StructureError(f"hidden navigation CSS is unsupported: {path}")
+        if (node.text or "").strip() and tag not in text_tags:
+            raise StructureError(f"unmapped text inside navigation <{tag}>: {path}")
+        if tag == "li" and not any(name(x.tag) in {"a", "span"} for x in node.iter() if x is not node):
+            raise StructureError(f"navigation list item without label: {path}")
+        for child in node:
+            navigation(child)
+            if (child.tail or "").strip() and tag not in text_tags:
+                raise StructureError(f"unmapped text between navigation elements: {path}")
+
+    def outside(node: ET.Element) -> None:
+        nonlocal nav_count
+        if name(node.tag) == "nav":
+            nav_count += 1
+            if not any(name(x.tag) in {"ol", "ul"} for x in node.iter()):
+                raise StructureError(f"navigation without a link list: {path}")
+            for child in node:
+                navigation(child)
+                if (child.tail or "").strip():
+                    raise StructureError(f"unmapped text after nav children: {path}")
+            if (node.text or "").strip():
+                raise StructureError(f"unmapped text in nav container: {path}")
+            return
+        if (node.text or "").strip():
+            raise StructureError(f"navigation has text outside its nav: {path}")
+        for child in node:
+            outside(child)
+            if (child.tail or "").strip():
+                raise StructureError(f"navigation has text outside its nav: {path}")
+    outside(body)
+    if nav_count < 1:
+        raise StructureError(f"navigation document has no nav section: {path}")
+
+
 def _validate_xhtml_security(raw: bytes, path: str) -> None:
     """Fail closed on executable XHTML and unsafe URI/attribute constructs."""
-    if re.search(rb"<!\\s*(?:DOCTYPE|ENTITY)\\b", raw, re.IGNORECASE):
-        raise StructureError(f"XHTML DTD/entities are not supported: {path}")
-    root = ET.fromstring(raw)
+    root = _safe_xml(raw, path)
     disallowed = {"script", "iframe", "object", "embed", "form", "input",
                   "canvas", "audio", "video", "svg", "math"}
     for element in root.iter():
@@ -76,9 +145,21 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
             key = name(attribute)
             if key.startswith("on") or key in {"srcdoc", "base"}:
                 raise StructureError(f"unsafe XHTML attribute {key}: {path}")
-            if key in {"href", "src", "action", "formaction"}:
-                if urlsplit(value.strip()).scheme.lower() in {"javascript", "data", "file", "vbscript"}:
-                    raise StructureError(f"unsafe XHTML URI in {key}: {path}")
+            if key in {"srcset", "ping", "action", "formaction", "poster"}:
+                raise StructureError(f"unsupported active XHTML attribute {key}: {path}")
+            if key in {"href", "src"}:
+                url = urlsplit(value.strip())
+                # User-activated external hyperlinks are permitted; automatically
+                # fetched resources (img/link/etc.) must be local to the EPUB.
+                user_link = tag in {"a", "area"} and key == "href"
+                if user_link and url.scheme.lower() in {"https", "http", "mailto"}:
+                    continue
+                if url.scheme or url.netloc or value.strip().startswith("//"):
+                    raise StructureError(f"remote/unsafe XHTML resource URI in {key}: {path}")
+                if url.path:
+                    member_path(path, url.path)
+            if key == "style" and _REMOTE_CSS.search(value.encode("utf-8")):
+                raise StructureError(f"remote inline CSS resource is unsupported: {path}")
 
 
 def manifest_and_spine(archive: zipfile.ZipFile):
@@ -107,12 +188,12 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     # content but emit a standards-compliant first, uncompressed member.
     if "mimetype" in names and archive.read("mimetype") != b"application/epub+zip":
         raise StructureError("invalid EPUB mimetype")
-    container = ET.fromstring(archive.read("META-INF/container.xml"))
+    container = _safe_xml(archive.read("META-INF/container.xml"), "META-INF/container.xml")
     roots = [e.attrib.get("full-path") for e in container.iter() if name(e.tag) == "rootfile"]
     if len(roots) != 1 or not roots[0] or roots[0].startswith("/") or ".." in roots[0].split("/"):
         raise StructureError("ambiguous or unsafe package path")
     opf_path = roots[0]
-    package = ET.fromstring(archive.read(opf_path))
+    package = _safe_xml(archive.read(opf_path), opf_path)
     manifest = {}
     for item in package.iter():
         if name(item.tag) != "item":
@@ -137,16 +218,29 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     if not spine:
         raise StructureError("empty EPUB spine")
     known = {path for path, _ in manifest.values()}
+    for resource_path in names:
+        suffix = resource_path.lower()
+        if suffix.endswith((".js", ".mjs", ".svg", ".svgz")):
+            raise StructureError(f"executable EPUB archive member is unsupported: {resource_path}")
+        if resource_path.endswith("/"):
+            continue
+        # Source MIME can be wrong. Reject embedded SVG markup even if mislabeled.
+        if _SVG.search(archive.read(resource_path)[:4096]):
+            raise StructureError(f"embedded SVG markup is unsupported: {resource_path}")
+        if suffix.endswith((".xhtml", ".html", ".htm")) and resource_path not in known:
+            raise StructureError(f"XHTML outside the EPUB manifest: {resource_path}")
     for resource_path, item in manifest.values():
         media_type = item.get("media-type", "").lower()
         if (media_type in {"application/javascript", "text/javascript",
                            "application/ecmascript", "text/ecmascript", "image/svg+xml"}
-                or resource_path.lower().endswith((".js", ".mjs"))):
+                or resource_path.lower().endswith((".js", ".mjs", ".svg", ".svgz"))):
             raise StructureError(f"executable EPUB resource is unsupported: {resource_path}")
         if media_type == "text/html":
             raise StructureError(f"HTML resource without XHTML coverage is unsupported: {resource_path}")
-    for resource_path in names:
-        if resource_path.lower().endswith((".xhtml", ".html", ".htm")):
+        if media_type == "text/css" and _REMOTE_CSS.search(archive.read(resource_path)):
+            raise StructureError(f"remote CSS resource is unsupported: {resource_path}")
+        if (media_type == "application/xhtml+xml"
+                or resource_path.lower().endswith((".xhtml", ".html", ".htm"))):
             _validate_xhtml_security(archive.read(resource_path), resource_path)
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
@@ -155,26 +249,12 @@ def manifest_and_spine(archive: zipfile.ZipFile):
         if path not in names:
             raise StructureError(f"missing manifested resource: {path}")
         if item.get("media-type") == "application/xhtml+xml" and path not in spine:
-            root = ET.fromstring(archive.read(path))
+            root = _safe_xml(archive.read(path), path)
             body = next((e for e in root.iter() if name(e.tag) == "body"), None)
             if body is None:
                 raise StructureError(f"off-spine XHTML is missing body: {path}")
             if "nav" in item.get("properties", "").split():
-                count = 0
-                def check_navigation(node):
-                    nonlocal count
-                    if name(node.tag) == "nav":
-                        count += 1
-                        return
-                    if node.text and node.text.strip():
-                        raise StructureError(f"navigation has text outside its nav: {path}")
-                    for child in node:
-                        check_navigation(child)
-                        if child.tail and child.tail.strip():
-                            raise StructureError(f"navigation has text outside its nav: {path}")
-                check_navigation(body)
-                if count < 1:
-                    raise StructureError(f"navigation document has no nav section: {path}")
+                _validate_navigation(body, path)
             elif "".join(body.itertext()).strip():
                 raise StructureError(f"XHTML contains untranslated text outside EPUB spine: {path}")
     return opf_path, package, manifest, spine
