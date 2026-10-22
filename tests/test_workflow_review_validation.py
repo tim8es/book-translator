@@ -133,6 +133,20 @@ class WorkflowReviewValidationTests(unittest.TestCase):
             reviewer_session_id="reviewer-a",
         )
 
+    def test_review_preflight_requires_accepted_artifact_and_is_read_only(self):
+        before = (self.book / "progress.json").read_bytes()
+        self.run_cli("review-preflight", "sample", "1", expect=1)
+        self.assertEqual((self.book / "progress.json").read_bytes(), before)
+        self.accept_translation("# Один\n\nПеревод 2025.\n")
+        before = (self.book / "progress.json").read_bytes()
+        report = json.loads(self.run_cli(
+            "review-preflight", "sample", "1", "--json",
+        ).stdout)
+        self.assertTrue(report["advisory_only"])
+        self.assertEqual(report["warning_count"], 1)
+        self.assertEqual(report["warnings"][0]["kind"], "number_added")
+        self.assertEqual((self.book / "progress.json").read_bytes(), before)
+
     def test_ledger_enabled_book_requires_ledger_file(self):
         (self.book / "review-ledger.json").unlink()
         result = self.run_cli("validate", "sample", expect=1)
