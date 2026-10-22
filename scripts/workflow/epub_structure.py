@@ -399,9 +399,25 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 replace_block(block, content)
             root.set("lang", target_language)
             root.set("{http://www.w3.org/XML/1998/namespace}lang", target_language)
-            headings[path] = next(
-                ("".join(x.itertext()).strip() for x in blocks if name(x.tag) in {"h1", "h2"}), ""
-            )
+            # Localize navigation labels using the *translated* heading at
+            # each target anchor, not the first heading of the containing file.
+            for node in root.iter():
+                if name(node.tag) in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                    label = "".join(node.itertext()).strip()
+                    if not label:
+                        continue
+                    headings.setdefault(path, label)
+                    if node.get("id"):
+                        headings[f"{path}#{node.get('id')}"] = label
+                elif node.get("id"):
+                    nested = next(
+                        (x for x in node.iter() if name(x.tag) in
+                         {"h1", "h2", "h3", "h4", "h5", "h6"}), None
+                    )
+                    if nested is not None:
+                        label = "".join(nested.itertext()).strip()
+                        if label:
+                            headings[f"{path}#{node.get('id')}"] = label
             replacements[path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
         for element in package.iter():
@@ -414,17 +430,54 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
         for path, item in manifest.values():
             if "nav" not in item.get("properties", "").split():
                 continue
-            nav = ET.fromstring(archive.read(path))
+            # A nav document may itself be a translated spine document.
+            # Never re-read the original and silently discard that translation.
+            nav = ET.fromstring(replacements.get(path, archive.read(path)))
             for a in nav.iter():
                 if name(a.tag) != "a" or not a.get("href"):
                     continue
+                url = urlsplit(a.get("href"))
+                if url.scheme or url.netloc:
+                    continue
                 try:
-                    target = member_path(path, a.get("href"))
+                    target = member_path(path, url.path) if url.path else path
                 except StructureError:
                     continue
-                if target in headings and headings[target] and not len(a):
-                    a.text = headings[target]
+                label = headings.get(f"{target}#{unquote(url.fragment)}") if url.fragment else headings.get(target)
+                if label and not len(a):
+                    a.text = label
             replacements[path] = ET.tostring(nav, encoding="utf-8", xml_declaration=True)
+
+        # EPUB 2 navigation is often stored in NCX rather than EPUB 3 nav.xhtml.
+        # Resolve navPoint labels against each translated target heading/anchor.
+        for ncx_path, item in manifest.values():
+            if item.get("media-type") != "application/x-dtbncx+xml":
+                continue
+            ncx = ET.fromstring(archive.read(ncx_path))
+            for point in ncx.iter():
+                if name(point.tag) != "navPoint":
+                    continue
+                content = next((n for n in point if name(n.tag) == "content"), None)
+                label_node = next((n for n in point if name(n.tag) == "navLabel"), None)
+                label_text = (next((n for n in label_node.iter() if name(n.tag) == "text"), None)
+                              if label_node is not None else None)
+                if content is None or not content.get("src") or label_text is None:
+                    raise StructureError(f"malformed NCX navigation entry: {ncx_path}")
+                url = urlsplit(content.get("src"))
+                if url.scheme or url.netloc:
+                    raise StructureError(f"unsafe NCX navigation target: {ncx_path}")
+                target = member_path(ncx_path, url.path) if url.path else ncx_path
+                if target not in archive.namelist():
+                    raise StructureError(f"missing NCX navigation target: {target}")
+                if url.fragment:
+                    target_root = ET.fromstring(replacements.get(target, archive.read(target)))
+                    if unquote(url.fragment) not in {n.get("id") for n in target_root.iter()}:
+                        raise StructureError(f"missing NCX navigation anchor: {url.fragment}")
+                title_at_target = (headings.get(f"{target}#{unquote(url.fragment)}")
+                                   if url.fragment else headings.get(target))
+                if title_at_target:
+                    label_text.text = title_at_target
+            replacements[ncx_path] = ET.tostring(ncx, encoding="utf-8", xml_declaration=True)
 
         _check_links(archive, replacements)
         out = io.BytesIO()
