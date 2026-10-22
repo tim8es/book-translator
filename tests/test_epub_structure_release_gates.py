@@ -89,6 +89,23 @@ def source_units(data):
         return read_chapters(path)[0]
 
 
+
+
+def rewrite_epub(original, *, replace=None, add=None):
+    """Build a controlled EPUB mutation for negative security tests."""
+    replace = replace or {}
+    add = add or {}
+    memory = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as old, zipfile.ZipFile(memory, "w") as output:
+        for item in old.infolist():
+            value = old.read(item.filename)
+            if item.filename in replace:
+                value = replace[item.filename](value)
+            output.writestr(item, value)
+        for filename, value in add.items():
+            output.writestr(filename, value)
+    return memory.getvalue()
+
 class NavigationSecurityTests(unittest.TestCase):
     def test_two_navigation_sections_are_allowed(self):
         raw = make_epub(multi_nav=True)
@@ -205,6 +222,93 @@ class NavigationSecurityTests(unittest.TestCase):
         with self.assertRaisesRegex(StructureError, "protected"):
             build(raw, document_paths=[x[2] for x in units],
                   translations=[altered], target_language="ru", title="История")
+
+
+
+    def test_remote_auto_loaded_resources_are_rejected(self):
+        for snippet in (
+            b'<img src="https://tracker.example/pixel.png"/>',
+            b'<link rel="stylesheet" href="https://tracker.example/style.css"/>',
+        ):
+            with self.subTest(snippet=snippet[:40]):
+                raw = rewrite_epub(make_epub(), replace={
+                    "OPS/story.xhtml": lambda body: body.replace(b"<body>", b"<body>" + snippet)
+                })
+                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    with self.assertRaisesRegex(StructureError, "remote XHTML"):
+                        manifest_and_spine(archive)
+
+    def test_off_spine_nav_cannot_hide_non_navigation_prose(self):
+        raw = rewrite_epub(make_epub(), replace={
+            "OPS/nav.xhtml": lambda body: body.replace(b"<ol>", b"<p>Untranslated appendix.</p><ol>", 1)
+        })
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            with self.assertRaisesRegex(StructureError, "navigation.*prose"):
+                manifest_and_spine(archive)
+
+    def test_mime_declared_xhtml_is_scanned_even_with_xml_extension(self):
+        raw = rewrite_epub(make_epub(), replace={
+            "OPS/content.opf": lambda body: body.replace(
+                b"</manifest>",
+                b'<item id="hidden" href="active.xml" media-type="application/xhtml+xml"/></manifest>'
+            )
+        }, add={
+            "OPS/active.xml": (b'<html><head><script>alert(1)</script></head>'
+                               b'<body/></html>')
+        })
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            with self.assertRaisesRegex(StructureError, "active XHTML"):
+                manifest_and_spine(archive)
+
+    def test_doctype_and_entities_rejected_in_story_and_package(self):
+        cases = [
+            ("OPS/story.xhtml", lambda b: b'<!DOCTYPE html [<!ENTITY x "x">]>' + b),
+            ("OPS/content.opf", lambda b: b'<!DOCTYPE package [<!ENTITY x "x">]>' + b),
+        ]
+        for member, edit in cases:
+            with self.subTest(member=member):
+                raw = rewrite_epub(make_epub(), replace={member: edit})
+                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    with self.assertRaisesRegex(StructureError, "DTD/entities"):
+                        manifest_and_spine(archive)
+
+    def test_svg_media_spoofing_and_css_remote_import_are_rejected(self):
+        raw = rewrite_epub(make_epub(), replace={
+            "OPS/content.opf": lambda b: b.replace(
+                b"</manifest>", b'<item id="fake" href="fake.svg" media-type="image/png"/></manifest>'
+            )
+        }, add={"OPS/fake.svg": b'<svg><script>alert(1)</script></svg>'})
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            with self.assertRaisesRegex(StructureError, "executable"):
+                manifest_and_spine(archive)
+        png_spoofed = rewrite_epub(make_epub(), replace={
+            "OPS/cover.png": lambda _: b'<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>'
+        })
+        with zipfile.ZipFile(io.BytesIO(png_spoofed)) as archive:
+            with self.assertRaisesRegex(StructureError, "SVG masquerading"):
+                manifest_and_spine(archive)
+        css = rewrite_epub(make_epub(), replace={
+            "OPS/content.opf": lambda b: b.replace(
+                b"</manifest>", b'<item id="style" href="style.css" media-type="text/css"/></manifest>'
+            )
+        }, add={"OPS/style.css": b'@import url(https://tracker.example/malicious.css);'})
+        with zipfile.ZipFile(io.BytesIO(css)) as archive:
+            with self.assertRaisesRegex(StructureError, "remote or executable CSS"):
+                manifest_and_spine(archive)
+
+    def test_broken_local_image_is_rejected_even_when_xml_parses(self):
+        source = rewrite_epub(make_epub(), replace={
+            "OPS/story.xhtml": lambda b: b.replace(b"<body>", b'<body><img src="missing.png"/>')
+        })
+        # A bare image outside a block might block extraction first, which is
+        # independently fail-closed; embed it in an existing paragraph instead.
+        source = rewrite_epub(make_epub(), replace={
+            "OPS/story.xhtml": lambda b: b.replace(b"<p>Text two.</p>", b'<p>Text two.<img src="missing.png"/></p>')
+        })
+        units = source_units(source)
+        with self.assertRaisesRegex(StructureError, "broken internal link/resource"):
+            build(source, document_paths=[u[2] for u in units],
+                  translations=[u[1] for u in units], target_language="ru", title="История")
 
 
 
