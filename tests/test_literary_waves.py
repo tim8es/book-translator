@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from workflow.filesystem import FilesystemStorage
@@ -23,7 +24,11 @@ WAVE = "b" * 32
 def fake():
     return {
         "valid": True, "book_slug": "sample", "workflow_revision": "current",
-        "state_revisions": {"glossary": "glossary-hash", "style_guide": "style-hash"},
+        "state_revisions": {
+            "glossary": "glossary-hash", "style_guide": "style-hash",
+            "metadata": "metadata-revision", "progress": "progress-revision",
+            "review_ledger": "ledger-revision",
+        },
         "finalization": {"active": False}, "claims": [],
         "units": [
             {
@@ -69,6 +74,31 @@ class WaveTests(unittest.TestCase):
         for unit in self.status["units"]:
             unit["lifecycle"] = "reviewed"
             unit["review"] = "pass"
+
+    def source(self, _):
+        return b"Warden"
+
+    def translation(self, _):
+        return "Страж".encode()
+
+    def prepare(self, decisions=None):
+        return self.manager.prepare_close(
+            self.status, decisions=decisions or {},
+            read_source=self.source, read_translation=self.translation,
+            fresh_status=lambda: self.status,
+        )
+
+    def close(self):
+        return self.manager.close(
+            expected_wave=WAVE, fresh_status=lambda: self.status,
+            read_source=self.source, read_translation=self.translation,
+        )
+
+    def recover(self):
+        return self.manager.recover(
+            wave_id=WAVE, fresh_status=lambda: self.status,
+            read_source=self.source, read_translation=self.translation,
+        )
 
     def test_one_active_wave_and_frozen_memory(self):
         plan = self.manager.plan(self.status, count=2)
@@ -117,13 +147,9 @@ class WaveTests(unittest.TestCase):
                 read_translation=lambda _: "Страж".encode(),
             )
         self.accept()
-        self.manager.prepare_close(
-            self.status, decisions={},
-            read_source=lambda _: b"Warden",
-            read_translation=lambda _: "Страж".encode(),
-        )
+        self.prepare()
         self.assertEqual(self.manager.status(self.status)["state"]["phase"], "RECONCILING")
-        result = self.manager.recover(wave_id=WAVE)
+        result = self.recover()
         self.assertEqual(result["state"], "CLOSED")
         self.assertIsNone(self.manager.active())
         self.assertEqual(self.manager.impact_queue(), [])
@@ -131,12 +157,8 @@ class WaveTests(unittest.TestCase):
     def test_source_revision_mismatch_blocks_new_wave(self):
         manifest = self.start()
         self.accept()
-        self.manager.prepare_close(
-            self.status, decisions={},
-            read_source=lambda _: b"Warden",
-            read_translation=lambda _: "Страж".encode(),
-        )
-        self.manager.close(expected_wave=WAVE)
+        self.prepare()
+        self.close()
         self.status["units"][0]["lifecycle"] = "extracted"
         self.status["units"][0]["review"] = "untranslated"
         updated = {"source": {"revision_id": "source-000002", "sha256": "b" * 64}}
@@ -181,23 +203,16 @@ class WaveTests(unittest.TestCase):
         )
         self.assertEqual(len(preview["impact_candidates"]), 1)
         self.assertEqual(preview["impact_candidates"][0]["unit_id"], "chapter-000002")
-        self.manager.prepare_close(
-            self.status, decisions={"term-warden": "accepted"},
-            read_source=lambda _: b"Warden", read_translation=lambda _: "Страж".encode(),
-        )
-        self.manager.close(expected_wave=WAVE)
+        self.prepare({"term-warden": "accepted"})
+        self.close()
         self.assertEqual(self.manager.memory()["entries"][0]["memory_id"], "term-warden")
         self.assertEqual(len(self.manager.impact_queue()), 1)
 
     def test_between_wave_shared_state_sync_creates_impact_review_queue(self):
         self.start()
         self.accept()
-        self.manager.prepare_close(
-            self.status, decisions={},
-            read_source=lambda _: b"some text",
-            read_translation=lambda _: b"translated",
-        )
-        self.manager.close(expected_wave=WAVE)
+        self.prepare()
+        self.close()
         self.status["state_revisions"]["glossary"] = "new-glossary-hash"
         updated = self.manager.sync_shared_memory(self.status, META)
         self.assertEqual(updated["state"], "synchronized")
@@ -211,6 +226,109 @@ class WaveTests(unittest.TestCase):
         self.status["units"][0]["review"] = "untranslated"
         next_wave = self.manager.start(self.status, META, count=1, wave_id="c" * 32)
         self.assertEqual(next_wave["memory_revision"], updated["memory_revision"])
+
+    def test_close_rejects_changed_glossary_metadata_review_and_chapter_bytes(self):
+        for field, mutated in (
+            ("glossary", "new-glossary"),
+            ("metadata", "new-metadata"),
+            ("progress", "new-progress"),
+            ("review_ledger", "new-ledger"),
+        ):
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as folder:
+                    self.storage = FilesystemStorage(Path(folder))
+                    self.manager = WaveManager(self.storage)
+                    self.status = fake()
+                    self.start()
+                    self.accept()
+                    self.prepare()
+                    before_memory = self.manager.memory()["revision"]
+                    self.status["state_revisions"][field] = mutated
+                    with self.assertRaises(WaveError):
+                        self.close()
+                    self.assertEqual(self.manager.memory()["revision"], before_memory)
+                    self.assertEqual(self.manager.status(self.status)["state"]["phase"], "RECONCILING")
+                    self.status["state_revisions"][field] = fake()["state_revisions"][field]
+                    self.assertEqual(self.recover()["state"], "CLOSED")
+
+        with tempfile.TemporaryDirectory() as folder:
+            self.storage = FilesystemStorage(Path(folder))
+            self.manager = WaveManager(self.storage)
+            self.status = fake()
+            self.start()
+            self.accept()
+            self.prepare()
+            with patch.object(self, "translation", return_value=b"new translation"):
+                with self.assertRaisesRegex(WaveError, "changed since reconciliation"):
+                    self.close()
+            self.assertEqual(self.recover()["state"], "CLOSED")
+
+    def test_close_rejects_changed_source_and_revoked_pass(self):
+        self.start()
+        self.accept()
+        self.prepare()
+        original = self.manager.memory()["revision"]
+        self.status["corpus"]["source_sha256"] = "c" * 64
+        with self.assertRaisesRegex(WaveError, "source fingerprint"):
+            self.close()
+        self.status["corpus"]["source_sha256"] = SHA
+        self.status["units"][0]["review"] = "stale"
+        self.status["valid"] = False
+        with self.assertRaises(WaveError):
+            self.close()
+        self.assertEqual(self.manager.memory()["revision"], original)
+        self.status["units"][0]["review"] = "pass"
+        self.status["valid"] = True
+        self.assertEqual(self.recover()["state"], "CLOSED")
+
+    def test_resolved_impact_reopens_when_translation_or_pass_changes(self):
+        self.start()
+        self.accept()
+        self.prepare()
+        self.close()
+        revision = self.manager.memory()["revision"]
+        sync_id = "c" * 32
+        self.storage.create_if_absent(
+            f".workflow/literary-memory/impacts/{sync_id}.json",
+            json.dumps({
+                "schema_version": 1, "wave_id": sync_id,
+                "memory_revision": revision,
+                "candidates": [{
+                    "memory_id": "character-voice", "unit_id": "chapter-000001",
+                    "reason": "candidate_text_match", "matched_terms": ["Warden"],
+                    "state": "pending",
+                }],
+            }).encode(),
+        )
+        self.assertEqual(len(self.manager.impact_queue()), 1)
+        resolution_path = (
+            f".workflow/literary-memory/resolutions/{sync_id}/"
+            "character-voice-chapter-000001.json"
+        )
+        self.storage.create_if_absent(resolution_path, json.dumps({
+            "schema_version": 1, "wave_id": sync_id,
+            "memory_id": "character-voice", "unit_id": "chapter-000001",
+            "reviewed": True, "memory_revision": revision,
+            "review_record_id": "pass-a", "translation_sha256": "1" * 64,
+        }).encode())
+        with patch.object(self.manager, "_current_impact_reviews", return_value={
+            "chapter-000001": {
+                "record_id": "pass-a", "translation_sha256": "1" * 64,
+                "source_sha256": SHA,
+            }
+        }):
+            self.assertEqual(self.manager.impact_queue(), [])
+        for new_record, new_sha in (("pass-a", "2" * 64), ("pass-b", "1" * 64)):
+            with self.subTest(record=new_record, sha=new_sha):
+                with patch.object(self.manager, "_current_impact_reviews", return_value={
+                    "chapter-000001": {
+                        "record_id": new_record, "translation_sha256": new_sha,
+                        "source_sha256": SHA,
+                    }
+                }):
+                    self.assertEqual(len(self.manager.impact_queue()), 1)
+                    self.assertEqual(self.manager.impact_queue()[0]["reason"],
+                                     "previous_resolution_stale")
 
     def test_snapshot_no_silent_overwrite(self):
         snap = snapshot_from([], source_revision_id="source-000001",
