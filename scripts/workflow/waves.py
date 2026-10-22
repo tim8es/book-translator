@@ -7,9 +7,10 @@ from authoritative status. Publication is recoverable and never silent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Callable
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,9 @@ from .session_runtime import save_dispatch, next_action, load_dispatch
 from .storage import StorageBackend, StorageNotFound, StorageAlreadyExists, StorageVersionConflict, StorageError
 from .coordination import BookCoordinationManager, CoordinationError
 from .repository import WorkflowStateRepository
+from .schemas import SchemaKind
+from .claims import unit_id_for_chapter
+from .reviews import ReviewLedgerManager
 
 ACTIVE = ".workflow/waves/active.json"
 MEMORY_ACTIVE = ".workflow/literary-memory/active.json"
@@ -93,6 +97,77 @@ def _snapshot(revision: str) -> str:
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
         raise WaveError("invalid literary memory revision")
     return f".workflow/literary-memory/snapshots/{revision}.json"
+
+
+
+def _reviewed_artifact_seal(
+    status: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    read_source: Callable[[str], bytes],
+    read_translation: Callable[[str], bytes],
+    *,
+    originals: Mapping[str, bytes] | None = None,
+    translations: Mapping[str, bytes] | None = None,
+) -> dict[str, Any]:
+    """Pin the exact review inputs and all chapter bytes used by impact analysis.
+
+    The seal is re-evaluated from durable state while holding the book's
+    coordination lease immediately before publishing the memory pointer.
+    """
+    if not status.get("valid") or status.get("book_slug") != manifest["book_slug"]:
+        raise WaveError("wave publication requires a valid preflight for the pinned book")
+    if status.get("finalization", {}).get("active") or status.get("claims"):
+        raise WaveError("wave publication blocked by finalization or active claims")
+    if status.get("workflow_revision") != manifest["workflow_revision"]:
+        raise WaveError("workflow revision changed since wave admission")
+    corpus = status.get("corpus")
+    if not isinstance(corpus, Mapping) or corpus.get("source_sha256") != manifest["source_sha256"]:
+        raise WaveError("original source fingerprint changed since wave admission")
+    revisions = status.get("state_revisions")
+    required = ("metadata", "progress", "review_ledger", "glossary", "style_guide")
+    if not isinstance(revisions, Mapping) or any(
+        not isinstance(revisions.get(key), str) or not revisions[key] for key in required
+    ):
+        raise WaveError("wave publication requires verifiable authoritative state revisions")
+    if any(revisions[key] != manifest["shared_state_revisions"][key]
+           for key in ("glossary", "style_guide")):
+        raise WaveError("glossary/style changed since wave admission")
+    units = status.get("units")
+    if not isinstance(units, list):
+        raise WaveError("wave publication requires the verified unit listing")
+    by_id = {unit["unit_id"]: unit for unit in units}
+    if len(by_id) != len(units):
+        raise WaveError("duplicate unit IDs in wave publication state")
+    for uid in manifest["unit_ids"]:
+        unit = by_id.get(uid)
+        if not unit or unit["lifecycle"] != "reviewed" or unit["review"] != "pass":
+            raise WaveError(f"{uid} has no current accepted independent PASS")
+    reviewed = []
+    for uid in sorted(by_id):
+        unit = by_id[uid]
+        if unit["lifecycle"] != "reviewed":
+            continue
+        if unit["review"] != "pass":
+            raise WaveError(f"{uid} is reviewed without current PASS")
+        original = (originals[uid] if originals is not None and uid in originals
+                    else read_source(unit["source_path"]))
+        translation = (translations[uid] if translations is not None and uid in translations
+                       else read_translation(unit["translation_path"]))
+        reviewed.append({
+            "unit_id": uid, "chapter_number": unit["chapter_number"],
+            "source_path": unit["source_path"],
+            "translation_path": unit["translation_path"],
+            "source_sha256": hashlib.sha256(original).hexdigest(),
+            "translation_sha256": hashlib.sha256(translation).hexdigest(),
+        })
+    return {
+        "schema_version": 1,
+        "book_slug": manifest["book_slug"],
+        "workflow_revision": status["workflow_revision"],
+        "source_sha256": corpus["source_sha256"],
+        "state_revisions": {key: revisions[key] for key in required},
+        "reviewed_artifacts": reviewed,
+    }
 
 
 class WaveManager:
@@ -334,8 +409,13 @@ class WaveManager:
         translated = {uid: read_translation(v["translation_path"]) for uid, v in by_id.items()
                       if v["lifecycle"] == "reviewed"}
         candidates = impact_candidates(accepted, units, translated)
+        seal = _reviewed_artifact_seal(
+            status, manifest, read_source, read_translation,
+            originals=units, translations=translated,
+        )
         return {
             "schema_version": 1, "wave_id": manifest["wave_id"],
+            "publication_seal": seal,
             "decisions": dict(sorted(decisions.items())),
             "previous_memory_revision": manifest["memory_revision"],
             "next_snapshot": next_snapshot, "impact_candidates": candidates,
@@ -344,7 +424,8 @@ class WaveManager:
 
     def prepare_close(self, status: Mapping[str, Any], *,
                       decisions: Mapping[str, str],
-                      read_source, read_translation) -> dict[str, Any]:
+                      read_source, read_translation,
+                      fresh_status: Callable[[], Mapping[str, Any]]) -> dict[str, Any]:
         coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
         try:
             lease = coordinator.acquire(operation="wave_transition", session_id="wave-prepare_close")
@@ -361,7 +442,7 @@ class WaveManager:
             if state["phase"] != "ACTIVE":
                 raise WaveError("wave must be ACTIVE before reconciliation")
             preview = self.reconcile_preview(
-                status, decisions=decisions, read_source=read_source,
+                fresh_status(), decisions=decisions, read_source=read_source,
                 read_translation=read_translation,
             )
             path = f".workflow/waves/{manifest['wave_id']}/reconciliation.json"
@@ -378,7 +459,10 @@ class WaveManager:
             except CoordinationError as exc:
                 raise WaveError(f"wave transition guard release failed: {exc}") from exc
 
-    def close(self, *, expected_wave: str) -> dict[str, Any]:
+    def close(self, *, expected_wave: str,
+              fresh_status: Callable[[], Mapping[str, Any]],
+              read_source: Callable[[str], bytes],
+              read_translation: Callable[[str], bytes]) -> dict[str, Any]:
         coordinator = BookCoordinationManager(WorkflowStateRepository(self.storage))
         try:
             lease = coordinator.acquire(operation="wave_transition", session_id="wave-close")
@@ -398,9 +482,28 @@ class WaveManager:
             next_snapshot = validate_snapshot(frozen["next_snapshot"])
             if next_snapshot["revision"] != state["next_memory_revision"]:
                 raise WaveError("reconciliation plan differs from pinned wave state")
+            if state.get("decisions_sha256") != hashlib.sha256(canonical(frozen["decisions"])).hexdigest():
+                raise WaveError("frozen reconciliation decisions have been modified")
+            frozen_seal = frozen.get("publication_seal")
+            if not isinstance(frozen_seal, Mapping):
+                raise WaveError("frozen reconciliation lacks verified publication seal")
             pointer, pointer_version = _json_read(self.storage, MEMORY_ACTIVE)
             if pointer["revision"] not in {manifest["memory_revision"], next_snapshot["revision"]}:
                 raise WaveError("memory changed outside the current wave")
+            if state["phase"] == "CLOSED":
+                # Committed publication may have been interrupted while removing
+                # the active pointer. Only clean up if publication is durable.
+                # Subsequent book edits do not invalidate a *committed* wave.
+                if pointer["revision"] != next_snapshot["revision"]:
+                    raise WaveError("CLOSED wave has no published memory revision")
+            else:
+                current_seal = _reviewed_artifact_seal(
+                    fresh_status(), manifest, read_source, read_translation,
+                )
+                if current_seal != frozen_seal:
+                    raise WaveError(
+                        "wave inputs changed since reconciliation; do not publish stale literary memory"
+                    )
 
             # Publish immutable artifacts before switching the authoritative pointer.
             _create(self.storage, _snapshot(next_snapshot["revision"]), next_snapshot)
@@ -436,14 +539,20 @@ class WaveManager:
             except CoordinationError as exc:
                 raise WaveError(f"wave transition could not release coordination: {exc}") from exc
 
-    def recover(self, *, wave_id: str) -> dict[str, Any]:
+    def recover(self, *, wave_id: str,
+                fresh_status: Callable[[], Mapping[str, Any]],
+                read_source: Callable[[str], bytes],
+                read_translation: Callable[[str], bytes]) -> dict[str, Any]:
         """Do not manufacture reconciliation plans; finish an existing frozen transition."""
         manifest, state, _ = self._active_state()
         if manifest["wave_id"] != wave_id:
             raise WaveError("requested wave is not active")
         if state["phase"] not in {"RECONCILING", "CLOSED"}:
             raise WaveError("no recoverable reconciliation in progress")
-        return self.close(expected_wave=wave_id)
+        return self.close(
+            expected_wave=wave_id, fresh_status=fresh_status,
+            read_source=read_source, read_translation=read_translation,
+        )
 
     def sync_shared_memory(self, status: Mapping[str, Any],
                            metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -528,9 +637,36 @@ class WaveManager:
             except CoordinationError as exc:
                 raise WaveError(f"memory synchronization could not release lock: {exc}") from exc
 
+    def _current_impact_reviews(self) -> dict[str, dict[str, Any]]:
+        """Resolve current PASS records from authoritative progress, ledger, and bytes.
+
+        Never trust a historical resolution by its presence alone. This method
+        is only invoked when a previously resolved impact needs validation.
+        """
+        repository = WorkflowStateRepository(self.storage)
+        try:
+            progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+            metadata = repository.read("metadata.json", SchemaKind.METADATA).data
+            reviews = ReviewLedgerManager(
+                repository, artifact_reader=lambda path: self.storage.read(path).content,
+            ).resolve_all(progress, metadata)
+        except Exception as exc:
+            raise WaveError(f"cannot revalidate literary impact against current review state: {exc}") from exc
+        return {
+            review.unit_id: {
+                "record_id": review.current_record["record_id"],
+                "translation_sha256": review.translation_sha256,
+                "source_sha256": review.source_sha256,
+            }
+            for review in reviews
+            if review.state == "pass" and review.current_record is not None
+        }
+
     def impact_queue(self) -> list[dict[str, Any]]:
-        """All unresolved historical impact references must be explicitly reviewed."""
+        """Return unresolved or newly stale impact checks; compare current PASS hashes."""
+
         results = []
+        current_reviews: dict[str, dict[str, Any]] | None = None
         prefix = ".workflow/literary-memory/impacts"
         for path in self.storage.list(prefix):
             if not path.endswith(".json"):
@@ -552,6 +688,16 @@ class WaveManager:
                     raise
                 if resolved.get("reviewed") is not True:
                     results.append({**impact, "wave_id": doc["wave_id"]})
+                    continue
+                if current_reviews is None:
+                    current_reviews = self._current_impact_reviews()
+                current = current_reviews.get(impact["unit_id"])
+                if (current is None
+                        or resolved.get("memory_revision") != doc.get("memory_revision")
+                        or resolved.get("translation_sha256") != current["translation_sha256"]
+                        or resolved.get("review_record_id") != current["record_id"]):
+                    results.append({**impact, "wave_id": doc["wave_id"],
+                                    "state": "pending", "reason": "previous_resolution_stale"})
         return results
 
     def resolve_impact(self, *, wave_id: str, memory_id: str, unit_id: str,
@@ -566,6 +712,11 @@ class WaveManager:
             raise WaveError("impact candidate is not recorded in this wave")
         if review_record.get("outcome") != "PASS" or review_record.get("unit_id") != unit_id:
             raise WaveError("impact resolution needs independent current PASS record")
+        current = self._current_impact_reviews().get(unit_id)
+        if (current is None or current["record_id"] != review_record.get("record_id")
+                or current["translation_sha256"] != current_translation_sha256
+                or current["source_sha256"] != review_record.get("source_sha256")):
+            raise WaveError("impact resolution must bind current PASS and both source/translation hashes")
         if review_record.get("translation_sha256") != current_translation_sha256:
             raise WaveError("PASS review references another translation artifact")
         if reviewer_claim.get("role") != "reviewer" or reviewer_claim.get("unit_id") != unit_id:
@@ -602,6 +753,7 @@ class WaveManager:
             "schema_version": 1, "wave_id": wave_id, "memory_id": memory_id,
             "unit_id": unit_id, "reviewed": True,
             "review_record_id": review_record["record_id"],
+            "memory_revision": doc["memory_revision"],
             "translation_sha256": current_translation_sha256,
         }
         return _create(self.storage, path, data)

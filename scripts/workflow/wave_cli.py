@@ -246,6 +246,7 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                     result = manager.prepare_close(
                         snapshot, decisions=decisions,
                         read_source=reader, read_translation=reader,
+                        fresh_status=lambda: _snapshot(args, root, preflight),
                     )
                 else:
                     result = manager.reconcile_preview(
@@ -269,18 +270,27 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
                        or by_id[uid].get("review") != "pass"
                        for uid in manifest["unit_ids"]):
                     raise WaveError("one or more assigned units lacks current PASS")
-                result = manager.close(expected_wave=manifest["wave_id"])
+                result = manager.close(
+                    expected_wave=manifest["wave_id"],
+                    fresh_status=lambda: _snapshot(args, root, preflight),
+                    read_source=reader, read_translation=reader,
+                )
             elif action == "wave-recover":
                 # Requires state reconciliation, but never fabricates missing decisions.
                 manifest, state, _ = manager._active_state()
-                if not snapshot["valid"] or snapshot["claims"]:
-                    raise WaveError("cannot recover wave during invalid preflight or active claims")
-                by_id = {u["unit_id"]: u for u in snapshot["units"]}
-                if any(by_id.get(uid, {}).get("lifecycle") != "reviewed"
-                       or by_id[uid].get("review") != "pass"
-                       for uid in manifest["unit_ids"]):
-                    raise WaveError("cannot recover while some wave units lack current PASS")
-                result = manager.recover(wave_id=manifest["wave_id"])
+                if state["phase"] != "CLOSED":
+                    if not snapshot["valid"] or snapshot["claims"]:
+                        raise WaveError("cannot recover wave during invalid preflight or active claims")
+                    by_id = {u["unit_id"]: u for u in snapshot["units"]}
+                    if any(by_id.get(uid, {}).get("lifecycle") != "reviewed"
+                           or by_id[uid].get("review") != "pass"
+                           for uid in manifest["unit_ids"]):
+                        raise WaveError("cannot recover while some wave units lack current PASS")
+                result = manager.recover(
+                    wave_id=manifest["wave_id"],
+                    fresh_status=lambda: _snapshot(args, root, preflight),
+                    read_source=reader, read_translation=reader,
+                )
             elif action == "memory-sync":
                 result = manager.sync_shared_memory(snapshot, metadata)
             elif action == "memory-impact":
