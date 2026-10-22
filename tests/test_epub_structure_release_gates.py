@@ -328,14 +328,20 @@ class NavigationSecurityTests(unittest.TestCase):
 
     def test_inert_legacy_meta_content_type_is_allowed(self):
         original = make_epub()
-        source = self.mutate_epub(original, {
-            "OPS/story.xhtml": [(
-                b"<body>",
-                b'<head><meta http-equiv="Content-Type" content="application/xhtml+xml; charset=utf-8"/></head><body>',
-            )]
-        })
-        with zipfile.ZipFile(io.BytesIO(source)) as z:
-            manifest_and_spine(z)
+        for directive, content in (
+            ("Content-Type", "application/xhtml+xml; charset=utf-8"),
+            ("X-UA-Compatible", "IE=edge"),
+            ("Content-Language", "en"),
+        ):
+            with self.subTest(meta_directive=directive):
+                inserted = (
+                    f'<head><meta http-equiv="{directive}" content="{content}"/></head><body>'
+                ).encode("utf-8")
+                source = self.mutate_epub(original, {
+                    "OPS/story.xhtml": [(b"<body>", inserted)]
+                })
+                with zipfile.ZipFile(io.BytesIO(source)) as z:
+                    manifest_and_spine(z)
 
 
 
