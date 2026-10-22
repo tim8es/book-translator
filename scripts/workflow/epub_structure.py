@@ -444,10 +444,12 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         return replaced.get(path) or archive.read(path)
     seen_ids = {}
     paths = []
-    for filename in names:
-        if not filename.lower().endswith((".xhtml", ".html", ".htm")):
-            continue
-        root = _parse_xml(source(filename))
+    _, _, manifest, _ = manifest_and_spine(archive)
+    xhtml_paths = {p for p, item in manifest.values()
+                   if item.get("media-type") == "application/xhtml+xml"}
+    xhtml_paths.update(p for p in names if p.lower().endswith((".xhtml", ".html", ".htm")))
+    for filename in sorted(xhtml_paths):
+        root = _parse_xml(source(filename), filename)
         identifiers = [x.get("id") for x in root.iter() if x.get("id")]
         if len(identifiers) != len(set(identifiers)):
             raise StructureError(f"duplicate internal XHTML anchor id: {filename}")
@@ -455,21 +457,26 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         paths.append((filename, root))
     for path, root in paths:
         for element in root.iter():
-            if name(element.tag) not in {"a", "area"}:
-                continue
-            href = element.get("href")
-            if not href:
-                continue
-            url = urlsplit(href)
-            if url.scheme or href.startswith("//"):
-                if url.scheme.lower() not in {"https", "http", "mailto"}:
-                    raise StructureError(f"unsafe external link {href!r}")
-                continue
-            target = member_path(path, url.path) if url.path else path
-            if target not in names:
-                raise StructureError(f"broken internal link target {path}: {href}")
-            if url.fragment and target in seen_ids and unquote(url.fragment) not in seen_ids[target]:
-                raise StructureError(f"broken internal anchor {path}: {href}")
+            tag = name(element.tag)
+            checks = []
+            if element.get("href") is not None:
+                checks.append(("href", element.get("href"), tag in {"a", "area"}))
+            if element.get("src") is not None:
+                checks.append(("src", element.get("src"), False))
+            for attribute, href, user_activated in checks:
+                if not href:
+                    raise StructureError(f"empty XHTML {attribute} resource reference: {path}")
+                url = urlsplit(href)
+                if url.scheme or url.netloc or href.startswith("//"):
+                    if (not user_activated or url.netloc and not url.scheme
+                            or url.scheme.lower() not in {"https", "http", "mailto"}):
+                        raise StructureError(f"unsafe remote XHTML subresource {href!r} in {path}")
+                    continue
+                target = member_path(path, url.path) if url.path else path
+                if target not in names:
+                    raise StructureError(f"broken internal link/resource target {path}: {href}")
+                if url.fragment and target in seen_ids and unquote(url.fragment) not in seen_ids[target]:
+                    raise StructureError(f"broken internal anchor {path}: {href}")
 
 
 def validate_structural_epub(content: bytes, *, expected_documents: int):
