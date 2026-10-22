@@ -72,9 +72,14 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
 
     try:
         book_module = importlib.import_module("book")
-        # The status resolver verifies every review; do not repeat that expensive pass.
-        structural_errors, _ = book_module.validate_book(slug, check_review_evidence=False)
+        # Load and verify progress once. Structural validation and corpus
+        # verification share that same freshly read state within this preflight.
         book_dir, metadata, progress = book_module.load_book(slug)
+        # The status resolver verifies review evidence; do not duplicate that pass.
+        structural_errors, _ = book_module.validate_book(
+            slug, check_review_evidence=False,
+            loaded_state=(book_dir, metadata, progress),
+        )
         structural_errors = normalize_structural_errors(book_dir, metadata, structural_errors)
     except Exception as exc:
         raise StatusCliError(f"cannot run structural preflight: {exc}") from exc
