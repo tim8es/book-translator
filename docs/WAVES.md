@@ -51,3 +51,23 @@ unchanged role instructions already in the same chat but reload current
 chapter-specific source, target and bounded memory. Role changes require
 reloading the corresponding role contract. The response is advisory metadata,
 not a runtime claim or a complete GitHub-native execution adapter.
+
+## Publication integrity and stale impact protection
+
+Reconciliation now pins a `publication_seal` containing current metadata,
+progress, review-ledger, glossary and style-guide revisions, the validated
+original source fingerprint, and source/translation SHA-256 for every reviewed
+unit used in impact analysis. `wave-close` and unfinished `wave-recover`
+recompute this seal from authoritative files under the existing coordination
+lock. Any change since preparation stops publication in `RECONCILING` rather
+than silently committing a stale literary-memory snapshot. A wave that already
+reached durable `CLOSED` can safely finish deleting its active pointer without
+revalidating chapter content changed after that committed publication.
+
+An impact resolution is not a permanent boolean: it is accepted as closed only
+while the referenced current independent PASS record, translation hash and
+literary-memory revision still match. An invalidated resolution returns to
+`memory-impact` as pending and blocks normal finalization. Historical review
+and impact evidence are retained. If inputs drift during `RECONCILING`, stop
+and inspect the recorded frozen state; do not force-update the memory pointer or
+invent a replacement seal.

@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from workflow.filesystem import FilesystemStorage
+from workflow.storage import StorageVersionConflict
 from workflow.literary_memory import MemoryError, snapshot_from, apply_decisions, context_pack
 from workflow.waves import WaveError, WaveManager, _json_read
 
@@ -280,6 +281,26 @@ class WaveTests(unittest.TestCase):
         self.status["units"][0]["review"] = "pass"
         self.status["valid"] = True
         self.assertEqual(self.recover()["state"], "CLOSED")
+
+    def test_committed_closed_wave_recovers_pointer_after_state_changes(self):
+        self.start()
+        self.accept()
+        self.prepare()
+        ordinary_delete = self.storage.delete_if_version
+
+        def failed_pointer_delete(path, expected_version):
+            if path == ".workflow/waves/active.json":
+                raise StorageVersionConflict("simulated changed pointer")
+            return ordinary_delete(path, expected_version)
+
+        with patch.object(self.storage, "delete_if_version", side_effect=failed_pointer_delete):
+            with self.assertRaises(WaveError):
+                self.close()
+        self.assertEqual(self.manager.status(self.status)["state"]["phase"], "CLOSED")
+        self.status["valid"] = False
+        self.status["state_revisions"]["progress"] = "later-change"
+        self.assertEqual(self.recover()["state"], "CLOSED")
+        self.assertIsNone(self.manager.active())
 
     def test_resolved_impact_reopens_when_translation_or_pass_changes(self):
         self.start()
