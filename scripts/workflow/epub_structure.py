@@ -82,6 +82,7 @@ def _safe_xml(raw: bytes, path: str = "EPUB XML") -> ET.Element:
 def _validate_navigation(body: ET.Element, path: str) -> None:
     """Treat only syntactically constrained EPUB navigation as excluded text."""
     nav_count = 0
+    navigation_sections: list[ET.Element] = []
     text_tags = {"a", "span", "h1", "h2", "h3", "h4", "h5", "h6",
                  "em", "strong", "i", "b", "small", "abbr", "cite", "sup", "sub"}
     allowed = text_tags | {"nav", "ol", "ul", "li", "br"}
@@ -112,14 +113,10 @@ def _validate_navigation(body: ET.Element, path: str) -> None:
         nonlocal nav_count
         if name(node.tag) == "nav":
             nav_count += 1
-            if not any(name(x.tag) in {"ol", "ul"} for x in node.iter()):
-                raise StructureError(f"navigation without a link list: {path}")
-            for child in node:
-                navigation(child)
-                if (child.tail or "").strip():
-                    raise StructureError(f"unmapped text after nav children: {path}")
-            if (node.text or "").strip():
-                raise StructureError(f"unmapped text in nav container: {path}")
+            navigation_sections.append(node)
+            # First scan all body siblings for unmapped prose. Validate the
+            # navigation contents afterwards so an outside-text violation
+            # cannot be masked by a malformed nav list.
             return
         if (node.text or "").strip():
             raise StructureError(f"navigation has text outside its nav: {path}")
@@ -130,6 +127,15 @@ def _validate_navigation(body: ET.Element, path: str) -> None:
     outside(body)
     if nav_count < 1:
         raise StructureError(f"navigation document has no nav section: {path}")
+    for section in navigation_sections:
+        if not any(name(x.tag) in {"ol", "ul"} for x in section.iter()):
+            raise StructureError(f"navigation without a link list: {path}")
+        for child in section:
+            navigation(child)
+            if (child.tail or "").strip():
+                raise StructureError(f"unmapped text after nav children: {path}")
+        if (section.text or "").strip():
+            raise StructureError(f"unmapped text in nav container: {path}")
 
 
 def _validate_xhtml_security(raw: bytes, path: str) -> None:
