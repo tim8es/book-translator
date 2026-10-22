@@ -133,6 +133,21 @@ class WorkflowReviewValidationTests(unittest.TestCase):
             reviewer_session_id="reviewer-a",
         )
 
+    def test_reviewer_queue_sees_newly_accepted_translation(self):
+        initial = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-a", "--json",
+        ).stdout)
+        self.assertEqual(initial["action"], "wait")
+        self.accept_translation()
+        progress_before = (self.book / "progress.json").read_bytes()
+        ready = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-a", "--json",
+        ).stdout)
+        self.assertEqual(ready["action"], "claim")
+        self.assertEqual(ready["operation"], "review")
+        self.assertEqual(ready["unit_id"], "chapter-000001")
+        self.assertEqual((self.book / "progress.json").read_bytes(), progress_before)
+
     def test_review_preflight_requires_accepted_artifact_and_is_read_only(self):
         before = (self.book / "progress.json").read_bytes()
         self.run_cli("review-preflight", "sample", "1", expect=1)
