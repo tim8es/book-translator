@@ -35,6 +35,29 @@ protected \`[[BT:...]]\` markers. Do not add Markdown heading/bold/list syntax
 as a substitute for protected structure: the preview assembler inserts the
 literal text and escapes XML metacharacters.
 
+## Independent source-token audit (before translating)
+
+Immediately after export, while the files still contain the original-language
+prose, run:
+
+```sh
+python scripts/book.py epub-preserve-audit original.epub \
+  --translations-dir /tmp/my-epub-blocks \
+  --output /tmp/my-epub-source-audit.json
+```
+
+This compares the normalized word/punctuation token sequence obtained by an
+independent XML body traversal with the ordered unmodified marked Markdown
+texts, while also verifying the exact source-bound block identities/markers.
+Hidden XHTML body text fails closed. The JSON report contains only source
+hashes, block/token counts and hashes, no literary text. The audit deliberately
+fails after translating any words because it attests **source extraction**,
+not target-language translation.
+
+This report uses `state=verified_staging_only`: it is **not** the durable
+`books/<slug>/source-coverage.json` expected by the production EPUB workflow.
+No status or review transition follows from this command.
+
 ## Preview assembly
 
 \`\`\`sh
