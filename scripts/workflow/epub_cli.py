@@ -27,6 +27,11 @@ from .reviews import ReviewError, ReviewLedgerManager
 from .schemas import SchemaError, SchemaKind
 from .status_cli import default_preflight
 from .storage import StorageAlreadyExists, StorageError, StorageNotFound, StorageVersionConflict
+from .epub_structure import (
+    STRUCTURE_PATH, PROFILE, StructureError, build as build_structural_epub,
+    validate_structural_epub,
+)
+
 
 
 class EpubCliError(RuntimeError):
@@ -222,6 +227,26 @@ def _build_identity(
             preview=preview,
             cover_reader=reader,
         )
+        structural = None
+        structure_file = book_dir / STRUCTURE_PATH
+        if structure_file.exists():
+            try:
+                structure_bytes = structure_file.read_bytes()
+                layout = json.loads(structure_bytes)
+                original_path = book_dir / "source" / metadata_doc.data["source_file"]
+                original_bytes = original_path.read_bytes()
+                if (layout.get("profile") != PROFILE
+                        or layout.get("source_sha256") != hashlib.sha256(original_bytes).hexdigest()
+                        or len(layout.get("documents", [])) != len(chapters)):
+                    raise EpubCliError("EPUB source layout does not match original file/spine")
+                structural = {"layout": layout, "original": original_bytes}
+                snapshot["structure"] = {
+                    "profile": PROFILE,
+                    "source_sha256": layout["source_sha256"],
+                    "layout_sha256": hashlib.sha256(structure_bytes).hexdigest(),
+                }
+            except (ValueError, KeyError, OSError, TypeError) as exc:
+                raise EpubCliError(f"invalid EPUB structural layout: {exc}") from exc
         fingerprint = input_fingerprint(snapshot)
     except EpubOutputError as exc:
         raise EpubCliError(str(exc)) from exc
@@ -237,6 +262,7 @@ def _build_identity(
         "resolutions": resolutions,
         "snapshot": snapshot,
         "fingerprint": fingerprint,
+        "structural": structural,
         "reader": reader,
     }
 
@@ -293,8 +319,17 @@ def _stored_output_status(context, *, requested_artifact_path: str | None = None
     except StorageError as exc:
         return {"state": "invalid", "reason": str(exc)}
     try:
-        validate_epub_bytes(stored_artifact.content, expected_unit_count=len(context["progress"].data["chapters"]))
-    except EpubOutputError as exc:
+        if context["structural"] is not None:
+            validate_structural_epub(
+                stored_artifact.content,
+                expected_documents=len(context["progress"].data["chapters"]),
+            )
+        else:
+            validate_epub_bytes(
+                stored_artifact.content,
+                expected_unit_count=len(context["progress"].data["chapters"]),
+            )
+    except (EpubOutputError, StructureError) as exc:
         return {"state": "invalid", "reason": str(exc), "artifact_path": manifest["artifact_path"]}
     status = resolve_output_status(
         manifest,
@@ -323,27 +358,49 @@ def epub_build_command(args: argparse.Namespace, root: Path) -> int:
 
     metadata = context["metadata"].data
     try:
-        artifact_bytes = build_epub_bytes(
-            book_slug=args.slug,
-            title=metadata["title"],
-            author=metadata.get("author"),
-            language=metadata["target_language"],
-            units=_unit_payloads(context),
-            fingerprint=context["fingerprint"],
-            cover=_cover_payload(context),
-        )
-        validate_epub_bytes(
-            artifact_bytes,
-            expected_unit_count=len(context["progress"].data["chapters"]),
-        )
-    except EpubOutputError as exc:
+        if context["structural"] is not None:
+            units = _unit_payloads(context)
+            artifact_bytes = build_structural_epub(
+                context["structural"]["original"],
+                document_paths=[
+                    item["path"] for item in context["structural"]["layout"]["documents"]
+                ],
+                translations=[item["markdown"] for item in units],
+                target_language=metadata["target_language"],
+                title=metadata["title"],
+            )
+            validate_structural_epub(artifact_bytes, expected_documents=len(units))
+        else:
+            artifact_bytes = build_epub_bytes(
+                book_slug=args.slug,
+                title=metadata["title"],
+                author=metadata.get("author"),
+                language=metadata["target_language"],
+                units=_unit_payloads(context),
+                fingerprint=context["fingerprint"],
+                cover=_cover_payload(context),
+            )
+            validate_epub_bytes(
+                artifact_bytes,
+                expected_unit_count=len(context["progress"].data["chapters"]),
+            )
+    except (EpubOutputError, StructureError) as exc:
         raise EpubCliError(str(exc)) from exc
 
     artifact_disposition = _write_if_changed(context["storage"], artifact_path, artifact_bytes)
     try:
         persisted = context["storage"].read(artifact_path)
-        validate_epub_bytes(persisted.content, expected_unit_count=len(context["progress"].data["chapters"]))
-    except (StorageError, EpubOutputError) as exc:
+        if context["structural"] is not None:
+            validate_structural_epub(
+                persisted.content,
+                expected_documents=len(context["progress"].data["chapters"]),
+            )
+        else:
+            validate_epub_bytes(
+                persisted.content,
+                expected_unit_count=len(context["progress"].data["chapters"]),
+            )
+    except (StorageError, EpubOutputError, StructureError) as exc:
         raise EpubCliError(f"persisted EPUB failed validation: {exc}") from exc
     if hashlib.sha256(persisted.content).hexdigest() != hashlib.sha256(artifact_bytes).hexdigest():
         raise EpubCliError("persisted EPUB bytes changed after atomic write")
