@@ -164,5 +164,49 @@ class NavigationSecurityTests(unittest.TestCase):
                 manifest_and_spine(z)
 
 
+    def test_active_xhtml_and_executable_resources_are_blocked(self):
+        base = make_epub()
+        for substitution in (
+            (b"</body>", b'<script>alert(1)</script></body>'),
+            (b"<body>", b'<body onclick="alert(1)">'),
+            (b"</body>", b'<a href="javascript:alert(1)">Unsafe</a></body>'),
+        ):
+            with self.subTest(substitution=substitution[1][:50]):
+                result = io.BytesIO()
+                with zipfile.ZipFile(io.BytesIO(base)) as original, zipfile.ZipFile(result, "w") as out:
+                    for info in original.infolist():
+                        value = original.read(info.filename)
+                        if info.filename == "OPS/story.xhtml":
+                            value = value.replace(*substitution)
+                        out.writestr(info, value)
+                with zipfile.ZipFile(io.BytesIO(result.getvalue())) as z:
+                    with self.assertRaisesRegex(StructureError, "unsafe|active"):
+                        manifest_and_spine(z)
+
+    def test_duplicate_anchor_ids_are_rejected_at_build(self):
+        raw = make_epub()
+        corrupted = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(raw)) as original, zipfile.ZipFile(corrupted, "w") as out:
+            for info in original.infolist():
+                value = original.read(info.filename)
+                if info.filename == "OPS/story.xhtml":
+                    value = value.replace(b'id="first"', b'id="second"')
+                out.writestr(info, value)
+        source = corrupted.getvalue()
+        units = source_units(source)
+        with self.assertRaisesRegex(StructureError, "duplicate internal XHTML anchor"):
+            build(source, document_paths=[x[2] for x in units],
+                  translations=[x[1] for x in units], target_language="ru", title="История")
+
+    def test_partial_protected_marker_is_never_accepted_as_prose(self):
+        raw = make_epub()
+        units = source_units(raw)
+        altered = units[0][1].replace("Text one.", "Text one. ⟦BT:O:0001")
+        with self.assertRaisesRegex(StructureError, "protected"):
+            build(raw, document_paths=[x[2] for x in units],
+                  translations=[altered], target_language="ru", title="История")
+
+
+
 if __name__ == "__main__":
     unittest.main()
