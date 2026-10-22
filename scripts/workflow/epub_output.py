@@ -24,12 +24,12 @@ _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _ORDERED_ITEM_RE = re.compile(r"^\d+\.\s+(.+)$")
-_PLAIN_CHAPTER_TITLE_RE = re.compile(r"^(?:Глава|Chapter)\\s+\\d+\\b", re.IGNORECASE)
+_PLAIN_CHAPTER_TITLE_RE = re.compile(r"^(?:Глава|Chapter)\s+\d+\b", re.IGNORECASE)
 _PLAIN_NOTES_TITLE_RE = re.compile(
-    r"^(?:Примечания(?:\\s+автора)?(?:\\s+(?:к|перед|после|в конце)\\s+главы|\\s+—\\s+в конце главы)?"
-    r"|Chapter(?: End)? Notes)\\s*$", re.IGNORECASE
+    r"^(?:Примечания(?:\s+автора)?(?:\s+(?:к|перед|после|в конце)\s+главы|\s+—\s+в конце главы)?"
+    r"|Chapter(?: End)? Notes)\s*$", re.IGNORECASE
 )
-_PLAIN_INTERNAL_CHAPTER_RE = re.compile(r"^(?:ГЛАВА|CHAPTER)\\s+\\d+\\s*$")
+_PLAIN_INTERNAL_CHAPTER_RE = re.compile(r"^(?:ГЛАВА|CHAPTER)\s+\d+\s*$")
 
 _MANIFEST_KEYS = {
     "schema_version",
