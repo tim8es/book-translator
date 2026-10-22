@@ -52,7 +52,11 @@ class StatusResolver:
         corpus: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         metadata_doc = self.repository.read("metadata.json", SchemaKind.METADATA)
-        progress_doc = self.repository.read("progress.json", SchemaKind.PROGRESS)
+        # The review pass below hashes every source/translation pair. Reuse those
+        # fresh hashes for acceptance verification instead of reading each file twice.
+        progress_doc = self.repository.read(
+            "progress.json", SchemaKind.PROGRESS, verify_artifacts=False
+        )
         metadata = metadata_doc.data
         progress = progress_doc.data
 
@@ -124,10 +128,18 @@ class StatusResolver:
                 self.repository,
                 artifact_reader=self._artifact_reader,
             )
+            verified_hashes: dict[tuple[str, str], str | None] = {}
             for resolution in review_manager.resolve_all(progress, metadata):
                 review_states_by_number[resolution.chapter_number] = resolution.state
+                verified_hashes[(resolution.unit_id, "source_sha256")] = resolution.source_sha256
+                verified_hashes[(resolution.unit_id, "translation_sha256")] = resolution.translation_sha256
+            # Keep translation-acceptance integrity mandatory for every status
+            # decision. Only the redundant artifact reads are eliminated.
+            self.repository._verify_translation_acceptance_integrity(
+                progress, verified_hashes=verified_hashes
+            )
         except (ReviewEvidenceError, RepositoryError, SchemaError, StorageError, StorageNotFound) as exc:
-            errors.append(f"review evidence is unavailable or invalid: {exc}")
+            errors.append(f"review/translation evidence is unavailable or invalid: {exc}")
 
         reviews = {state: 0 for state in _REVIEW_STATES}
         units: list[dict[str, Any]] = []
