@@ -24,7 +24,10 @@ class ReviewerQueueTests(unittest.TestCase):
         s["claims"] = [{"unit_id": "chapter-000002", "role": "reviewer", "session_id": "other"}]
         self.assertEqual(next_review(s, "reviewer-a")["unit_id"], "chapter-000003")
         s["claims"][0]["session_id"] = "reviewer-a"
+        s["claims"][0]["expires_at"] = "2099-01-01T00:00:00Z"
         self.assertEqual(next_review(s, "reviewer-a")["action"], "work")
+        s["claims"][0]["expires_at"] = "2020-01-01T00:00:00Z"
+        self.assertEqual(next_review(s, "reviewer-a")["reason"], "claim_expired")
 
     def test_wave_scoped_and_wait_without_accepted_work(self):
         s = state()

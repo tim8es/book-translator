@@ -6,6 +6,7 @@ claim, compare original and accepted translation and record hash-bound evidence.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 
 
 def next_review(status: Mapping, session_id: str, *, wave_units=None) -> dict:
@@ -34,6 +35,14 @@ def next_review(status: Mapping, session_id: str, *, wave_units=None) -> dict:
             claim = active_claims.get(unit["unit_id"])
             if claim:
                 if claim.get("session_id") == session_id and claim.get("role") == "reviewer":
+                    try:
+                        expires = datetime.fromisoformat(claim["expires_at"].replace("Z", "+00:00"))
+                        if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
+                            return {**base, "action": "blocked", "reason": "claim_expired",
+                                    "unit_id": unit["unit_id"]}
+                    except (KeyError, ValueError, TypeError):
+                        return {**base, "action": "blocked", "reason": "claim_expiry_invalid",
+                                "unit_id": unit["unit_id"]}
                     return {**base, "action": "work", "operation": "review",
                             "unit_id": unit["unit_id"], "chapter_number": unit["chapter_number"],
                             "claim_expires_at": claim.get("expires_at")}
