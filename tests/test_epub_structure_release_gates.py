@@ -311,6 +311,33 @@ class NavigationSecurityTests(unittest.TestCase):
                   translations=[u[1] for u in units], target_language="ru", title="История")
 
 
+    def test_meta_refresh_redirects_are_blocked_even_in_head(self):
+        original = make_epub()
+        for directive in ("refresh", "REFRESH", "set-cookie"):
+            with self.subTest(http_equiv=directive):
+                changed = self.mutate_epub(original, {
+                    "OPS/story.xhtml": [(
+                        b"<body>",
+                        (f'<head><meta http-equiv="{directive}" '
+                         f'content="0;url=https://tracker.invalid/open"/></head><body>').encode("utf-8"),
+                    )]
+                })
+                with zipfile.ZipFile(io.BytesIO(changed)) as z:
+                    with self.assertRaisesRegex(StructureError, "unsafe meta HTTP directive"):
+                        manifest_and_spine(z)
+
+    def test_inert_legacy_meta_content_type_is_allowed(self):
+        original = make_epub()
+        source = self.mutate_epub(original, {
+            "OPS/story.xhtml": [(
+                b"<body>",
+                b'<head><meta http-equiv="Content-Type" content="application/xhtml+xml; charset=utf-8"/></head><body>',
+            )]
+        })
+        with zipfile.ZipFile(io.BytesIO(source)) as z:
+            manifest_and_spine(z)
+
+
 
 if __name__ == "__main__":
     unittest.main()
