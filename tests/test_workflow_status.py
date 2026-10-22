@@ -11,7 +11,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from workflow.filesystem import FilesystemStorage
-from workflow.repository import WorkflowStateRepository
+from workflow.repository import RepositoryError, WorkflowStateRepository
 from workflow.schemas import SCHEMA_VERSION, SchemaKind
 from workflow.status import StatusResolver
 from unittest.mock import patch
@@ -125,6 +125,77 @@ class WorkflowStatusTests(unittest.TestCase):
             "correction_round": 0,
             "supersedes_record_id": None,
         }
+
+    def _add_translation_acceptance(self):
+        chapter = self.progress["chapters"][1]
+        chapter["translation_acceptance"] = {
+            "schema_version": 1,
+            "unit_id": "chapter-000002",
+            "claim_id": "a" * 32,
+            "claim_revision": "claim-v1",
+            "role": "translator",
+            "session_id": "translator-session",
+            "base_revision": self.progress_revision,
+            "base_commit": None,
+            "workflow_revision": "rev-1",
+            "accepted_from_progress_revision": self.progress_revision,
+            "shared_state_revisions": None,
+            "source_sha256": hashlib.sha256(
+                (self.root / chapter["source_path"]).read_bytes()
+            ).hexdigest(),
+            "translation_sha256": hashlib.sha256(
+                (self.root / chapter["translation_path"]).read_bytes()
+            ).hexdigest(),
+            "accepted_at": "2026-09-06T12:20:00Z",
+        }
+        self.progress_revision = self.repository.write_if_version(
+            "progress.json", SchemaKind.PROGRESS, self.progress, self.progress_revision
+        )
+
+    def test_status_reuses_review_hashes_without_storage_artifact_reads(self):
+        self._add_translation_acceptance()
+        counts = {}
+        storage_read = self.repository.storage.read
+
+        def count_read(path):
+            counts[path] = counts.get(path, 0) + 1
+            return storage_read(path)
+
+        with patch.object(self.repository.storage, "read", side_effect=count_read):
+            status = self.resolver.status(corpus={"state": "verified", "source_sha256": "a" * 64})
+        self.assertTrue(status["valid"], status["errors"])
+        self.assertEqual(counts.get("extracted/chapter-0002.md", 0), 0)
+        self.assertEqual(counts.get("translated/chapter-0002.md", 0), 0)
+
+    def test_status_rejects_tampered_accepted_translation_without_eager_reads(self):
+        self._add_translation_acceptance()
+        self.write_artifact("translated/chapter-0002.md", "tampered translation\\n")
+        with self.assertRaises(RepositoryError):
+            self.repository.read("progress.json", SchemaKind.PROGRESS)
+
+        status = self.resolver.status(
+            corpus={"state": "verified", "source_sha256": "a" * 64}
+        )
+        self.assertFalse(status["valid"])
+        self.assertTrue(
+            any("translation_acceptance sha256 mismatch" in error
+                for error in status["errors"]),
+            status["errors"],
+        )
+        self.assertEqual(self.resolver.resume(status)["operation"], "blocked")
+
+    def test_status_rejects_tampered_accepted_source_without_eager_reads(self):
+        self._add_translation_acceptance()
+        self.write_artifact("extracted/chapter-0002.md", "tampered source\\n")
+        status = self.resolver.status(
+            corpus={"state": "verified", "source_sha256": "a" * 64}
+        )
+        self.assertFalse(status["valid"])
+        self.assertTrue(
+            any("translation_acceptance sha256 mismatch" in error
+                for error in status["errors"]),
+            status["errors"],
+        )
 
     def test_status_reports_deterministic_lifecycle_review_and_claim_counts(self):
         status = self.resolver.status(
