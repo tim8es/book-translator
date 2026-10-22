@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .epub_preserve_coverage import MarkedCoverageError, attest_marked_source
 from .epub_preserve_markdown import (
     MANIFEST_NAME,
     EpubMarkedMarkdownError,
@@ -87,6 +88,32 @@ def preview_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def audit_command(args: argparse.Namespace) -> int:
+    source = Path(args.source).expanduser()
+    directory = Path(args.translations_dir).expanduser()
+    target = Path(args.output).expanduser()
+    if not source.is_file() or not directory.is_dir():
+        raise EpubPreserveCliError("exact original EPUB and source Markdown directory are required")
+    if target.exists():
+        raise EpubPreserveCliError("coverage output already exists; refusing overwrite")
+    try:
+        manifest = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+        files = {
+            p.name: p.read_text(encoding="utf-8")
+            for p in directory.glob("*.md")
+            if p.is_file() and not p.is_symlink()
+        }
+        report = attest_marked_source(source.read_bytes(), manifest, files)
+    except (OSError, UnicodeError, ValueError, MarkedCoverageError) as exc:
+        raise EpubPreserveCliError(f"staging source coverage blocked: {exc}") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("xb") as handle:
+        handle.write(json_manifest(report))
+    print(f"Source text staging VERIFIED: {report['document_count']} XHTML documents -> {target}")
+    print("This report is NOT canonical source-coverage.json or reviewer evidence.")
+    return 0
+
+
 def register_preserve_commands(subparsers: argparse._SubParsersAction, error_factory):
     export = subparsers.add_parser(
         "epub-preserve-export",
@@ -106,6 +133,15 @@ def register_preserve_commands(subparsers: argparse._SubParsersAction, error_fac
     preview.add_argument("--title", help="Localized book title (optional)")
     preview.add_argument("--output", required=True, help="Output ending _PREVIEW.epub")
     preview.set_defaults(func=_adapt(preview_command, error_factory))
+
+    audit = subparsers.add_parser(
+        "epub-preserve-audit",
+        help="Independently compare original XHTML prose with unmodified marked Markdown staging.",
+    )
+    audit.add_argument("source", help="Exact original EPUB")
+    audit.add_argument("--translations-dir", required=True, help="Freshly exported source-language Markdown")
+    audit.add_argument("--output", required=True, help="Text-free staging audit JSON path")
+    audit.set_defaults(func=_adapt(audit_command, error_factory))
 
 
 def _adapt(handler, error_factory):
