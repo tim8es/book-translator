@@ -612,6 +612,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command in {"seal", "restore"}:
+            book.require_compatible_workflow_revision(args.slug)
         return args.func(args)
     except book.BookError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
