@@ -14,6 +14,7 @@ from workflow.filesystem import FilesystemStorage
 from workflow.repository import WorkflowStateRepository
 from workflow.schemas import SCHEMA_VERSION, SchemaKind
 from workflow.status import StatusResolver
+from unittest.mock import patch
 
 
 class WorkflowStatusTests(unittest.TestCase):
@@ -175,7 +176,7 @@ class WorkflowStatusTests(unittest.TestCase):
         self.assertEqual(resume["context"]["workflow_revision"], "rev-1")
         self.assertEqual(
             resume["context"]["contracts"],
-            ["AGENTS.md", "docs/TRANSLATION.md"],
+            ["AGENTS.md", "docs/TRANSLATION.md", "docs/REVIEWER.md"],
         )
         self.assertEqual(
             resume["context"]["files"],
@@ -192,6 +193,23 @@ class WorkflowStatusTests(unittest.TestCase):
             set(resume["context"]["state_revisions"]),
             {"metadata", "progress", "review_ledger"},
         )
+
+    def test_resume_uses_manifest_instead_of_hardcoded_contract_paths(self):
+        routing = {
+            "schema_version": 3,
+            "contracts": {"global": "AGENTS.md", "translation": "docs/WAVE_WORKER.md"},
+            "context_profiles": {"reviewer": ["global", "translation"]},
+            "context_overlays": {},
+        }
+        status = self.resolver.status(
+            structural_errors=(),
+            corpus={"state": "verified", "source_sha256": "a" * 64},
+        )
+        with patch("workflow.status.read_manifest", return_value=routing):
+            self.assertEqual(
+                self.resolver.resume(status)["context"]["contracts"],
+                ["AGENTS.md", "docs/WAVE_WORKER.md"],
+            )
 
     def test_accept_review_uses_bounded_orchestrator_context(self):
         status = self.resolver.status(

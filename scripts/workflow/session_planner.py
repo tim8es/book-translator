@@ -12,6 +12,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from .operations import next_unit_operation
+
 
 class SessionPlanError(ValueError):
     """The requested session plan is invalid or the book cannot be dispatched."""
@@ -54,16 +56,11 @@ def plan_sessions(
             continue
         state = unit["lifecycle"]
         review = unit["review"]
-        if state == "extracted":
-            operation = "translate"
-        elif state == "translated" and review == "corrections_required":
-            operation = "correct_translation"
-        elif state == "translated" and review in {"missing", "stale"}:
-            operation = "review"
-        elif state == "translated" and review == "pass":
-            # This promotion does not need a dedicated worker session.
+        operation = next_unit_operation(state, review)
+        if operation == "accept_review":
+            # Promotion belongs to the orchestrator, not a worker session.
             continue
-        else:
+        if operation not in {"translate", "correct_translation", "review"}:
             raise SessionPlanError(
                 f"unit {unit['unit_id']} is not dispatchable: {state}/{review}"
             )

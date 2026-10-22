@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+from .operations import next_unit_operation
 from .storage import StorageAlreadyExists, StorageBackend, StorageError, StorageNotFound
 
 
@@ -210,17 +211,13 @@ def next_action(
             continue
         if current["lifecycle"] == "pending":
             return result("blocked", reason="unit_not_extracted", unit_id=unit_id)
-        if current["lifecycle"] == "translated" and current["review"] == "pass":
+        operation = next_unit_operation(current["lifecycle"], current["review"])
+        if operation == "accept_review":
             waiting.append({"unit_id": unit_id, "reason": "await_accept_review"})
             continue
-        if current["lifecycle"] == "extracted":
-            operation, required_role = "translate", "translator"
-        elif current["lifecycle"] == "translated" and current["review"] == "corrections_required":
-            operation, required_role = "correct_translation", "translator"
-        elif current["lifecycle"] == "translated" and current["review"] in {"missing", "stale"}:
-            operation, required_role = "review", "reviewer"
-        else:
+        if operation not in {"translate", "correct_translation", "review"}:
             return result("blocked", reason="invalid_unit_state", unit_id=unit_id)
+        required_role = "reviewer" if operation == "review" else "translator"
         if role != required_role:
             waiting.append({"unit_id": unit_id, "reason": "await_" + required_role})
             continue

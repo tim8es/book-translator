@@ -187,7 +187,8 @@ class WorkflowStatusCliTests(unittest.TestCase):
         self.assertEqual(load["role"], "translator")
         self.assertEqual(load["phase"], "after_claim")
         self.assertEqual(load["instruction_paths"], [
-            "AGENTS.md", "docs/TRANSLATION.md", "docs/WAVE_WORKER.md",
+            "AGENTS.md", "docs/TRANSLATION.md", "docs/TRANSLATOR.md",
+            "docs/WAVE_WORKER.md",
         ])
         self.assertEqual(
             [item["kind"] for item in load["inputs"]],
@@ -286,7 +287,10 @@ class WorkflowStatusCliTests(unittest.TestCase):
         self.assertEqual(resume["operation"], "translate")
         self.assertEqual(resume["unit_id"], "chapter-000001")
         self.assertEqual(resume["context"]["role"], "translator")
-        self.assertEqual(resume["context"]["contracts"], ["AGENTS.md", "docs/TRANSLATION.md"])
+        self.assertEqual(
+            resume["context"]["contracts"],
+            ["AGENTS.md", "docs/TRANSLATION.md", "docs/TRANSLATOR.md"],
+        )
         self.assertEqual(
             resume["context"]["files"],
             [

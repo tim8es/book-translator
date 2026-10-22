@@ -287,9 +287,13 @@ def audit_epub(
 
 
 def coverage_integrity_errors(
-    book_dir: Path, metadata: Mapping[str, Any], progress: Mapping[str, Any]
+    book_dir: Path,
+    metadata: Mapping[str, Any],
+    progress: Mapping[str, Any],
+    *,
+    verified_extracted_sha256: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """Verify durable coverage report without needing a retained private original."""
+    """Verify EPUB coverage, optionally reusing same-preflight verified corpus hashes."""
     if metadata.get("source_format") != "epub":
         return []
     path = book_dir / COVERAGE_PATH
@@ -364,11 +368,18 @@ def coverage_integrity_errors(
         if not isinstance(rel, str) or not Path(rel).parts or Path(rel).parts[0] != "extracted" or Path(rel).is_absolute() or ".." in Path(rel).parts:
             errors.append(f"Chapter {n}: invalid extracted artifact path")
             continue
-        try:
-            actual = _sha((book_dir / rel).read_bytes())
-        except OSError:
-            errors.append(f"Chapter {n}: extracted source is missing for coverage")
-            continue
+        if verified_extracted_sha256 is None:
+            try:
+                actual = _sha((book_dir / rel).read_bytes())
+            except OSError:
+                errors.append(f"Chapter {n}: extracted source is missing for coverage")
+                continue
+        else:
+            # Only reuse hashes after verifying the full sealed corpus in this call.
+            actual = verified_extracted_sha256.get(rel)
+            if actual is None:
+                errors.append(f"Chapter {n}: no verified corpus fingerprint for coverage")
+                continue
         if actual != sha:
             errors.append(f"Chapter {n}: source-coverage fingerprint mismatch")
     return errors

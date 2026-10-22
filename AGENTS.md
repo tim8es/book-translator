@@ -14,7 +14,9 @@ Role-specific rules are selected through `agent-manifest.json.context_profiles`.
 4. When the book has an ACTIVE literary wave, append only the current role's
    `context_overlays.waves` contracts from the same manifest/revision. Do not
    apply the overlay outside waves or to another role.
-5. Load another role's contract only when explicitly transitioning into that role
+5. For a source-edition update, append `context_overlays.source_update` only
+   to the Orchestrator. Do not load it during ordinary translation.
+6. Load another role's contract only when explicitly transitioning into that role
    or resolving a dependency documented by the active contract.
 
 README is descriptive documentation, not execution policy.

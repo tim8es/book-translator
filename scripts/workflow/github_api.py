@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, build_opener
+
+from .runtime_metrics import RuntimeMetrics
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,7 @@ class GitHubRestClient:
         base_url: str = "https://api.github.com",
         api_version: str = "2026-03-10",
         opener=None,
+        metrics: RuntimeMetrics | None = None,
     ):
         if token is not None and (not isinstance(token, str) or not token.strip()):
             raise ValueError("token must be None or a non-empty string")
@@ -113,6 +117,7 @@ class GitHubRestClient:
         self.base_url = base_url.rstrip("/")
         self.api_version = api_version.strip()
         self._opener = opener or build_opener()
+        self._metrics = metrics
 
     @staticmethod
     def _repository(repository: str) -> tuple[str, str]:
@@ -169,9 +174,16 @@ class GitHubRestClient:
             headers=self._headers(has_body=data is not None),
             method=method,
         )
+        operation = f"github.http.{method}"
+        timer = self._metrics.measure(operation) if self._metrics is not None else nullcontext()
         try:
-            with self._opener.open(request, timeout=30) as response:
-                raw = response.read()
+            with timer:
+                with self._opener.open(request, timeout=30) as response:
+                    raw = response.read()
+                if self._metrics is not None:
+                    self._metrics.add_bytes(
+                        operation, read=len(raw), written=len(data) if data else 0
+                    )
         except HTTPError as exc:
             raise GitHubApiError(
                 f"GitHub API request failed with HTTP {exc.code}",

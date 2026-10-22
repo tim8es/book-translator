@@ -42,25 +42,32 @@ class AgentContractTests(unittest.TestCase):
                 "orchestration": "docs/ORCHESTRATION.md",
                 "source_updates": "docs/SOURCE_UPDATES.md",
                 "translation": "docs/TRANSLATION.md",
+                "translator": "docs/TRANSLATOR.md",
+                "reviewer": "docs/REVIEWER.md",
                 "wave_worker": "docs/WAVE_WORKER.md",
+                "waves": "docs/WAVES.md",
             },
         )
         self.assertEqual(
             manifest["context_overlays"],
-            {"waves": {
-                "translator": ["wave_worker"],
-                "reviewer": ["wave_worker"],
-            }},
+            {
+                "waves": {
+                    "translator": ["wave_worker"],
+                    "reviewer": ["wave_worker"],
+                    "orchestrator": ["waves"],
+                },
+                "source_update": {"orchestrator": ["source_updates"]},
+            },
         )
         self.assertNotIn("wave_worker", manifest["context_profiles"]["translator"])
         self.assertNotIn("wave_worker", manifest["context_profiles"]["reviewer"])
         self.assertEqual(manifest["context_profiles"]["bootstrap"], ["global", "setup"])
         self.assertEqual(
             manifest["context_profiles"]["orchestrator"],
-            ["global", "orchestration", "source_updates"],
+            ["global", "orchestration"],
         )
-        self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation"])
-        self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation"])
+        self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation", "translator"])
+        self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation", "reviewer"])
         self.assertNotIn("contract_read_order", manifest)
 
     def test_source_update_contract_preserves_revision_guarantees(self):
@@ -92,7 +99,11 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("orchestration", profiles["bootstrap"])
         self.assertNotIn("setup", profiles["orchestrator"])
         self.assertNotIn("translation", profiles["orchestrator"])
-        self.assertIn("source_updates", profiles["orchestrator"])
+        self.assertNotIn("source_updates", profiles["orchestrator"])
+        self.assertEqual(
+            self.load_manifest()["context_overlays"]["source_update"]["orchestrator"],
+            ["source_updates"],
+        )
         self.assertNotIn("setup", profiles["translator"])
         self.assertNotIn("orchestration", profiles["translator"])
         self.assertNotIn("setup", profiles["reviewer"])
@@ -253,8 +264,13 @@ class AgentContractTests(unittest.TestCase):
         self.assertIn("review coverage", lowered)
 
     def test_translation_contract_preserves_literary_guarantees(self):
-        text = (PROJECT_ROOT / "docs" / "TRANSLATION.md").read_text(encoding="utf-8")
+        shared = (PROJECT_ROOT / "docs" / "TRANSLATION.md").read_text(encoding="utf-8")
+        translator = (PROJECT_ROOT / "docs" / "TRANSLATOR.md").read_text(encoding="utf-8")
+        reviewer = (PROJECT_ROOT / "docs" / "REVIEWER.md").read_text(encoding="utf-8")
+        text = shared + translator + reviewer
         lowered = text.lower()
+        self.assertIn("translator is a careful interpreter, not a co-author", translator.lower())
+        self.assertIn("PASS alone does not mutate `progress.json`", reviewer)
 
         for phrase in (
             "translator is a careful interpreter, not a co-author",

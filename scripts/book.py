@@ -589,7 +589,8 @@ def _review_artifact_reader(book_dir: Path):
     return read
 
 
-def validate_book(slug: str) -> tuple[list[str], list[str]]:
+def validate_book(slug: str, *, check_review_evidence: bool = True) -> tuple[list[str], list[str]]:
+    """Validate a workspace; status snapshots independently verify review evidence."""
     errors: list[str] = []
     warnings: list[str] = []
     try:
@@ -689,7 +690,7 @@ def validate_book(slug: str) -> tuple[list[str], list[str]]:
         for path in sorted(referenced_extracted - actual):
             errors.append(f"progress.json references missing extracted chapter: {path}")
 
-    if isinstance(workflow, dict) and workflow.get("review_evidence") == REVIEW_EVIDENCE_VERSION:
+    if check_review_evidence and isinstance(workflow, dict) and workflow.get("review_evidence") == REVIEW_EVIDENCE_VERSION:
         repository = state_repository(book_dir)
         ledger_valid = False
         try:

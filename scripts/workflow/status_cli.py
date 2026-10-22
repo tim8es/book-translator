@@ -72,15 +72,16 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
 
     try:
         book_module = importlib.import_module("book")
-        structural_errors, _ = book_module.validate_book(slug)
+        # The status resolver verifies every review; do not repeat that expensive pass.
+        structural_errors, _ = book_module.validate_book(slug, check_review_evidence=False)
         book_dir, metadata, progress = book_module.load_book(slug)
         structural_errors = normalize_structural_errors(book_dir, metadata, structural_errors)
-        structural_errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
     except Exception as exc:
         raise StatusCliError(f"cannot run structural preflight: {exc}") from exc
 
     mode = source_storage_mode(metadata)
     if mode is None:
+        structural_errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
         return structural_errors, {
             "state": "invalid",
             "error": "metadata.json source identity is required by the current workflow",
@@ -88,6 +89,7 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
 
     manifest_path = book_dir / "source-manifest.json"
     if not manifest_path.is_file():
+        structural_errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
         return structural_errors, {
             "state": "invalid",
             "storage_mode": mode,
@@ -98,13 +100,11 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
         corpus_module = importlib.import_module("corpus")
         manifest = corpus_module.load_source_manifest(book_dir)
         if manifest is None:
-            return structural_errors, {
-                "state": "invalid",
-                "storage_mode": mode,
-                "error": "source-manifest.json is required by the current workflow",
-            }
+            raise StatusCliError("source-manifest.json is required by the current workflow")
         verified = corpus_module.verify_manifest(book_dir, metadata, progress, manifest)
     except Exception as exc:
+        # An invalid seal cannot justify trusting its declared chapter hashes.
+        structural_errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
         payload: dict[str, Any] = {
             "state": "invalid",
             "storage_mode": mode,
@@ -112,6 +112,11 @@ def default_preflight(root: Path, slug: str) -> tuple[Sequence[str], Mapping[str
         }
         return structural_errors, payload
 
+    # The manifest verifier has just hashed all extracted chapter bytes.
+    fingerprints = {item["path"]: item["sha256"] for item in manifest["extracted"]}
+    structural_errors.extend(coverage_integrity_errors(
+        book_dir, metadata, progress, verified_extracted_sha256=fingerprints
+    ))
     return structural_errors, dict(verified)
 
 

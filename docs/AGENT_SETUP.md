@@ -112,6 +112,8 @@ For a namespaced installation, examples include:
 .book-translator/AGENTS.md
 .book-translator/docs/ORCHESTRATION.md
 .book-translator/docs/TRANSLATION.md
+.book-translator/docs/TRANSLATOR.md
+.book-translator/docs/REVIEWER.md
 .book-translator/scripts/book.py
 .book-translator/scripts/corpus.py
 .book-translator/scripts/workflow/
@@ -137,6 +139,8 @@ Relative to `install_root`, a normal runtime installation contains:
 - `docs/AGENT_SETUP.md`;
 - `docs/ORCHESTRATION.md`;
 - `docs/TRANSLATION.md`;
+- `docs/TRANSLATOR.md`;
+- `docs/REVIEWER.md`;
 - `docs/templates/`;
 - `scripts/book.py`;
 - `scripts/corpus.py`;

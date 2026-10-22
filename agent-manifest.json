@@ -15,7 +15,10 @@
     "orchestration": "docs/ORCHESTRATION.md",
     "translation": "docs/TRANSLATION.md",
     "source_updates": "docs/SOURCE_UPDATES.md",
-    "wave_worker": "docs/WAVE_WORKER.md"
+    "wave_worker": "docs/WAVE_WORKER.md",
+    "waves": "docs/WAVES.md",
+    "translator": "docs/TRANSLATOR.md",
+    "reviewer": "docs/REVIEWER.md"
   },
   "context_profiles": {
     "bootstrap": [
@@ -24,16 +27,17 @@
     ],
     "orchestrator": [
       "global",
-      "orchestration",
-      "source_updates"
+      "orchestration"
     ],
     "translator": [
       "global",
-      "translation"
+      "translation",
+      "translator"
     ],
     "reviewer": [
       "global",
-      "translation"
+      "translation",
+      "reviewer"
     ]
   },
   "version_policy": {
@@ -93,6 +97,14 @@
       ],
       "reviewer": [
         "wave_worker"
+      ],
+      "orchestrator": [
+        "waves"
+      ]
+    },
+    "source_update": {
+      "orchestrator": [
+        "source_updates"
       ]
     }
   }

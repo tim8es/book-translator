@@ -1,9 +1,10 @@
 # Active wave — worker contract
 
 This short overlay applies only when the selected book has an ACTIVE wave.
-Use it **in addition to** `AGENTS.md` and your Translator/Reviewer
-`docs/TRANSLATION.md` contract, selected from the same pinned workflow
-revision. Do not load the Orchestrator's entire workflow or unrelated roles.
+Use it **in addition to** `AGENTS.md`, the shared
+`docs/TRANSLATION.md` standard, and the current role's
+`docs/TRANSLATOR.md` or `docs/REVIEWER.md` contract, selected from
+the same pinned workflow revision. Do not load the Orchestrator's entire workflow or unrelated roles.
 
 1. Receive the exact dispatch ID and session ID for this chat. Call
    `wave-next <book> --dispatch-id <id> --session-id <id>` when an
