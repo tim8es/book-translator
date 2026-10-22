@@ -56,3 +56,14 @@ Record data in observations.json, using the following schema. The numbers here a
 The analyzer rejects nonidentical chapter sets/word counts, missing independent review, duplicate runs, invalid metrics, or missing single-chat baseline. For repeated trials it uses medians and reports reviewed words/hour, GitHub calls, user interventions, and major/critical issues. The provisional 2x throughput indicator is not proof of statistically significant literary improvement. Keep the source corpus, independent blind reviewer and evaluation rubric fixed across conditions.
 
 This first harness is deliberately observation-driven: ChatGPT session elapsed time and GitHub API call counts are not automatically instrumented. Do not claim results without measuring them.
+
+## Live Reviewer pipeline
+
+An Orchestrator can keep one Reviewer conversation open and have it call
+`review-next BOOK --session-id REVIEWER-ID --json` after each accepted
+translation. Unlike saved static workpacks, the suggestion is derived on
+each call and does not reserve work. Reviewer claims, progress CAS, PASS
+evidence and independent review remain mandatory. When a wave is ACTIVE,
+selection is restricted to its units and emits wave-specific lazy load hints.
+`wait` means try again after a new translation is accepted; no polling
+scheduler or agent-spawning infrastructure is installed.

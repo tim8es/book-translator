@@ -262,7 +262,7 @@ class WorkflowReviewTests(unittest.TestCase):
         self.assertEqual(saved, original)
         changed = original.replace("Перевод.".encode(), "Уточнённый перевод.".encode())
         scope = compare(saved, changed)
-        self.assertEqual(scope["mode"], "full")  # tiny chapter: change exceeds 25% safety threshold
+        self.assertEqual(scope["mode"], "full")  # short chapter exceeds 25% threshold
         self.assertEqual(scope["change_groups"], 1)
         self.assertNotIn("PASS", str(scope))
         self.assertEqual(compare(saved, saved)["mode"], "full")

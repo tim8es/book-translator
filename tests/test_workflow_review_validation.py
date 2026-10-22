@@ -30,6 +30,7 @@ class WorkflowReviewValidationTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / "book.py")
+        shutil.copy2(SCRIPTS / "corpus.py", self.repo / "scripts" / "corpus.py")
         shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
@@ -146,6 +147,21 @@ class WorkflowReviewValidationTests(unittest.TestCase):
         self.assertEqual(report["warning_count"], 1)
         self.assertEqual(report["warnings"][0]["kind"], "number_added")
         self.assertEqual((self.book / "progress.json").read_bytes(), before)
+
+    def test_live_reviewer_queue_emits_claim_after_translation_acceptance(self):
+        no_work = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-live",
+            "--base-commit", REVISION, "--json",
+        ).stdout)
+        self.assertEqual(no_work["action"], "wait")
+        self.accept_translation("Перевод.\n")
+        proposal = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-live",
+            "--base-commit", REVISION, "--json",
+        ).stdout)
+        self.assertEqual(proposal["action"], "claim")
+        self.assertEqual(proposal["unit_id"], "chapter-000001")
+        self.assertEqual(proposal["claim_snapshot"]["base_commit"], REVISION)
 
     def test_ledger_enabled_book_requires_ledger_file(self):
         (self.book / "review-ledger.json").unlink()

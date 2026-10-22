@@ -324,3 +324,27 @@ Optional v2 review reports bind exact source/translation excerpts and immutable
 finding IDs to the existing review ledger. Same-source follow-up reviews must
 explicitly address each prior unresolved v2 finding. See REVIEWER.md for
 the evidence contract. Review reports never directly modify translations.
+
+## On-demand Reviewer queue (opt-in)
+
+For long-lived manually opened Reviewer chats use `review-next` instead of
+prematurely assigning chapters that have not yet been translated:
+
+```bash
+python scripts/book.py review-next <slug> --session-id <unique-reviewer-session> --json
+```
+
+The result is an **advisory** `claim`, `work`, `wait`, `complete`, or
+`blocked` response, recomputed from accepted translations, live claims,
+current review evidence and (when active) the wave manifest. The endpoint
+does not spawn chats, create claims, or persist a second queue. On `claim`,
+acquire the role-scoped claim with the returned pinned snapshot, **then**
+fetch the source/translation and perform independent review. Concurrent
+reviewers may receive the same proposed unit; only the winner of actual
+claim CAS may work. After release, poll again to pick up another accepted
+chapter while translators continue other units. A live wave limits selection
+to its assigned chapters and blocks while reconciling.
+
+No implicit PASS, no reassignment of translator work, no edits to globally
+shared state by the Reviewer. Existing frozen `wave-next` workpacks remain
+valid; the live Reviewer queue is an optional, read-only alternative.
