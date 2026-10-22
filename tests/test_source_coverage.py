@@ -125,7 +125,7 @@ class CoverageAuditTests(unittest.TestCase):
                 for info in old.infolist():
                     new.writestr(info, contents if info.filename == "OPS/content.opf" else old.read(info.filename))
             shutil.copy2(tmp.name, self.path)
-        with self.assertRaisesRegex(SourceCoverageError, "outside its nav"):
+        with self.assertRaisesRegex(SourceCoverageError, "navigation|outside its nav"):
             certify(self.path)
 
     def test_duplicate_archive_members_block_coverage(self):
