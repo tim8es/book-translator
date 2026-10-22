@@ -61,6 +61,26 @@ def member_path(base: str, href: str) -> str:
     return path
 
 
+def _validate_xhtml_security(raw: bytes, path: str) -> None:
+    """Fail closed on executable XHTML and unsafe URI/attribute constructs."""
+    if re.search(rb"<!\\s*(?:DOCTYPE|ENTITY)\\b", raw, re.IGNORECASE):
+        raise StructureError(f"XHTML DTD/entities are not supported: {path}")
+    root = ET.fromstring(raw)
+    disallowed = {"script", "iframe", "object", "embed", "form", "input",
+                  "canvas", "audio", "video", "svg", "math"}
+    for element in root.iter():
+        tag = name(element.tag)
+        if tag in disallowed:
+            raise StructureError(f"unsupported active XHTML element <{tag}>: {path}")
+        for attribute, value in element.attrib.items():
+            key = name(attribute)
+            if key.startswith("on") or key in {"srcdoc", "base"}:
+                raise StructureError(f"unsafe XHTML attribute {key}: {path}")
+            if key in {"href", "src", "action", "formaction"}:
+                if urlsplit(value.strip()).scheme.lower() in {"javascript", "data", "file", "vbscript"}:
+                    raise StructureError(f"unsafe XHTML URI in {key}: {path}")
+
+
 def manifest_and_spine(archive: zipfile.ZipFile):
     names = archive.namelist()
     if len(names) != len(set(names)):
@@ -117,6 +137,17 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     if not spine:
         raise StructureError("empty EPUB spine")
     known = {path for path, _ in manifest.values()}
+    for resource_path, item in manifest.values():
+        media_type = item.get("media-type", "").lower()
+        if (media_type in {"application/javascript", "text/javascript",
+                           "application/ecmascript", "text/ecmascript", "image/svg+xml"}
+                or resource_path.lower().endswith((".js", ".mjs"))):
+            raise StructureError(f"executable EPUB resource is unsupported: {resource_path}")
+        if media_type == "text/html":
+            raise StructureError(f"HTML resource without XHTML coverage is unsupported: {resource_path}")
+    for resource_path in names:
+        if resource_path.lower().endswith((".xhtml", ".html", ".htm")):
+            _validate_xhtml_security(archive.read(resource_path), resource_path)
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {path}")
@@ -278,8 +309,8 @@ def parse_translation(markdown: str, count: int) -> list[str]:
             raise StructureError("missing, duplicated or reordered text segment marker")
         end = matches[index].start() if index < len(matches) else len(markdown)
         content = markdown[match.end():end].strip("\r\n")
-        if not content.strip() or SEG.search(content):
-            raise StructureError(f"empty or nested segment {index}")
+        if not content.strip() or SEG.search(content) or "⟦BT:SEG:" in content:
+            raise StructureError(f"empty, nested or malformed segment {index}")
         result.append(content)
     return result
 
@@ -294,7 +325,7 @@ def _put_text(parent: ET.Element, text: str):
 def replace_block(node: ET.Element, translated: str):
     wrapper = _transparent_span(node)
     if wrapper is not None:
-        if TOKEN.search(translated):
+        if TOKEN.search(translated) or "⟦BT:" in translated:
             raise StructureError("unexpected protected token in unstyled paragraph")
         wrapper.text = translated
         return
@@ -307,7 +338,7 @@ def replace_block(node: ET.Element, translated: str):
     cursor = 0
     for match in MARK.finditer(translated):
         literal = translated[cursor:match.start()]
-        if TOKEN.search(literal):
+        if TOKEN.search(literal) or "⟦BT:" in literal:
             raise StructureError("unexpected/malformed protected inline token")
         _put_text(stack[-1][1], literal)
         kind, key = match.group(1), int(match.group(2))
@@ -332,7 +363,7 @@ def replace_block(node: ET.Element, translated: str):
             stack.pop()
         cursor = match.end()
     rest = translated[cursor:]
-    if TOKEN.search(rest):
+    if TOKEN.search(rest) or "⟦BT:" in rest:
         raise StructureError("unexpected/malformed protected inline token")
     _put_text(stack[-1][1], rest)
     if len(stack) != 1 or encountered != set(originals):
@@ -349,7 +380,10 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         if not filename.lower().endswith((".xhtml", ".html", ".htm")):
             continue
         root = ET.fromstring(source(filename))
-        seen_ids[filename] = {x.get("id") for x in root.iter() if x.get("id")}
+        identifiers = [x.get("id") for x in root.iter() if x.get("id")]
+        if len(identifiers) != len(set(identifiers)):
+            raise StructureError(f"duplicate internal XHTML anchor id: {filename}")
+        seen_ids[filename] = set(identifiers)
         paths.append((filename, root))
     for path, root in paths:
         for element in root.iter():
