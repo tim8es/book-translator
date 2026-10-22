@@ -240,6 +240,30 @@ def _write_review_report(book_dir: Path, markdown: str) -> str:
     return "updated"
 
 
+def review_preflight_command(args: argparse.Namespace, root: Path) -> int:
+    """Read-only advisory checks after durable translation acceptance."""
+    from .review_preflight import inspect
+
+    book_dir, repository = _repository(root, args.slug)
+    progress, _ = _load_progress(repository)
+    metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    chapter = next(ch for ch in progress["chapters"] if ch["number"] == args.chapter)
+    read = _artifact_reader(book_dir)
+    try:
+        glossary = read("glossary.md").decode("utf-8")
+        result = inspect(read(chapter["source_path"]), read(chapter["translation_path"]), glossary)
+    except (OSError, UnicodeError) as exc:
+        raise ReviewCliError(f"review preflight inputs are unavailable: {exc}") from exc
+    evidence = chapter["translation_acceptance"]
+    if (result["source_sha256"] != evidence["source_sha256"]
+            or result["translation_sha256"] != evidence["translation_sha256"]):
+        raise ReviewCliError("review preflight must run on the exact accepted source and translation")
+    result["unit_id"] = unit_id_for_chapter(chapter)
+    _print_json(result)
+    return 0
+
+
 def review_record_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
@@ -387,6 +411,14 @@ def _positive_chapter(value: str) -> int:
 
 def register_review_commands(subparsers: argparse._SubParsersAction, root: Path) -> None:
     """Register review evidence and workflow orchestration commands."""
+
+    preflight = subparsers.add_parser(
+        "review-preflight", help="Read-only, hash-bound advisory QA before independent review."
+    )
+    preflight.add_argument("slug")
+    preflight.add_argument("chapter", type=_positive_chapter)
+    preflight.add_argument("--json", action="store_true", help="Emit advisory JSON.")
+    preflight.set_defaults(func=lambda args: review_preflight_command(args, root))
 
     record = subparsers.add_parser("review-record", help="Record hash-bound Reviewer evidence.")
     record.add_argument("slug", help="Book slug under books/.")

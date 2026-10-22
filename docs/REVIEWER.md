@@ -173,3 +173,15 @@ Otherwise keep the issue unresolved with outcome CORRECTIONS_REQUIRED.
 This is citation and correction-lineage verification, not automated literary judgment.
 An independent Reviewer must still compare meaning, style and every relevant passage.
 Historical v1 evidence remains valid and is not silently upgraded.
+
+## Optional deterministic pre-review diagnostics
+
+When an executable runtime is available, after translation acceptance run
+`python scripts/book.py review-preflight <slug> <chapter> --json`.
+It reports SHA-bound **advisory** candidates (literal numerals, Markdown
+headings/scene breaks and exact glossary renderings). The report is read-only;
+it does not block acceptance, establish completeness, or produce PASS evidence.
+Numeral localization, inflected Russian names and intentional structural
+adaptation can yield false positives. Resolve or dismiss each useful warning
+in the independent literary comparison; do not infer that no warnings means
+complete or faithful translation.
