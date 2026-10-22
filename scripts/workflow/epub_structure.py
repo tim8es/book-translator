@@ -455,10 +455,10 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 continue
             ncx = ET.fromstring(archive.read(ncx_path))
             for point in ncx.iter():
-                if name(point.tag) != "navPoint":
+                if name(point.tag) != "navpoint":
                     continue
                 content = next((n for n in point if name(n.tag) == "content"), None)
-                label_node = next((n for n in point if name(n.tag) == "navLabel"), None)
+                label_node = next((n for n in point if name(n.tag) == "navlabel"), None)
                 label_text = (next((n for n in label_node.iter() if name(n.tag) == "text"), None)
                               if label_node is not None else None)
                 if content is None or not content.get("src") or label_text is None:
