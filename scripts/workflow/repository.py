@@ -80,7 +80,17 @@ class WorkflowStateRepository:
             and expires_at > datetime.now(timezone.utc)
         )
 
-    def _verify_translation_acceptance_integrity(self, progress: Mapping[str, Any]) -> None:
+    def _verify_translation_acceptance_integrity(
+        self,
+        progress: Mapping[str, Any],
+        *,
+        verified_hashes: Mapping[tuple[str, str], str | None] | None = None,
+    ) -> None:
+        """Check acceptance against verified hashes, or read artifacts when absent.
+
+        Callers may supply hashes derived from a fresh source/translation review
+        in the same read-only operation. Normal progress reads still verify bytes.
+        """
         chapters = progress.get("chapters")
         if not isinstance(chapters, list):
             return
@@ -99,17 +109,24 @@ class WorkflowStateRepository:
                 expected = evidence.get(hash_key)
                 if not isinstance(artifact_path, str) or not artifact_path.strip():
                     continue
-                try:
-                    artifact = self.storage.read(artifact_path)
-                except StorageNotFound:
-                    if path_key == "source_path":
-                        # Missing source corpus is a recoverable corpus-integrity condition.
-                        # Structural/corpus preflight still fails closed, while corpus restore
-                        # must be able to read schema-valid progress before recreating source bytes.
+                identity = (evidence.get("unit_id"), hash_key)
+                if verified_hashes is not None and identity in verified_hashes:
+                    actual = verified_hashes[identity]
+                    if actual is None:
+                        mismatches.append(f"{hash_key} cannot be verified for {artifact_path}")
                         continue
-                    mismatches.append(f"{hash_key} cannot be verified because {artifact_path} is missing")
-                    continue
-                actual = hashlib.sha256(artifact.content).hexdigest()
+                else:
+                    try:
+                        artifact = self.storage.read(artifact_path)
+                    except StorageNotFound:
+                        if path_key == "source_path":
+                            # Missing source corpus is a recoverable corpus-integrity condition.
+                            # Structural/corpus preflight still fails closed, while corpus restore
+                            # must be able to read schema-valid progress before recreating source bytes.
+                            continue
+                        mismatches.append(f"{hash_key} cannot be verified because {artifact_path} is missing")
+                        continue
+                    actual = hashlib.sha256(artifact.content).hexdigest()
                 if expected != actual:
                     mismatches.append(
                         f"{hash_key}={expected!r} does not match current artifact sha256={actual}"
@@ -128,8 +145,15 @@ class WorkflowStateRepository:
         self,
         path: str,
         schema: SchemaKind,
+        *,
+        verify_artifacts: bool = True,
     ) -> LoadedDocument:
-        """Read and validate a current-schema document."""
+        """Read and validate current-schema state.
+
+        Only a caller that independently checks exact artifact hashes may
+        disable eager acceptance verification. Mutating operations use the
+        default verified read.
+        """
 
         stored = self.storage.read(path)
         try:
@@ -142,7 +166,7 @@ class WorkflowStateRepository:
             raise RepositoryError(f"{path}: invalid JSON: {exc}") from exc
 
         parsed = parse_document(schema, raw)
-        if schema == SchemaKind.PROGRESS:
+        if schema == SchemaKind.PROGRESS and verify_artifacts:
             self._verify_translation_acceptance_integrity(parsed.data)
         return LoadedDocument(
             data=parsed.data,
