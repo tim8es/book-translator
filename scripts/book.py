@@ -35,6 +35,7 @@ from workflow import (
 from workflow.claim_cli import ClaimCliError, register_claim_commands
 from workflow.patch_cli import PatchCliError, register_patch_command
 from workflow.review_cli import ReviewCliError, register_review_commands
+from workflow.epub_preserve_cli import register_preserve_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
@@ -855,6 +856,8 @@ def build_parser() -> argparse.ArgumentParser:
     register_patch_command(subparsers, repo_root())
     register_claim_commands(subparsers, repo_root())
     register_review_commands(subparsers, repo_root())
+    # Isolated staging commands; do not touch canonical books or status evidence.
+    register_preserve_commands(subparsers, BookError)
     return parser
 
 
