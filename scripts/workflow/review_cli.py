@@ -240,6 +240,45 @@ def _write_review_report(book_dir: Path, markdown: str) -> str:
     return "updated"
 
 
+def review_delta_command(args: argparse.Namespace, root: Path) -> int:
+    """Inspect exact rejected and current accepted bytes without changing state."""
+    from .review_delta import baseline_path, compare, sha
+
+    book_dir, repository = _repository(root, args.slug)
+    progress, _ = _load_progress(repository)
+    metadata = _load_metadata(repository)
+    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    chapter = next(ch for ch in progress["chapters"] if ch["number"] == args.chapter)
+    manager = _manager(book_dir, repository)
+    unit_id = unit_id_for_chapter(chapter)
+    history = manager.resolve_unit(progress, metadata, args.chapter).history
+    source = _artifact_reader(book_dir)(chapter["source_path"])
+    current = _artifact_reader(book_dir)(chapter["translation_path"])
+    response = {
+        "schema_version": 1, "unit_id": unit_id,
+        "source_sha256": sha(source), "translation_sha256": sha(current),
+        "advisory_only": True, "mode": "full", "reason": "no_anchored_corrections",
+        "sections": [],
+    }
+    previous = history[-1] if history else None
+    if (previous is not None and previous["outcome"] == "CORRECTIONS_REQUIRED"
+            and previous["source_sha256"] == response["source_sha256"]
+            and previous.get("quality_report", {}).get("evidence_version") == 2):
+        path = baseline_path(previous["translation_sha256"])
+        try:
+            prior = repository.storage.read(path).content
+        except StorageNotFound:
+            response["reason"] = "baseline_unavailable"
+        else:
+            if sha(prior) != previous["translation_sha256"]:
+                raise ReviewCliError("stored reviewer baseline is corrupted")
+            response.update(compare(prior, current))
+            response["previous_record_id"] = previous["record_id"]
+            response["baseline_sha256"] = previous["translation_sha256"]
+    _print_json(response)
+    return 0
+
+
 def review_preflight_command(args: argparse.Namespace, root: Path) -> int:
     """Read-only advisory checks after durable translation acceptance."""
     from .review_preflight import inspect
@@ -411,6 +450,14 @@ def _positive_chapter(value: str) -> int:
 
 def register_review_commands(subparsers: argparse._SubParsersAction, root: Path) -> None:
     """Register review evidence and workflow orchestration commands."""
+
+    delta = subparsers.add_parser(
+        "review-delta", help="Read-only, hash-bound candidate scope for v2 correction follow-up."
+    )
+    delta.add_argument("slug")
+    delta.add_argument("chapter", type=_positive_chapter)
+    delta.add_argument("--json", action="store_true")
+    delta.set_defaults(func=lambda args: review_delta_command(args, root))
 
     preflight = subparsers.add_parser(
         "review-preflight", help="Read-only, hash-bound advisory QA before independent review."

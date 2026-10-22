@@ -185,3 +185,28 @@ Numeral localization, inflected Russian names and intentional structural
 adaptation can yield false positives. Resolve or dismiss each useful warning
 in the independent literary comparison; do not infer that no warnings means
 complete or faithful translation.
+
+## Bounded follow-up to anchored corrections
+
+After a v2 `CORRECTIONS_REQUIRED` review, the runtime stores an immutable,
+content-addressed snapshot of the rejected translation (up to 1 MiB). Once
+the Translator's corrected artifact has been accepted, run:
+
+```bash
+python scripts/book.py review-delta <slug> <chapter> --json
+```
+
+The read-only result compares verified previous/current SHA values and returns
+changed paragraph spans with adjacent context. `focused_candidate` is offered
+only for at most 12 changed groups affecting no more than 25% of the text;
+otherwise it requires `full`. If the rejected translation has no snapshot,
+the previous review did not use anchored v2 evidence, the source changed, or
+the baseline is corrupted, do **not** infer a narrow scope. A corrupted
+baseline is an error.
+
+A focused candidate **does not grant PASS**. Independently verify every
+previously unresolved finding using the v2 `resolves` lineage, assess adjacent
+sentences and cross-paragraph dependencies, and perform an appropriate
+chapter-level continuity/completeness check. If a local edit affects distant
+references, structure, perspective or voice, perform full comparison. Old PASS
+never survives changed translation bytes without new current evidence.

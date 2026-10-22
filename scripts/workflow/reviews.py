@@ -22,7 +22,7 @@ from .review_anchors import (
 )
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
-from .storage import StorageError, StorageNotFound, StorageVersionConflict
+from .storage import StorageAlreadyExists, StorageError, StorageNotFound, StorageVersionConflict
 
 
 LEDGER_PATH = "review-ledger.json"
@@ -443,6 +443,32 @@ class ReviewLedgerManager:
             )
         except EvidenceAnchorError as exc:
             raise ReviewEvidenceError(f"source-linked review evidence failed: {exc}") from exc
+        # Persist an immutable rejected-version baseline for bounded follow-up.
+        # Only v2 anchored corrections opt in. Orphan snapshots after a ledger
+        # CAS conflict are harmless, never authoritative and content-addressed.
+        if (outcome == "CORRECTIONS_REQUIRED"
+                and validated_quality is not None
+                and validated_quality.get("evidence_version") == 2):
+            from .review_delta import MAX_BYTES, baseline_path
+            original_translation = self._read_artifact(
+                chapter.get("translation_path"), kind="translation", allow_untranslated=False
+            )
+            assert original_translation is not None
+            if (_sha256(original_translation) != translation_sha256):
+                raise ReviewEvidenceError("translation changed while capturing review baseline")
+            if len(original_translation) <= MAX_BYTES:
+                path = baseline_path(translation_sha256)
+                try:
+                    self.repository.storage.create_if_absent(path, original_translation)
+                except StorageAlreadyExists:
+                    try:
+                        existing = self.repository.storage.read(path).content
+                    except StorageError as exc:
+                        raise ReviewEvidenceError(f"review baseline unavailable: {exc}") from exc
+                    if existing != original_translation:
+                        raise ReviewEvidenceError("review baseline differs from its content hash")
+                except StorageError as exc:
+                    raise ReviewEvidenceError(f"cannot persist immutable review baseline: {exc}") from exc
         record_id = self._new_id()
         sequence = loaded.data["next_sequence"]
         record = {
