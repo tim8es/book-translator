@@ -212,6 +212,50 @@ class ClaimManager:
             claims.append(ActiveClaim(path=path, data=loaded.data, version=loaded.version))
         return sorted(claims, key=lambda claim: (claim.data["unit_id"], claim.path))
 
+    def _live_wave_review_ready(
+        self, progress: Mapping[str, Any], unit_ids: list[str],
+        workflow_revision: str, session_id: str, manifest: Mapping[str, Any],
+    ) -> bool:
+        """Allow one live Reviewer claim only for current accepted wave work.
+
+        This is the narrow dynamic alternative to an immutable session dispatch:
+        never authorize translation, batch claims, or unaccepted artifacts.
+        """
+        if len(unit_ids) != 1:
+            return False
+        try:
+            latest = self.repository.read("progress.json", SchemaKind.PROGRESS).data
+            metadata = self.repository.read("metadata.json", SchemaKind.METADATA).data
+            pointer = json.loads(self.repository.storage.read(
+                ".workflow/literary-memory/active.json"
+            ).content.decode("utf-8"))
+            if (pointer.get("revision") != manifest["memory_revision"]
+                    or latest != progress
+                    or metadata.get("source", {}).get("sha256") != manifest["source_sha256"]):
+                return False
+            chapter = next(
+                (entry for entry in latest["chapters"]
+                 if unit_id_for_chapter(entry) == unit_ids[0]), None,
+            )
+            if chapter is None or chapter["status"] != "translated":
+                return False
+            acceptance = chapter.get("translation_acceptance")
+            if (not isinstance(acceptance, Mapping)
+                    or acceptance.get("unit_id") != unit_ids[0]
+                    or acceptance.get("workflow_revision") != workflow_revision
+                    or acceptance.get("session_id") == session_id):
+                return False
+            from .reviews import ReviewLedgerManager
+            from .operations import next_unit_operation
+            manager = ReviewLedgerManager(
+                self.repository,
+                artifact_reader=lambda path: self.repository.storage.read(path).content,
+            )
+            reviewed = manager.resolve_unit(latest, metadata, chapter["number"])
+            return next_unit_operation(chapter["status"], reviewed.state) == "review"
+        except Exception as exc:
+            raise ClaimError(f"cannot verify live Reviewer admission: {exc}") from exc
+
     def acquire(
         self,
         progress: Mapping[str, Any],
@@ -257,8 +301,8 @@ class ClaimManager:
             except CoordinationError as exc:
                 raise ClaimError(f"claim admission blocked: {exc}") from exc
 
-            # When a literary wave exists, only its pinned saved workpacks
-            # authorize new claims; an old ad-hoc plan cannot bypass the wave.
+            # Wave workers use pinned dispatches, except a live Reviewer may
+            # acquire one already accepted, still unreviewed wave unit.
             try:
                 wave = self.repository.storage.read(".workflow/waves/active.json")
             except StorageNotFound:
@@ -301,7 +345,15 @@ class ClaimManager:
                             if unit.get("role") == role
                         )
                 if not set(unit_ids).issubset(authorized):
-                    raise ClaimError("session is not authorized by a pinned wave dispatch")
+                    if (role != "reviewer" or not base_commit
+                            or not self._live_wave_review_ready(
+                                progress, unit_ids, workflow_revision,
+                                session_id, manifest,
+                            )):
+                        raise ClaimError(
+                            "session is not authorized by a pinned wave dispatch"
+                            " or live Reviewer admission"
+                        )
 
             if frozen_shared_state is not None:
                 try:

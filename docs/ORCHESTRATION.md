@@ -348,3 +348,11 @@ to its assigned chapters and blocks while reconciling.
 No implicit PASS, no reassignment of translator work, no edits to globally
 shared state by the Reviewer. Existing frozen `wave-next` workpacks remain
 valid; the live Reviewer queue is an optional, read-only alternative.
+
+**Live wave Reviewer claim admission:** `review-next` may return a one-chapter
+Reviewer assignment without a saved workpack. The normal `claim` admission
+accepts it only when that exact unit is inside the ACTIVE wave, the source and
+memory revisions remain pinned, the accepted translation is current, review is
+still required, the Reviewer session differs from the accepted Translator session,
+and the supplied Git/shared-state snapshot matches. Existing CAS and lease
+requirements apply. Translator claims still require a saved wave dispatch.

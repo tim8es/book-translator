@@ -123,6 +123,61 @@ class WorkflowStatusCliTests(unittest.TestCase):
         self.assertEqual(saved["operation"], "translate")
         self.assertEqual((book / "progress.json").read_bytes(), progress)
 
+    def test_live_reviewer_claim_is_authorized_during_active_wave(self):
+        book = self.initialize_book()
+        wave = self.canonical_json(self.run_book(
+            "wave-start", "sample", "--count", "1"
+        ))
+        # Dynamic queue cannot claim untranslated work.
+        denied = self.run_book(
+            "claim", "sample", "1", "--role", "reviewer",
+            "--session-id", "reviewer-live", "--base-commit", REVISION,
+            "--glossary-revision", wave["shared_state_revisions"]["glossary"],
+            "--style-guide-revision", wave["shared_state_revisions"]["style_guide"],
+            "--json", expect=1,
+        )
+        self.assertIn("not authorized", denied.stderr)
+        dispatch = self.canonical_json(self.run_book(
+            "wave-dispatch", "sample", "--sessions", "1", "--base-commit", REVISION,
+        ))
+        writer = dispatch["sessions"][0]["session_id"]
+        self.run_book(
+            "claim", "sample", "1", "--role", "translator",
+            "--session-id", writer, "--base-commit", REVISION,
+            "--glossary-revision", wave["shared_state_revisions"]["glossary"],
+            "--style-guide-revision", wave["shared_state_revisions"]["style_guide"],
+            "--json",
+        )
+        progress = json.loads((book / "progress.json").read_text())
+        path = book / progress["chapters"][0]["translation_path"]
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("# Первая\n\nАльфа.\n", encoding="utf-8")
+        self.run_book(
+            "accept-translation", "sample", "1", "--session-id", writer, "--json",
+        )
+        self.run_book(
+            "release", "sample", "1", "--session-id", writer, "--json",
+        )
+        proposed = self.canonical_json(self.run_book(
+            "review-next", "sample", "--session-id", "reviewer-live",
+            "--base-commit", REVISION,
+        ))
+        self.assertEqual(proposed["action"], "claim")
+        self.assertEqual(proposed["load_plan"]["role"], "reviewer")
+        pinned = proposed["claim_snapshot"]["shared_state_revisions"]
+        acquired = self.canonical_json(self.run_book(
+            "claim", "sample", "1", "--role", "reviewer",
+            "--session-id", "reviewer-live", "--base-commit", REVISION,
+            "--glossary-revision", pinned["glossary"],
+            "--style-guide-revision", pinned["style_guide"], "--json",
+        ))
+        self.assertEqual(acquired["claims"][0]["session_id"], "reviewer-live")
+        again = self.canonical_json(self.run_book(
+            "review-next", "sample", "--session-id", "reviewer-live",
+            "--base-commit", REVISION,
+        ))
+        self.assertEqual(again["action"], "work")
+
     def test_benchmark_cli_reports_only_supplied_measurements(self):
         observations = {
             "schema_version": 1, "dataset_id": "test-only",
