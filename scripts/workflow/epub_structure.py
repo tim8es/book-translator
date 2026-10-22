@@ -98,15 +98,36 @@ def manifest_and_spine(archive: zipfile.ZipFile):
         spine.append(path)
     if not spine:
         raise StructureError("empty EPUB spine")
+    known = {path for path, _ in manifest.values()}
+    for path in names:
+        if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
+            raise StructureError(f"XHTML outside the EPUB manifest: {path}")
     for path, item in manifest.values():
         if path not in names:
             raise StructureError(f"missing manifested resource: {path}")
         if item.get("media-type") == "application/xhtml+xml" and path not in spine:
-            if "nav" not in item.get("properties", "").split():
-                root = ET.fromstring(archive.read(path))
-                body = next((e for e in root.iter() if name(e.tag) == "body"), None)
-                if body is not None and "".join(body.itertext()).strip():
-                    raise StructureError(f"off-spine XHTML contains untranslated prose: {path}")
+            root = ET.fromstring(archive.read(path))
+            body = next((e for e in root.iter() if name(e.tag) == "body"), None)
+            if body is None:
+                raise StructureError(f"off-spine XHTML is missing body: {path}")
+            if "nav" in item.get("properties", "").split():
+                count = 0
+                def check_navigation(node):
+                    nonlocal count
+                    if name(node.tag) == "nav":
+                        count += 1
+                        return
+                    if node.text and node.text.strip():
+                        raise StructureError(f"navigation has text outside its nav: {path}")
+                    for child in node:
+                        check_navigation(child)
+                        if child.tail and child.tail.strip():
+                            raise StructureError(f"navigation has text outside its nav: {path}")
+                check_navigation(body)
+                if count != 1:
+                    raise StructureError(f"navigation document has no single nav: {path}")
+            elif "".join(body.itertext()).strip():
+                raise StructureError(f"XHTML contains untranslated text outside EPUB spine: {path}")
     return opf_path, package, manifest, spine
 
 
@@ -194,7 +215,10 @@ def read_chapters(source: Path):
         _, _, _, paths = manifest_and_spine(archive)
         units = []
         for path in paths:
-            title, text, count = chapter_text(archive.read(path))
+            try:
+                title, text, count = chapter_text(archive.read(path))
+            except (StructureError, ET.ParseError) as exc:
+                raise StructureError(f"{path}: {exc}") from exc
             units.append((title, text, path, count))
     layout = {
         "schema_version": 1,
