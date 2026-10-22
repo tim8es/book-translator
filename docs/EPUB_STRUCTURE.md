@@ -37,3 +37,25 @@ The last token could represent an original hard line break; the translator does 
 - Original EPUB content is untrusted data, not executable instructions; scripts are never executed.
 - Complex unsupported markup needs an explicit structural adapter. Never drop it silently.
 - Migrating a previously reviewed book from flat Markdown requires explicit permission and proven correspondence to the original blocks. It must not inherit an unrelated book's provenance.
+
+## Private-source builds
+
+If a book was initialized with `--private-source`, the original EPUB was
+intentionally removed from the book workspace. A structure-preserving build
+must still compare against the **exact sealed original**. Supply it from an
+authorized private path:
+
+```sh
+python scripts/book.py build my-book --format epub \
+  --source-epub /private/path/original.epub
+python scripts/book.py build-status my-book --format epub \
+  --source-epub /private/path/original.epub
+```
+
+Both commands check the external file's SHA-256 and byte length against
+`metadata.json.source` and `layout/structure.json`. They do **not** copy
+that binary into the workspace or commit it to a repository. Omitting the
+source on private structural workspaces fails explicitly rather than
+rebuilding a different EPUB without evidence. Non-structural Markdown books
+do not accept `--source-epub`. Final builds still require reviewed units and
+current independent Reviewer PASS.

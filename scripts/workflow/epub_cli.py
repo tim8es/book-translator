@@ -168,12 +168,49 @@ def _resolutions(book_dir: Path, repository: WorkflowStateRepository, progress, 
         raise EpubCliError(f"review evidence is unavailable or invalid: {exc}") from exc
 
 
+def _read_structural_original(
+    book_dir: Path,
+    metadata: Mapping[str, Any],
+    layout: Mapping[str, Any],
+    supplied: str | None,
+) -> bytes:
+    """Load exact original from an embedded source or external private path.
+
+    Never retain, copy, or commit user-supplied private source bytes.
+    """
+    source = metadata.get("source")
+    filename = metadata.get("source_file")
+    if not isinstance(source, Mapping) or not isinstance(filename, str):
+        raise EpubCliError("structural EPUB requires a sealed source identity")
+    if PurePosixPath(filename).name != filename or filename in {".", ".."}:
+        raise EpubCliError("invalid EPUB original filename in book metadata")
+    if supplied:
+        target = Path(supplied).expanduser().resolve()
+    elif source.get("storage_mode") == "private_external":
+        raise EpubCliError(
+            "private-source structural EPUB requires --source-epub ORIGINAL.epub "
+            "(the exact original; it is not copied into the workspace)"
+        )
+    else:
+        target = book_dir / "source" / filename
+    try:
+        content = target.read_bytes()
+    except OSError as exc:
+        raise EpubCliError(f"original EPUB is unavailable: {target}") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if (digest != source.get("sha256") or len(content) != source.get("size_bytes")
+            or digest != layout.get("source_sha256")):
+        raise EpubCliError("supplied structural EPUB differs from the sealed source/layout identity")
+    return content
+
+
 def _build_identity(
     root: Path,
     slug: str,
     *,
     preview: bool,
     strict: bool,
+    source_epub: str | None = None,
 ):
     book_dir = _book_directory(root, slug)
     storage = FilesystemStorage(book_dir)
@@ -233,10 +270,10 @@ def _build_identity(
             try:
                 structure_bytes = structure_file.read_bytes()
                 layout = json.loads(structure_bytes)
-                original_path = book_dir / "source" / metadata_doc.data["source_file"]
-                original_bytes = original_path.read_bytes()
+                original_bytes = _read_structural_original(
+                    book_dir, metadata_doc.data, layout, source_epub
+                )
                 if (layout.get("profile") != PROFILE
-                        or layout.get("source_sha256") != hashlib.sha256(original_bytes).hexdigest()
                         or len(layout.get("documents", [])) != len(chapters)):
                     raise EpubCliError("EPUB source layout does not match original file/spine")
                 structural = {"layout": layout, "original": original_bytes}
@@ -247,6 +284,8 @@ def _build_identity(
                 }
             except (ValueError, KeyError, OSError, TypeError) as exc:
                 raise EpubCliError(f"invalid EPUB structural layout: {exc}") from exc
+        if source_epub is not None and structural is None:
+            raise EpubCliError("--source-epub applies only to books with a structural EPUB layout")
         fingerprint = input_fingerprint(snapshot)
     except EpubOutputError as exc:
         raise EpubCliError(str(exc)) from exc
@@ -350,7 +389,10 @@ def epub_build_command(args: argparse.Namespace, root: Path) -> int:
     preview = bool(args.allow_unreviewed)
     output_name = _safe_output_name(args.slug, args.output)
     artifact_path = f"output/{output_name}"
-    context = _build_identity(root, args.slug, preview=preview, strict=True)
+    context = _build_identity(
+        root, args.slug, preview=preview, strict=True,
+        source_epub=getattr(args, "source_epub", None),
+    )
     existing = _stored_output_status(context, requested_artifact_path=artifact_path)
     if existing.get("state") == "current":
         print(f"Built EPUB unchanged: books/{args.slug}/{artifact_path}")
@@ -435,7 +477,10 @@ def epub_build_command(args: argparse.Namespace, root: Path) -> int:
 def build_status_command(args: argparse.Namespace, root: Path) -> int:
     preview = bool(args.allow_unreviewed)
     try:
-        context = _build_identity(root, args.slug, preview=preview, strict=False)
+        context = _build_identity(
+            root, args.slug, preview=preview, strict=False,
+            source_epub=getattr(args, "source_epub", None),
+        )
         status = _stored_output_status(context)
     except EpubCliError as exc:
         status = {"state": "invalid", "reason": str(exc)}
@@ -475,6 +520,10 @@ def register_epub_commands(
         if original is None:
             raise EpubCliError("existing Markdown build handler is unavailable")
         build.add_argument(
+            "--source-epub",
+            help="Exact original EPUB for private_external structural books; never persisted.",
+        )
+        build.add_argument(
             "--format",
             choices=("markdown", "epub"),
             default="markdown",
@@ -495,6 +544,10 @@ def register_epub_commands(
         )
         status.add_argument("slug", help="Book slug under books/.")
         status.add_argument("--format", choices=("epub",), default="epub")
+        status.add_argument(
+            "--source-epub",
+            help="Exact original EPUB for read-only status of private structural books.",
+        )
         status.add_argument(
             "--allow-unreviewed",
             action="store_true",
