@@ -6,6 +6,7 @@ import sys
 import unittest
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -84,8 +85,14 @@ class PreservationGateTests(unittest.TestCase):
     def test_inline_emphasis_attribute_mutation_is_rejected(self):
         source = fixture()
         output = build_identity(source)
-        corrupted = tamper(output, "OPS/story.xhtml",
-                           lambda raw: raw.replace(b"<ns0:em>", b'<ns0:em class="tampered">'))
+
+        def change_inline(raw):
+            root = ET.fromstring(raw)
+            em = next(x for x in root.iter() if x.tag.rsplit("}", 1)[-1] == "em")
+            em.set("class", "tampered")
+            return ET.tostring(root, encoding="utf-8")
+
+        corrupted = tamper(output, "OPS/story.xhtml", change_inline)
         with self.assertRaisesRegex(EpubPreservationError, "structure changed"):
             verify_preservation(source, corrupted)
 
