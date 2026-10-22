@@ -24,6 +24,13 @@ _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _ORDERED_ITEM_RE = re.compile(r"^\d+\.\s+(.+)$")
+_PLAIN_CHAPTER_TITLE_RE = re.compile(r"^(?:Глава|Chapter)\s+\d+\b", re.IGNORECASE)
+_PLAIN_NOTES_TITLE_RE = re.compile(
+    r"^(?:Примечания(?:\s+автора)?(?:\s+(?:к|перед|после|в конце)\s+глав(?:е|ы|ой)|\s+—\s+в конце глав(?:е|ы|ой))?"
+    r"|Заметки автора|Chapter(?: End)? Notes)\s*$", re.IGNORECASE
+)
+_PLAIN_INTERNAL_CHAPTER_RE = re.compile(r"^(?:ГЛАВА|CHAPTER)\s+\d+\s*$")
+
 _MANIFEST_KEYS = {
     "schema_version",
     "build_contract",
@@ -403,8 +410,28 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
             continue
         heading = _HEADING_RE.match(line)
         if heading:
+            text = heading.group(2)
             level = len(heading.group(1))
-            body.append(f"<h{level}>{_render_inline(heading.group(2))}</h{level}>")
+            if not body and _PLAIN_CHAPTER_TITLE_RE.match(text):
+                level = 1
+            elif _PLAIN_NOTES_TITLE_RE.fullmatch(text.strip("* ")):
+                level = 2
+            elif _PLAIN_INTERNAL_CHAPTER_RE.fullmatch(text):
+                level = 3
+            body.append(f"<h{level}>{_render_inline(text)}</h{level}>")
+            index += 1
+            continue
+        stripped = line.strip()
+        if not body and _PLAIN_CHAPTER_TITLE_RE.match(stripped):
+            body.append(f"<h1>{_render_inline(stripped)}</h1>")
+            index += 1
+            continue
+        if _PLAIN_NOTES_TITLE_RE.fullmatch(stripped.strip("* ")):
+            body.append(f"<h2>{_render_inline(stripped.strip('* '))}</h2>")
+            index += 1
+            continue
+        if _PLAIN_INTERNAL_CHAPTER_RE.fullmatch(stripped):
+            body.append(f"<h3>{_render_inline(stripped)}</h3>")
             index += 1
             continue
         if line.startswith("- ") or line.startswith("* "):
@@ -581,10 +608,19 @@ def build_epub_bytes(
         + '\n  </spine>\n</package>\n'
     ).encode("utf-8")
 
-    nav_links = [
-        f'<li><a href="text/{html_escape(filename, quote=True)}">{html_escape(unit_title)}</a></li>'
-        for filename, unit_title, _ in chapter_files
-    ]
+    # Prefer the localized heading authored in the translated unit. Repository
+    # chapter titles may still be original-language provenance labels.
+    nav_links = []
+    for filename, unit_title, xhtml in chapter_files:
+        chapter_root = ET.fromstring(xhtml)
+        first_heading = chapter_root.find(".//{http://www.w3.org/1999/xhtml}h1")
+        toc_title = (
+            "".join(first_heading.itertext()).strip()
+            if first_heading is not None else unit_title
+        )
+        nav_links.append(
+            f'<li><a href="text/{html_escape(filename, quote=True)}">{html_escape(toc_title)}</a></li>'
+        )
     nav = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" '
