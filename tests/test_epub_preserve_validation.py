@@ -85,7 +85,7 @@ class PreservationGateTests(unittest.TestCase):
         source = fixture()
         output = build_identity(source)
         corrupted = tamper(output, "OPS/book.opf",
-                           lambda raw: raw.replace(b"</ns0:metadata>", b"<x/>" + b"</ns0:metadata>"))
+                           lambda raw: raw.replace(b"<metadata>", b'<metadata injected="yes">'))
         with self.assertRaises(EpubPreservationError):
             verify_preservation(source, corrupted)
 
