@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .context_routing import ContextRoutingError, contract_paths, read_manifest
+from .operations import next_unit_operation
 
 from .claims import ClaimManager, unit_id_for_chapter
 from .coordination import FINALIZATION_PATH
@@ -268,8 +269,8 @@ class StatusResolver:
                 if unit_id in claims_by_unit:
                     continue
 
-                operation = self._parallel_worker_operation(lifecycle, review)
-                if operation is None:
+                operation = next_unit_operation(lifecycle, review)
+                if operation not in {"translate", "correct_translation", "review"}:
                     break
                 assignments.append(
                     {
@@ -311,15 +312,8 @@ class StatusResolver:
                     "context": self._context("blocked", unit, status),
                 }
 
-            if lifecycle == "extracted":
-                operation = "translate"
-            elif lifecycle == "translated" and review == "pass":
-                operation = "accept_review"
-            elif lifecycle == "translated" and review == "corrections_required":
-                operation = "correct_translation"
-            elif lifecycle == "translated" and review in {"missing", "stale"}:
-                operation = "review"
-            elif lifecycle == "pending":
+            operation = next_unit_operation(lifecycle, review)
+            if lifecycle == "pending":
                 return {
                     "schema_version": STATUS_SCHEMA_VERSION,
                     "operation": "blocked",
@@ -329,7 +323,7 @@ class StatusResolver:
                     "errors": [f"{unit_id} has not been extracted"],
                     "context": self._context("blocked", unit, status),
                 }
-            else:
+            if operation is None:
                 return {
                     "schema_version": STATUS_SCHEMA_VERSION,
                     "operation": "blocked",
@@ -355,16 +349,6 @@ class StatusResolver:
             "operation": "complete",
             "context": self._context("complete", None, status),
         }
-
-    @staticmethod
-    def _parallel_worker_operation(lifecycle: Any, review: Any) -> str | None:
-        if lifecycle == "extracted":
-            return "translate"
-        if lifecycle == "translated" and review == "corrections_required":
-            return "correct_translation"
-        if lifecycle == "translated" and review in {"missing", "stale"}:
-            return "review"
-        return None
 
     def _context(
         self,
