@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import re
 import shutil
 import sys
@@ -36,6 +37,7 @@ from workflow.claim_cli import ClaimCliError, register_claim_commands
 from workflow.patch_cli import PatchCliError, register_patch_command
 from workflow.review_cli import ReviewCliError, register_review_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
+from workflow.telemetry import emit as emit_metric
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
 from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub
@@ -819,11 +821,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    started = time.perf_counter()
+    code = 1
     try:
-        return args.func(args)
+        code = args.func(args)
+        return code
     except (BookError, ClaimCliError, PatchCliError, ReviewCliError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    finally:
+        # This measures Python execution, not the model's translation/review time.
+        emit_metric(
+            "cli", command=args.command, exit_code=code,
+            elapsed_seconds=round(time.perf_counter() - started, 6),
+        )
 
 
 if __name__ == "__main__":

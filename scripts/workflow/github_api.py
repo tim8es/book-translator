@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, build_opener
+
+from .telemetry import emit as emit_metric, enabled as metrics_enabled
 
 
 @dataclass(frozen=True)
@@ -169,16 +172,27 @@ class GitHubRestClient:
             headers=self._headers(has_body=data is not None),
             method=method,
         )
+        started = time.perf_counter() if metrics_enabled() else None
+        outcome = "ok"
         try:
             with self._opener.open(request, timeout=30) as response:
                 raw = response.read()
         except HTTPError as exc:
+            outcome = f"http_{exc.code}"
             raise GitHubApiError(
                 f"GitHub API request failed with HTTP {exc.code}",
                 status=exc.code,
             ) from exc
         except (URLError, TimeoutError, OSError) as exc:
+            outcome = "transport_error"
             raise GitHubApiError("GitHub API transport request failed") from exc
+        finally:
+            if started is not None:
+                # Do not record tokens, full URLs, request bodies, or file paths.
+                emit_metric(
+                    "github_request", method=method, outcome=outcome,
+                    elapsed_seconds=round(time.perf_counter() - started, 6),
+                )
 
         if not isinstance(raw, bytes):
             raise GitHubApiError("GitHub API response body must be bytes")
