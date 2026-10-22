@@ -26,8 +26,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _ORDERED_ITEM_RE = re.compile(r"^\d+\.\s+(.+)$")
 _PLAIN_CHAPTER_TITLE_RE = re.compile(r"^(?:Глава|Chapter)\s+\d+\b", re.IGNORECASE)
 _PLAIN_NOTES_TITLE_RE = re.compile(
-    r"^(?:Примечания(?:\s+автора)?(?:\s+(?:к|перед|после|в конце)\s+главы|\s+—\s+в конце главы)?"
-    r"|Chapter(?: End)? Notes)\s*$", re.IGNORECASE
+    r"^(?:Примечания(?:\s+автора)?(?:\s+(?:к|перед|после|в конце)\s+глав(?:е|ы|ой)|\s+—\s+в конце глав(?:е|ы|ой))?"
+    r"|Заметки автора|Chapter(?: End)? Notes)\s*$", re.IGNORECASE
 )
 _PLAIN_INTERNAL_CHAPTER_RE = re.compile(r"^(?:ГЛАВА|CHAPTER)\s+\d+\s*$")
 
