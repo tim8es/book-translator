@@ -58,8 +58,20 @@ def _outside_text_normalized(raw: bytes, path: str) -> bytes:
         parent = root
         for offset in xpath[:-1]:
             parent = parent[offset]
-        placeholder = ET.Element("{urn:book-translator:internal}text-block")
-        placeholder.attrib["index"] = str(idx)
+        # Preserve the text block's own tag/attributes (ids, classes, roles) so
+        # mutating an anchor target or formatting class cannot be hidden by masking.
+        placeholder = ET.Element(element.tag, dict(element.attrib))
+        placeholder.attrib["{urn:book-translator:internal}block-index"] = str(idx)
+        # Inline tags may move for translation grammar, but their set and all
+        # attributes must remain identical (links, notes, emphases, etc.).
+        import hashlib
+        import json
+        signature = sorted(
+            (child.tag, sorted(child.attrib.items()))
+            for child in element.iter() if child is not element
+        )
+        serialized = json.dumps(signature, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        placeholder.attrib["{urn:book-translator:internal}inline-hash"] = hashlib.sha256(serialized).hexdigest()
         placeholder.tail = element.tail
         parent[xpath[-1]] = placeholder
     return ET.tostring(root, encoding="utf-8")
