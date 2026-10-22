@@ -18,11 +18,11 @@ XHTML_NS = "http://www.w3.org/1999/xhtml"
 class EpubLayoutRegressionTests(unittest.TestCase):
     def test_plain_russian_heading_and_notes_are_structured(self):
         content = (
-            "Глава 7. Дом в ритме твоего сердца\\n\\n"
-            "Примечания к главе\\n\\n"
-            "Предупреждение автора.\\n\\n"
-            "ГЛАВА 7\\n\\n"
-            "Обычный абзац с **жирным** и *курсивом*.\\n"
+            "Глава 7. Дом в ритме твоего сердца\n\n"
+            "Примечания к главе\n\n"
+            "Предупреждение автора.\n\n"
+            "ГЛАВА 7\n\n"
+            "Обычный абзац с **жирным** и *курсивом*.\n"
         )
         xml = render_markdown_xhtml("Chapter 7: Home", content, language="ru")
         root = ET.fromstring(xml)
@@ -38,9 +38,9 @@ class EpubLayoutRegressionTests(unittest.TestCase):
         root = ET.fromstring(
             render_markdown_xhtml(
                 "Original title",
-                "## Глава 25. Больше никаких секретов\\n\\n"
-                "### Примечания к главе\\n\\n"
-                "Начало.\\n",
+                "## Глава 25. Больше никаких секретов\n\n"
+                "### Примечания к главе\n\n"
+                "Начало.\n",
                 language="ru",
             )
         )
@@ -57,7 +57,7 @@ class EpubLayoutRegressionTests(unittest.TestCase):
                 "number": 1,
                 "slug": "chapter-1",
                 "title": "Chapter 1: Original",
-                "markdown": "Глава 1. Русское название\\n\\nТекст.",
+                "markdown": "Глава 1. Русское название\n\nТекст.",
             }],
             fingerprint="a" * 64,
         )
