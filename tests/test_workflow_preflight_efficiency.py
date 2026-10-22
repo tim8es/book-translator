@@ -74,14 +74,18 @@ class PreflightEfficiencyTests(unittest.TestCase):
             )
             with (
                 patch.object(book, "validate_book", return_value=([], [])) as validate,
-                patch.object(book, "load_book", return_value=(work, metadata, progress)),
+                patch.object(book, "load_book", return_value=(work, metadata, progress)) as load,
                 patch("workflow.status_cli.source_storage_mode", return_value="embedded"),
                 patch("workflow.status_cli.normalize_structural_errors", return_value=[]),
                 patch("workflow.status_cli.coverage_integrity_errors", return_value=["coverage error"]) as coverage,
                 patch("workflow.status_cli.importlib.import_module", side_effect=lambda name: book if name == "book" else corpus),
             ):
                 errors, state = default_preflight(root, "demo")
-                validate.assert_called_once_with("demo", check_review_evidence=False)
+                validate.assert_called_once_with(
+                    "demo", check_review_evidence=False,
+                    loaded_state=(work, metadata, progress),
+                )
+                load.assert_called_once_with("demo")
                 self.assertEqual(errors, ["coverage error"])
                 self.assertEqual(state["state"], "invalid")
                 self.assertIn("bad seal", state["error"])
