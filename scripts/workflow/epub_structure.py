@@ -65,7 +65,9 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     names = archive.namelist()
     if len(names) != len(set(names)):
         raise StructureError("duplicate EPUB archive members")
-    if not names or names[0] != "mimetype" or archive.read(names[0]) != b"application/epub+zip":
+    # Older EPUB archives may omit the mimetype member. Preserve their
+    # content but emit a standards-compliant first, uncompressed member.
+    if "mimetype" in names and archive.read("mimetype") != b"application/epub+zip":
         raise StructureError("invalid EPUB mimetype")
     container = ET.fromstring(archive.read("META-INF/container.xml"))
     roots = [e.attrib.get("full-path") for e in container.iter() if name(e.tag) == "rootfile"]
@@ -360,7 +362,10 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
         _check_links(archive, replacements)
         out = io.BytesIO()
         with zipfile.ZipFile(out, "w") as dest:
+            dest.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
             for info in archive.infolist():
+                if info.filename == "mimetype":
+                    continue
                 dest.writestr(info, replacements.get(info.filename, archive.read(info.filename)))
         result = out.getvalue()
     validate_structural_epub(result, expected_documents=len(paths))
