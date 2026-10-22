@@ -65,6 +65,24 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     names = archive.namelist()
     if len(names) != len(set(names)):
         raise StructureError("duplicate EPUB archive members")
+    total_uncompressed = 0
+    for member in archive.infolist():
+        path = member.filename
+        pieces = path.split("/")
+        if (not path or path.startswith("/") or "\\" in path or "\x00" in path
+                or any(part in {"", ".", ".."} for part in pieces[:-1])
+                or (not member.is_dir() and pieces[-1] in {"", ".", ".."})
+                or (len(path) >= 2 and path[1] == ":")):
+            raise StructureError(f"unsafe EPUB archive member path: {path!r}")
+        # Do not republish symlink entries or permit oversized decompressed data.
+        file_type = (member.external_attr >> 16) & 0o170000
+        if file_type == 0o120000:
+            raise StructureError(f"EPUB archive symlink is not permitted: {path!r}")
+        if member.file_size > 64 * 1024 * 1024:
+            raise StructureError(f"oversized EPUB resource: {path!r}")
+        total_uncompressed += member.file_size
+        if total_uncompressed > 512 * 1024 * 1024:
+            raise StructureError("EPUB exceeds safe uncompressed archive size")
     # Older EPUB archives may omit the mimetype member. Preserve their
     # content but emit a standards-compliant first, uncompressed member.
     if "mimetype" in names and archive.read("mimetype") != b"application/epub+zip":
@@ -124,8 +142,8 @@ def manifest_and_spine(archive: zipfile.ZipFile):
                         if child.tail and child.tail.strip():
                             raise StructureError(f"navigation has text outside its nav: {path}")
                 check_navigation(body)
-                if count != 1:
-                    raise StructureError(f"navigation document has no single nav: {path}")
+                if count < 1:
+                    raise StructureError(f"navigation document has no nav section: {path}")
             elif "".join(body.itertext()).strip():
                 raise StructureError(f"XHTML contains untranslated text outside EPUB spine: {path}")
     return opf_path, package, manifest, spine
