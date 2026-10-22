@@ -90,6 +90,16 @@ class WorkflowStatusCliTests(unittest.TestCase):
         )
         return payload
 
+    def test_review_next_is_read_only_and_waits_until_accepted_translation(self):
+        book = self.initialize_book()
+        progress_before = (book / "progress.json").read_bytes()
+        result = self.canonical_json(self.run_book(
+            "review-next", "sample", "--session-id", "reviewer-a", "--json",
+        ))
+        self.assertEqual(result["action"], "wait")
+        self.assertEqual(result["reason"], "awaiting_accepted_translations")
+        self.assertEqual((book / "progress.json").read_bytes(), progress_before)
+
     def test_plan_sessions_cli_is_read_only_with_remote_head(self):
         book = self.initialize_book()
         progress_path = book / "progress.json"
