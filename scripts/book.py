@@ -428,11 +428,11 @@ def require_compatible_workflow_revision(slug: str) -> None:
     retains its legacy behavior; it cannot claim pin compatibility.
     """
     installed = repo_root() / ".book-translator-install.json"
+    if not isinstance(slug, str) or Path(slug).name != slug or slug in {".", ".."}:
+        raise BookError("unsafe book slug")
     book_metadata = repo_root() / "books" / slug / "metadata.json"
     if not installed.is_file() or not book_metadata.is_file():
         return
-    if not isinstance(slug, str) or Path(slug).name != slug or slug in {".", ".."}:
-        raise BookError("unsafe book slug")
     try:
         installation = json.loads(installed.read_text(encoding="utf-8"))
         metadata = json.loads(book_metadata.read_text(encoding="utf-8"))

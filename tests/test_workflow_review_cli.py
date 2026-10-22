@@ -155,13 +155,13 @@ class WorkflowReviewCliTests(unittest.TestCase):
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["workflow"]["resolved_revision"] = None
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.claim_reviewer()
 
+        # The CLI now refuses any new claim before the review evidence stage.
         result = self.run_cli(
-            "review-record", "sample", "1", "--outcome", "PASS",
+            "claim", "sample", "1", "--role", "reviewer",
             "--session-id", "reviewer-a", "--json", expect=1,
         )
-        self.assertIn("translation_acceptance", result.stderr)
+        self.assertIn("concrete installed and book workflow revision", result.stderr)
 
     def test_review_record_rejects_missing_translation_acceptance(self):
         book, _ = self.initialize_book()
