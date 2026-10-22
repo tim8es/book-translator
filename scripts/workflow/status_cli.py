@@ -259,6 +259,56 @@ def benchmark_sessions_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def review_next_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
+    """Freshly select an accepted translation for a long-lived Reviewer chat."""
+    from .review_queue import next_review
+    from .waves import WaveManager, WaveError
+
+    status = _snapshot(args, root, preflight)
+    storage = FilesystemStorage(_book_directory(root, args.slug))
+    manager = WaveManager(storage)
+    wave = None
+    try:
+        if manager.active() is not None:
+            manifest, state, _ = manager._active_state()
+            if state["phase"] != "ACTIVE":
+                decision = {
+                    "schema_version": 1, "action": "blocked",
+                    "reason": "wave_reconciliation_active", "session_id": args.session_id,
+                }
+                _print_json(decision)
+                return 1
+            if manager.memory()["revision"] != manifest["memory_revision"]:
+                raise WaveError("active wave literary memory revision changed")
+            wave = manifest
+        decision = next_review(status, args.session_id, wave=wave)
+        if decision["action"] in {"claim", "work"}:
+            base_commit, shared = _parallel_dispatch_snapshot(
+                status, root, explicit_commit=args.base_commit,
+            )
+            decision["claim_snapshot"] = {
+                "base_commit": base_commit, "shared_state_revisions": shared,
+                "workflow_revision": status["workflow_revision"],
+                "source_sha256": status["corpus"]["source_sha256"],
+            }
+            if wave is not None:
+                from .wave_cli import _wave_load_plan, _read_role_routing
+                routed = dict(decision, context={
+                    "wave_id": wave["wave_id"],
+                    "memory_revision": wave["memory_revision"],
+                    "source_sha256": wave["source_sha256"],
+                    "workflow_revision": wave["workflow_revision"],
+                    "shared_state_revisions": wave["shared_state_revisions"],
+                })
+                decision["load_plan"] = _wave_load_plan(
+                    routed, status, wave, _read_role_routing(root),
+                )
+    except (ValueError, WaveError) as exc:
+        raise StatusCliError(str(exc)) from exc
+    _print_json(decision)
+    return 1 if decision["action"] == "blocked" else 0
+
+
 def session_next_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
     """Read a saved workpack and derive the next safe step from current state."""
     status = _snapshot(args, root, preflight)
@@ -407,6 +457,19 @@ def register_status_commands(
             error_factory,
         )
     )
+
+    live_reviewer = subparsers.add_parser(
+        "review-next", help="Select next currently accepted chapter for independent Reviewer."
+    )
+    live_reviewer.add_argument("slug")
+    live_reviewer.add_argument("--session-id", required=True)
+    live_reviewer.add_argument("--base-commit",
+                               help="Pinned Git HEAD from GitHub when local Git is unavailable.")
+    live_reviewer.add_argument("--json", action="store_true")
+    live_reviewer.set_defaults(func=_adapt_errors(
+        lambda args: review_next_command(args, root, resolved_preflight),
+        error_factory,
+    ))
 
     next_session = subparsers.add_parser(
         "session-next", help="Resume one saved chat workpack from authoritative GitHub/file state."

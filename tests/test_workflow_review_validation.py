@@ -147,6 +147,21 @@ class WorkflowReviewValidationTests(unittest.TestCase):
         self.assertEqual(report["warnings"][0]["kind"], "number_added")
         self.assertEqual((self.book / "progress.json").read_bytes(), before)
 
+    def test_live_reviewer_queue_emits_claim_after_translation_acceptance(self):
+        no_work = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-live",
+            "--base-commit", REVISION, "--json",
+        ).stdout)
+        self.assertEqual(no_work["action"], "wait")
+        self.accept_translation("Перевод.\n")
+        proposal = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-live",
+            "--base-commit", REVISION, "--json",
+        ).stdout)
+        self.assertEqual(proposal["action"], "claim")
+        self.assertEqual(proposal["unit_id"], "chapter-000001")
+        self.assertEqual(proposal["claim_snapshot"]["base_commit"], REVISION)
+
     def test_ledger_enabled_book_requires_ledger_file(self):
         (self.book / "review-ledger.json").unlink()
         result = self.run_cli("validate", "sample", expect=1)
