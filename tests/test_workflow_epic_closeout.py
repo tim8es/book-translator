@@ -76,6 +76,7 @@ class WorkflowRepresentativeDogfoodTests(unittest.TestCase):
         shutil.copy2(BOOK_SCRIPT, self.repo / "scripts" / "book.py")
         shutil.copy2(CORPUS_SCRIPT, self.repo / "scripts" / "corpus.py")
         shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
+        shutil.copy2(PROJECT_ROOT / "agent-manifest.json", self.repo / "agent-manifest.json")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
                 {
