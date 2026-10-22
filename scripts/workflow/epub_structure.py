@@ -369,3 +369,48 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
 
 def layout_bytes(layout: Mapping) -> bytes:
     return (json.dumps(layout, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def audit_structural(source: Path, chapters: Sequence[object]) -> dict:
+    """Independent original-XHTML vs protected extraction text inventory."""
+    units, layout = read_chapters(source)
+    if len(units) != len(chapters):
+        raise StructureError("EPUB extraction does not cover every spine XHTML")
+    documents = []
+    with zipfile.ZipFile(source) as archive:
+        for index, ((_, expected, path, count), chapter) in enumerate(zip(units, chapters), 1):
+            content = getattr(chapter, "content", None)
+            if content != expected:
+                raise StructureError(f"extracted chapter {index} differs from original XHTML segments")
+            raw = archive.read(path)
+            root = ET.fromstring(raw)
+            blocks = _leaves(root)
+            extracted = parse_translation(content, len(blocks))
+            # Do not reuse _inline_source to establish independent text coverage:
+            # XML itertext is compared directly to translated-facing segments
+            # after removing only reserved protected tokens.
+            for block, segment in zip(blocks, extracted):
+                original_text = "".join(block.itertext())
+                restored_text = TOKEN.sub("", segment)
+                if original_text != restored_text:
+                    raise StructureError(f"{path}: source text changed during protected extraction")
+            flat = " ".join("".join(block.itertext()) for block in blocks)
+            tokens = re.findall(r"\w+|[^\w\s]", flat)
+            documents.append({
+                "path": path, "state": "verified",
+                "xhtml_sha256": sha(raw),
+                "reference_sha256": sha("\n".join(tokens).encode("utf-8")),
+                "text_tokens": len(tokens), "text_blocks": count,
+                "chapter_count": 1,
+            })
+    raw_source = source.read_bytes()
+    return {
+        "schema_version": 1, "validator": "epub-xhtml-structure-v2",
+        "state": "verified", "source_sha256": sha(raw_source),
+        "source_size_bytes": len(raw_source), "chapter_count": len(chapters),
+        "documents": documents,
+        "extracted": [
+            {"number": i, "sha256": sha(unit.content.encode("utf-8"))}
+            for i, unit in enumerate(chapters, 1)
+        ],
+    }
