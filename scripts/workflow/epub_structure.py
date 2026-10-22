@@ -147,6 +147,8 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
         tag = name(element.tag)
         if tag in disallowed:
             raise StructureError(f"unsupported active XHTML element <{tag}>: {path}")
+        if tag == "style" and _REMOTE_CSS.search("".join(element.itertext()).encode("utf-8")):
+            raise StructureError(f"remote embedded CSS resource is unsupported: {path}")
         if tag == "meta":
             # In particular, http-equiv=refresh initiates navigation without
             # any user activation. Keep only inert historical content-type.
@@ -560,6 +562,21 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 element.text = title
         replacements[opf_path] = ET.tostring(package, encoding="utf-8", xml_declaration=True)
 
+        # Duplicate IDs are a structural source/output violation independently
+        # of navigation-label translation. Reject them before resolving labels,
+        # so missing heading errors cannot mask damaged XHTML anchors.
+        for xhtml_path in paths:
+            doc = _safe_xml(replacements[xhtml_path], xhtml_path)
+            seen_anchors: set[str] = set()
+            for node in doc.iter():
+                ident = node.get("id")
+                if ident:
+                    if ident in seen_anchors:
+                        raise StructureError(
+                            f"duplicate internal XHTML anchor id: {xhtml_path}"
+                        )
+                    seen_anchors.add(ident)
+
         for path, item in manifest.values():
             if "nav" not in item.get("properties", "").split():
                 continue
@@ -577,8 +594,33 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 except StructureError:
                     continue
                 label = headings.get(f"{target}#{unquote(url.fragment)}") if url.fragment else headings.get(target)
-                if label and not len(a):
-                    a.text = label
+                if path not in paths and not label:
+                    raise StructureError(
+                        f"off-spine navigation label cannot be translated without a mapped heading: {path}: {a.get('href')}"
+                    )
+                if label:
+                    if path in paths and len(a):
+                        # In-spine navigation is already a fully reviewed
+                        # translation: do not silently replace its styled label.
+                        continue
+                    if not len(a):
+                        a.text = label
+                    else:
+                        # Preserve a single styled label wrapper (e.g. span/em).
+                        # Reject split prose, because moving all words into one
+                        # node would erase source emphasis differences.
+                        slots = []
+                        for node in a.iter():
+                            if (node.text or "").strip():
+                                slots.append((node, "text"))
+                            if node is not a and (node.tail or "").strip():
+                                slots.append((node, "tail"))
+                        if len(slots) != 1:
+                            raise StructureError(
+                                f"off-spine styled navigation cannot be mapped without losing formatting: {path}: {a.get('href')}"
+                            )
+                        owner, field = slots[0]
+                        setattr(owner, field, label)
             replacements[path] = ET.tostring(nav, encoding="utf-8", xml_declaration=True)
 
         # EPUB 2 navigation is often stored in NCX rather than EPUB 3 nav.xhtml.
