@@ -421,6 +421,39 @@ def create_support_files(book_dir: Path) -> None:
     (book_dir / "style-guide.md").write_text(template_text("style-guide.md", style_fallback), encoding="utf-8")
 
 
+def require_compatible_workflow_revision(slug: str) -> None:
+    """Block writes by a different installation revision than the pinned book.
+
+    Existing read-only diagnostics remain usable. An unrecorded installation
+    retains its legacy behavior; it cannot claim pin compatibility.
+    """
+    installed = repo_root() / ".book-translator-install.json"
+    if not isinstance(slug, str) or Path(slug).name != slug or slug in {".", ".."}:
+        raise BookError("unsafe book slug")
+    book_metadata = repo_root() / "books" / slug / "metadata.json"
+    if not installed.is_file() or not book_metadata.is_file():
+        return
+    try:
+        installation = json.loads(installed.read_text(encoding="utf-8"))
+        metadata = json.loads(book_metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise BookError(f"cannot verify pinned workflow revision: {exc}") from exc
+
+    if not isinstance(installation, dict) or not isinstance(metadata, dict):
+        raise BookError("cannot verify pinned workflow revision: invalid metadata")
+    workflow = metadata.get("workflow")
+    installed_revision = installation.get("resolved_revision")
+    book_revision = workflow.get("resolved_revision") if isinstance(workflow, dict) else None
+    if (not isinstance(installed_revision, str) or not installed_revision.strip()
+            or not isinstance(book_revision, str) or not book_revision.strip()):
+        raise BookError("a concrete installed and book workflow revision is required before writing")
+    if installed_revision != book_revision:
+        raise BookError(
+            f"book requires workflow revision {book_revision}; "
+            f"installed revision is {installed_revision}; select the pinned installation"
+        )
+
+
 def workflow_provenance() -> dict[str, str | None]:
     provenance = {
         "repository": CANONICAL_REPOSITORY,
@@ -821,6 +854,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        # Only mutating commands require a pinned installation match.
+        # Read-only commands still allow recovery and diagnosis of old books.
+        readonly = {
+            "validate", "status", "resume", "session-next", "benchmark-sessions",
+            "wave-plan", "wave-status", "memory-impact", "memory-context",
+        }
+        if getattr(args, "slug", None) and args.command != "extract":
+            mutating = args.command not in readonly
+            if args.command == "plan-sessions":
+                mutating = bool(args.save)
+            if mutating:
+                require_compatible_workflow_revision(args.slug)
         return args.func(args)
     except (BookError, ClaimCliError, PatchCliError, ReviewCliError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -41,3 +41,14 @@ run therefore requires an executable runtime with verified GitHub API access;
 never substitute prose descriptions of commands for completed operations.
 These tests use a deterministic fake API and do not establish real remote
 latency, rate-limit behavior or end-to-end ChatGPT bookability.
+
+## Pinned runtime admission
+
+For installations with `.book-translator-install.json`, mutating CLI commands
+reject books whose `metadata.json.workflow.resolved_revision` differs from the
+installed `resolved_revision`. Read-only diagnostics still work to help
+recover an old book. An installation with no provenance record remains a
+legacy compatibility case, **not** proof that its runtime matches the book;
+users should install the pinned revision before mutation. This check prevents
+accidental cross-version CLI use but does not prove the integrity of the
+installed files or authorize an unattended workflow upgrade.
