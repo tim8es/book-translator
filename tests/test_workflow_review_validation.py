@@ -30,6 +30,7 @@ class WorkflowReviewValidationTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / "book.py")
+        shutil.copy2(SCRIPTS / "corpus.py", self.repo / "scripts" / "corpus.py")
         shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
@@ -132,6 +133,21 @@ class WorkflowReviewValidationTests(unittest.TestCase):
             outcome="PASS",
             reviewer_session_id="reviewer-a",
         )
+
+    def test_reviewer_queue_sees_newly_accepted_translation(self):
+        initial = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-a", "--json",
+        ).stdout)
+        self.assertEqual(initial["action"], "wait")
+        self.accept_translation()
+        progress_before = (self.book / "progress.json").read_bytes()
+        ready = json.loads(self.run_cli(
+            "review-next", "sample", "--session-id", "reviewer-a", "--json",
+        ).stdout)
+        self.assertEqual(ready["action"], "claim")
+        self.assertEqual(ready["operation"], "review")
+        self.assertEqual(ready["unit_id"], "chapter-000001")
+        self.assertEqual((self.book / "progress.json").read_bytes(), progress_before)
 
     def test_review_preflight_requires_accepted_artifact_and_is_read_only(self):
         before = (self.book / "progress.json").read_bytes()

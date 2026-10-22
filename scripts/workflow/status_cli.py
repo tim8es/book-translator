@@ -259,6 +259,26 @@ def benchmark_sessions_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def review_next_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
+    """Poll the current review queue without persisting a speculative assignment."""
+    from .review_queue import next_review
+
+    status = _snapshot(args, root, preflight)
+    storage = FilesystemStorage(_book_directory(root, args.slug))
+    try:
+        from .waves import WaveManager
+        active = WaveManager(storage).active()
+        wave_units = None
+        if active is not None:
+            manifest = storage.read(f".workflow/waves/{active['wave_id']}/manifest.json")
+            wave_units = set(json.loads(manifest.content)["unit_ids"])
+        result = next_review(status, args.session_id, wave_units=wave_units)
+    except (StorageError, ValueError) as exc:
+        raise StatusCliError(str(exc)) from exc
+    _print_json(result)
+    return 1 if result["action"] == "blocked" else 0
+
+
 def session_next_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
     """Read a saved workpack and derive the next safe step from current state."""
     status = _snapshot(args, root, preflight)
@@ -407,6 +427,16 @@ def register_status_commands(
             error_factory,
         )
     )
+
+    reviewer = subparsers.add_parser(
+        "review-next", help="Read-only rolling reviewer task from current accepted translations."
+    )
+    reviewer.add_argument("slug")
+    reviewer.add_argument("--session-id", required=True)
+    reviewer.add_argument("--json", action="store_true")
+    reviewer.set_defaults(func=_adapt_errors(
+        lambda args: review_next_command(args, root, resolved_preflight), error_factory,
+    ))
 
     next_session = subparsers.add_parser(
         "session-next", help="Resume one saved chat workpack from authoritative GitHub/file state."
