@@ -15,6 +15,7 @@ from xml.etree import ElementTree as ET
 
 from .epub_source_map import EpubSourceMapError, _name, _path, inventory_epub
 from .xhtml_template import XhtmlTemplateError, inspect_xhtml, render_xhtml
+from .epub_preserve_validation import EpubPreservationError, verify_preservation
 
 
 class EpubPreserveBuildError(ValueError):
@@ -140,4 +141,8 @@ def preview_from_source(
         with zipfile.ZipFile(io.BytesIO(out)) as check:
             if check.testzip() is not None:
                 raise EpubPreserveBuildError("output ZIP CRC failed")
+        try:
+            verify_preservation(original, out)
+        except EpubPreservationError as exc:
+            raise EpubPreserveBuildError(f"preservation validation blocked: {exc}") from exc
         return out
