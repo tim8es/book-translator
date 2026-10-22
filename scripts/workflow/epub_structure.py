@@ -562,6 +562,21 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 element.text = title
         replacements[opf_path] = ET.tostring(package, encoding="utf-8", xml_declaration=True)
 
+        # Duplicate IDs are a structural source/output violation independently
+        # of navigation-label translation. Reject them before resolving labels,
+        # so missing heading errors cannot mask damaged XHTML anchors.
+        for xhtml_path in paths:
+            doc = _safe_xml(replacements[xhtml_path], xhtml_path)
+            seen_anchors: set[str] = set()
+            for node in doc.iter():
+                ident = node.get("id")
+                if ident:
+                    if ident in seen_anchors:
+                        raise StructureError(
+                            f"duplicate internal XHTML anchor id: {xhtml_path}"
+                        )
+                    seen_anchors.add(ident)
+
         for path, item in manifest.values():
             if "nav" not in item.get("properties", "").split():
                 continue
