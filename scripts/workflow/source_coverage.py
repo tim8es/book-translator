@@ -161,6 +161,12 @@ def audit_epub(
     decode_text: Callable[[bytes, str], str],
 ) -> dict[str, Any]:
     """Certify all linear spine text and reject substantive off-spine XHTML."""
+    if chapters and getattr(chapters[0], "content", "").startswith("⟦BT:SEG:"):
+        from .epub_structure import audit_structural, StructureError
+        try:
+            return audit_structural(source, chapters)
+        except (StructureError, OSError, zipfile.BadZipFile, ET.ParseError) as exc:
+            raise SourceCoverageError(str(exc)) from exc
     if not source.is_file() or not zipfile.is_zipfile(source):
         raise SourceCoverageError("Original EPUB is not a valid ZIP archive")
     source_bytes = source.read_bytes()
@@ -306,10 +312,23 @@ def coverage_integrity_errors(
     if not isinstance(report, dict):
         return ["Invalid source-coverage.json object"]
     errors: list[str] = []
-    if (report.get("schema_version"), report.get("validator"), report.get("state")) != (
-        1, VALIDATOR, "verified"
-    ):
+    if (report.get("schema_version") != 1
+            or report.get("validator") not in {VALIDATOR, "epub-xhtml-structure-v2"}
+            or report.get("state") != "verified"):
         errors.append("Invalid EPUB source-coverage validator/version/state")
+    if report.get("validator") == "epub-xhtml-structure-v2":
+        from .epub_structure import STRUCTURE_PATH, PROFILE
+        layout_file = book_dir / STRUCTURE_PATH
+        try:
+            layout = json.loads(layout_file.read_text(encoding="utf-8"))
+            if (layout.get("profile") != PROFILE
+                    or layout.get("source_sha256") != report.get("source_sha256")
+                    or [x["path"] for x in layout.get("documents", [])]
+                       != [x["path"] for x in report.get("documents", [])
+                           if x.get("state") == "verified"]):
+                errors.append("EPUB structural layout is stale or mismatched")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            errors.append(f"Missing/invalid EPUB structural layout: {exc}")
     source = metadata.get("source")
     if not isinstance(source, Mapping):
         errors.append("Missing source identity for EPUB coverage")
