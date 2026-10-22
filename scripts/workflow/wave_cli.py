@@ -119,8 +119,19 @@ def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> 
             from .schemas import SchemaKind
             from .repository import WorkflowStateRepository
             repository = WorkflowStateRepository(storage)
-            metadata = repository.read("metadata.json", SchemaKind.METADATA).data
-            progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+            metadata_doc = repository.read("metadata.json", SchemaKind.METADATA)
+            # _snapshot already verified every translation against current
+            # artifacts. Read fresh state without a second book-wide hash pass,
+            # and reject any concurrent progress/metadata revision change.
+            progress_doc = repository.read(
+                "progress.json", SchemaKind.PROGRESS, verify_artifacts=False
+            )
+            revisions = snapshot["state_revisions"]
+            if (metadata_doc.version != revisions["metadata"]
+                    or progress_doc.version != revisions["progress"]):
+                raise WaveError("book state changed during preflight; retry with fresh status")
+            metadata = metadata_doc.data
+            progress = progress_doc.data
             reader = _artifact_reader(book_dir)
             units = {u["unit_id"]: u for u in snapshot.get("units", [])}
             action = args.command

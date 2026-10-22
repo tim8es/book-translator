@@ -622,12 +622,19 @@ def _review_artifact_reader(book_dir: Path):
     return read
 
 
-def validate_book(slug: str, *, check_review_evidence: bool = True) -> tuple[list[str], list[str]]:
-    """Validate a workspace; status snapshots independently verify review evidence."""
+def validate_book(
+    slug: str,
+    *,
+    check_review_evidence: bool = True,
+    loaded_state: tuple[Path, dict, dict] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Validate a workspace; reuse a freshly loaded state within one preflight."""
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        book_dir, metadata, progress = load_book(slug)
+        book_dir, metadata, progress = (
+            load_book(slug) if loaded_state is None else loaded_state
+        )
     except BookError as exc:
         return [str(exc)], []
 
