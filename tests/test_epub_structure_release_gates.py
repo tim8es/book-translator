@@ -345,5 +345,64 @@ class NavigationSecurityTests(unittest.TestCase):
 
 
 
+    def test_embedded_style_remote_import_is_rejected(self):
+        original = make_epub()
+        for content in (
+            b'@import url("https://tracker.invalid/css");',
+            b'body { background:url(//tracker.invalid/pixel.png) }',
+        ):
+            with self.subTest(css=content):
+                revised = self.mutate_epub(original, {"OPS/story.xhtml": [
+                    (b"<body>", b"<head><style>" + content + b"</style></head><body>")
+                ]})
+                with zipfile.ZipFile(io.BytesIO(revised)) as z:
+                    with self.assertRaisesRegex(StructureError, "remote embedded CSS"):
+                        manifest_and_spine(z)
+
+    def test_off_spine_styled_nav_label_is_localized_with_wrapper_retained(self):
+        source = self.mutate_epub(
+            make_epub(multi_nav=False), {"OPS/nav.xhtml": [
+                (b">First chapter</a>", b"><span class='toc'>First chapter</span></a>")
+            ]}
+        )
+        units = source_units(source)
+        rendered = units[0][1].replace("First chapter", "Первая глава")
+        result = build(source, document_paths=[x[2] for x in units],
+                       translations=[rendered],
+                       target_language="ru", title="Книга")
+        with zipfile.ZipFile(io.BytesIO(result)) as z:
+            root = ET.fromstring(z.read("OPS/nav.xhtml"))
+            first = next(n for n in root.iter() if n.tag.rsplit("}", 1)[-1] == "a")
+            self.assertEqual("".join(first.itertext()), "Первая глава")
+            self.assertEqual(first[0].tag.rsplit("}", 1)[-1], "span")
+            self.assertEqual(first[0].attrib["class"], "toc")
+
+    def test_off_spine_nav_without_translated_target_heading_is_blocked(self):
+        source = self.mutate_epub(
+            make_epub(multi_nav=False), {
+                "OPS/story.xhtml": [(b"<p>Text one.</p>", b'<p id="plain">Text one.</p>')],
+                "OPS/nav.xhtml": [(b"story.xhtml#first", b"story.xhtml#plain")],
+            }
+        )
+        units = source_units(source)
+        with self.assertRaisesRegex(StructureError, "label cannot be translated"):
+            build(source, document_paths=[x[2] for x in units],
+                  translations=[x[1] for x in units],
+                  target_language="ru", title="Книга")
+
+    def test_off_spine_multitext_styled_label_is_rejected(self):
+        source = self.mutate_epub(
+            make_epub(multi_nav=False), {"OPS/nav.xhtml": [
+                (b">First chapter</a>", b">First <em>chapter</em></a>")
+            ]}
+        )
+        units = source_units(source)
+        with self.assertRaisesRegex(StructureError, "without losing formatting"):
+            build(source, document_paths=[x[2] for x in units],
+                  translations=[x[1] for x in units],
+                  target_language="ru", title="Книга")
+
+
+
 if __name__ == "__main__":
     unittest.main()
