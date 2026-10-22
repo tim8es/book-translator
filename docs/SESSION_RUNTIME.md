@@ -56,3 +56,18 @@ Record data in observations.json, using the following schema. The numbers here a
 The analyzer rejects nonidentical chapter sets/word counts, missing independent review, duplicate runs, invalid metrics, or missing single-chat baseline. For repeated trials it uses medians and reports reviewed words/hour, GitHub calls, user interventions, and major/critical issues. The provisional 2x throughput indicator is not proof of statistically significant literary improvement. Keep the source corpus, independent blind reviewer and evaluation rubric fixed across conditions.
 
 This first harness is deliberately observation-driven: ChatGPT session elapsed time and GitHub API call counts are not automatically instrumented. Do not claim results without measuring them.
+
+## Rolling independent Reviewer queue
+
+A long-lived Reviewer chat may poll
+`python scripts/book.py review-next BOOK --session-id REVIEWER_ID --json`.
+This read-only command chooses a currently translated chapter requiring review,
+limited to the active wave when one exists, and returns `claim`, `work`,
+`wait`, `blocked` or `complete`. It does not reserve a chapter, override
+claims or make PASS decisions. For each `claim`, obtain the durable reviewer
+claim and verify fresh status, source/translation acceptance and source coverage
+before accessing working inputs; for `work`, renew/verify claim expiry first.
+A competing reviewer may claim the same suggested chapter first: re-poll
+instead of forcing a write. `wait` means poll again after a Translator
+accepts another chapter. This is a read-only rolling alternative to regenerating
+full immutable workpacks for Reviewer, not a new coordination state machine.
