@@ -184,15 +184,37 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     known = {path for path, _ in manifest.values()}
     for resource_path, item in manifest.values():
         media_type = item.get("media-type", "").lower()
+        if resource_path not in names:
+            raise StructureError(f"missing manifested resource: {resource_path}")
         if (media_type in {"application/javascript", "text/javascript",
                            "application/ecmascript", "text/ecmascript", "image/svg+xml"}
-                or resource_path.lower().endswith((".js", ".mjs"))):
+                or resource_path.lower().endswith((".js", ".mjs", ".svg"))):
             raise StructureError(f"executable EPUB resource is unsupported: {resource_path}")
         if media_type == "text/html":
             raise StructureError(f"HTML resource without XHTML coverage is unsupported: {resource_path}")
-    for resource_path in names:
-        if resource_path.lower().endswith((".xhtml", ".html", ".htm")):
+        if media_type == "application/xhtml+xml":
+            # MIME identity is authoritative, not the filename suffix.
             _validate_xhtml_security(archive.read(resource_path), resource_path)
+        if media_type == "text/css":
+            css = archive.read(resource_path)
+            if (re.search(rb"@import\b", css, re.IGNORECASE)
+                    or re.search(rb"url\s*\(\s*['\"]?\s*(?:https?:)?//", css, re.IGNORECASE)
+                    or re.search(rb"(?:javascript:|data:image/svg|expression\s*\()", css, re.IGNORECASE)):
+                raise StructureError(f"remote or executable CSS is unsupported: {resource_path}")
+    for resource_path in names:
+        lowered = resource_path.lower()
+        if lowered.endswith((".js", ".mjs", ".svg")):
+            raise StructureError(f"unsafe undeclared executable archive member: {resource_path}")
+        if lowered.endswith((".xhtml", ".html", ".htm")):
+            _validate_xhtml_security(archive.read(resource_path), resource_path)
+        if lowered.endswith((".xml", ".opf", ".ncx")):
+            # Reject DTDs in non-narrative XML as well as XHTML.
+            if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", archive.read(resource_path), re.IGNORECASE):
+                raise StructureError(f"EPUB XML DTD/entities are unsupported: {resource_path}")
+        if lowered.endswith((".png", ".gif", ".jpg", ".jpeg", ".webp", ".bin")):
+            prefix = archive.read(resource_path)[:512].lstrip()
+            if re.search(rb"(?:<svg\b|<\?xml[^>]*\?>\s*<svg\b)", prefix, re.IGNORECASE):
+                raise StructureError(f"SVG masquerading as passive asset: {resource_path}")
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {path}")
@@ -210,6 +232,7 @@ def manifest_and_spine(archive: zipfile.ZipFile):
                     nonlocal count
                     if name(node.tag) == "nav":
                         count += 1
+                        _validate_navigation(node, path)
                         return
                     if node.text and node.text.strip():
                         raise StructureError(f"navigation has text outside its nav: {path}")
