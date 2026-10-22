@@ -56,3 +56,18 @@ Record data in observations.json, using the following schema. The numbers here a
 The analyzer rejects nonidentical chapter sets/word counts, missing independent review, duplicate runs, invalid metrics, or missing single-chat baseline. For repeated trials it uses medians and reports reviewed words/hour, GitHub calls, user interventions, and major/critical issues. The provisional 2x throughput indicator is not proof of statistically significant literary improvement. Keep the source corpus, independent blind reviewer and evaluation rubric fixed across conditions.
 
 This first harness is deliberately observation-driven: ChatGPT session elapsed time and GitHub API call counts are not automatically instrumented. Do not claim results without measuring them.
+\n## Optional runtime measurements
+
+Set `BOOK_TRANSLATOR_METRICS_FILE` to a local JSONL path **outside the book workspace**
+before running Python commands. The CLI records one event per invocation with
+the command name, exit code and measured execution time. When the GitHub REST
+client is used in the same instrumented runtime, each HTTP request also records
+its method, outcome and elapsed time; sensitive URLs, headers and bodies are
+not logged. The recorder makes no extra GitHub requests or changes to book data.
+
+Events are appended by Python, not authored or estimated by the AI agent.
+This measures only instrumented Python execution: it does **not** measure model
+thinking time, prompt/completion tokens, requests made by ChatGPT's own GitHub
+connector, or full chat-session wall time. Those require separate independently
+observable data sources. Keep the file in a trusted local directory; optional
+measurement failure must not block translation.
