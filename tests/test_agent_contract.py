@@ -42,6 +42,8 @@ class AgentContractTests(unittest.TestCase):
                 "orchestration": "docs/ORCHESTRATION.md",
                 "source_updates": "docs/SOURCE_UPDATES.md",
                 "translation": "docs/TRANSLATION.md",
+                "translator": "docs/TRANSLATOR.md",
+                "reviewer": "docs/REVIEWER.md",
                 "wave_worker": "docs/WAVE_WORKER.md",
                 "waves": "docs/WAVES.md",
             },
@@ -64,8 +66,8 @@ class AgentContractTests(unittest.TestCase):
             manifest["context_profiles"]["orchestrator"],
             ["global", "orchestration"],
         )
-        self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation"])
-        self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation"])
+        self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation", "translator"])
+        self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation", "reviewer"])
         self.assertNotIn("contract_read_order", manifest)
 
     def test_source_update_contract_preserves_revision_guarantees(self):
@@ -262,8 +264,13 @@ class AgentContractTests(unittest.TestCase):
         self.assertIn("review coverage", lowered)
 
     def test_translation_contract_preserves_literary_guarantees(self):
-        text = (PROJECT_ROOT / "docs" / "TRANSLATION.md").read_text(encoding="utf-8")
+        shared = (PROJECT_ROOT / "docs" / "TRANSLATION.md").read_text(encoding="utf-8")
+        translator = (PROJECT_ROOT / "docs" / "TRANSLATOR.md").read_text(encoding="utf-8")
+        reviewer = (PROJECT_ROOT / "docs" / "REVIEWER.md").read_text(encoding="utf-8")
+        text = shared + translator + reviewer
         lowered = text.lower()
+        self.assertIn("translator is a careful interpreter, not a co-author", translator.lower())
+        self.assertIn("PASS alone does not mutate `progress.json`", reviewer)
 
         for phrase in (
             "translator is a careful interpreter, not a co-author",

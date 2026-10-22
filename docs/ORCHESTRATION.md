@@ -4,7 +4,7 @@ This file is authoritative for Book Translator execution topology, durable state
 
 The Orchestrator loads the selected revision's `agent-manifest.json`, follows its `context_profiles` and action-specific `context_overlays`, and uses `metadata.json.workflow` as durable provenance. Load `source_update` instructions only when updating an edition, and `waves` instructions only when managing an active literary wave. `contract_read_order` is not a supported routing mechanism. Do not silently reinterpret an incompatible workspace as current state.
 
-Literary translation and review quality belong to `docs/TRANSLATION.md`. Commit boundaries and recovery-friendly history are defined in `docs/COMMIT_DISCIPLINE.md`.
+The literary fidelity standard lives in `docs/TRANSLATION.md`; role-specific instructions live in `docs/TRANSLATOR.md` and `docs/REVIEWER.md`. Commit boundaries and recovery-friendly history are defined in `docs/COMMIT_DISCIPLINE.md`.
 
 ## Execution topology
 
@@ -245,7 +245,7 @@ python scripts/book.py accept-translation <book-slug> <chapter> \
 
 ## Reviewer boundary
 
-Reviewer context contains the exact source, canonical translation, current glossary/style decisions, bounded continuity context, and `docs/TRANSLATION.md`. It does not receive hidden Translator reasoning.
+Reviewer context contains the exact source, canonical translation, current glossary/style decisions, bounded continuity context, and the shared `docs/TRANSLATION.md` and role-specific `docs/REVIEWER.md` contracts. It does not receive hidden Translator reasoning.
 
 The Reviewer outcome is `PASS` or `CORRECTIONS_REQUIRED`. Chat output alone is not authoritative review coverage. Record the outcome while the Reviewer claim is live:
 
@@ -322,5 +322,5 @@ Transport failures or ambiguous mutations must not be blindly retried. Re-read a
 
 Optional v2 review reports bind exact source/translation excerpts and immutable
 finding IDs to the existing review ledger. Same-source follow-up reviews must
-explicitly address each prior unresolved v2 finding. See TRANSLATION.md for
+explicitly address each prior unresolved v2 finding. See REVIEWER.md for
 the evidence contract. Review reports never directly modify translations.

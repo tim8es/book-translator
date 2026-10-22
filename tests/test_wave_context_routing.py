@@ -50,7 +50,8 @@ class WaveRoleContextTests(unittest.TestCase):
         plan = _wave_load_plan(decision, status, wave, self.routing)
         self.assertEqual(plan["role"], "translator")
         self.assertEqual(plan["instruction_paths"], [
-            "AGENTS.md", "docs/TRANSLATION.md", "docs/WAVE_WORKER.md",
+            "AGENTS.md", "docs/TRANSLATION.md", "docs/TRANSLATOR.md",
+            "docs/WAVE_WORKER.md",
         ])
         self.assertNotIn("docs/ORCHESTRATION.md", plan["instruction_paths"])
         self.assertNotIn("docs/WAVES.md", plan["instruction_paths"])
@@ -77,7 +78,11 @@ class WaveRoleContextTests(unittest.TestCase):
         self.assertEqual([v["kind"] for v in reviewer["inputs"]], [
             "original", "glossary", "style_guide", "translation", "review_ledger",
         ])
-        self.assertEqual(reviewer["instruction_paths"], translator["instruction_paths"])
+        self.assertEqual(reviewer["instruction_paths"], [
+            "AGENTS.md", "docs/TRANSLATION.md", "docs/REVIEWER.md",
+            "docs/WAVE_WORKER.md",
+        ])
+        self.assertNotIn("docs/TRANSLATOR.md", reviewer["instruction_paths"])
         # Role routing has no retained state from the previous role.
         decision["role"] = "translator"
         decision["operation"] = "correct_translation"

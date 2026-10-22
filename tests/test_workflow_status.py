@@ -176,7 +176,7 @@ class WorkflowStatusTests(unittest.TestCase):
         self.assertEqual(resume["context"]["workflow_revision"], "rev-1")
         self.assertEqual(
             resume["context"]["contracts"],
-            ["AGENTS.md", "docs/TRANSLATION.md"],
+            ["AGENTS.md", "docs/TRANSLATION.md", "docs/REVIEWER.md"],
         )
         self.assertEqual(
             resume["context"]["files"],
