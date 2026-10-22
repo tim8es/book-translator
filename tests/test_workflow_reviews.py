@@ -235,6 +235,38 @@ class WorkflowReviewTests(unittest.TestCase):
             "PASS",
         )
 
+    def test_v2_corrections_snapshot_is_immutable_and_hash_bound(self):
+        self.claim()
+        from workflow.review_delta import baseline_path, compare, sha
+        original = self.artifacts["translated/001-one.md"]
+        report = {
+            "evidence_version": 2, "context": "bounded_context",
+            "checks": dict.fromkeys(
+                ["coverage", "meaning", "terminology", "style", "structure"], True,
+            ),
+            "findings": [{
+                "id": "meaning-1", "category": "meaning", "severity": "major",
+                "detail": "Incorrect rendering.", "resolved": False,
+                "source_anchor": {"quote": "Source.", "occurrence": 0},
+                "translation_anchor": {"quote": "Перевод.", "occurrence": 0},
+                "resolves": None,
+            }],
+        }
+        manager = self.manager()
+        manager.record(
+            self.progress, self.progress_revision, self.metadata, 1,
+            outcome="CORRECTIONS_REQUIRED", reviewer_session_id="reviewer-a",
+            quality_report=report,
+        )
+        saved = self.storage.read(baseline_path(sha(original))).content
+        self.assertEqual(saved, original)
+        changed = original.replace("Перевод.".encode(), "Уточнённый перевод.".encode())
+        scope = compare(saved, changed)
+        self.assertEqual(scope["mode"], "full")  # tiny chapter: change exceeds 25% safety threshold
+        self.assertEqual(scope["change_groups"], 1)
+        self.assertNotIn("PASS", str(scope))
+        self.assertEqual(compare(saved, saved)["mode"], "full")
+
     def test_bulk_resolution_reads_review_ledger_once(self):
         manager = self.manager()
         original = manager._load_ledger
