@@ -348,7 +348,7 @@ def segments(root: ET.Element) -> list[str]:
 
 
 def chapter_text(raw: bytes) -> tuple[str, str, int]:
-    root = ET.fromstring(raw)
+    root = _safe_xml(raw, "spine XHTML")
     chunks = segments(root)
     titles = [("".join(n.itertext()).strip()) for n in _leaves(root) if name(n.tag) in {"h1", "h2"}]
     title = next((t for t in titles if t), "Chapter")
@@ -456,10 +456,13 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         return replaced.get(path) or archive.read(path)
     seen_ids = {}
     paths = []
-    for filename in names:
-        if not filename.lower().endswith((".xhtml", ".html", ".htm")):
-            continue
-        root = ET.fromstring(source(filename))
+    # OPF media-type is authoritative for reading XHTML, not its filename.
+    _, _, manifest, _ = manifest_and_spine(archive)
+    xhtml_paths = {path for path, item in manifest.values()
+                   if item.get("media-type") == "application/xhtml+xml"}
+    xhtml_paths |= {p for p in names if p.lower().endswith((".xhtml", ".html", ".htm"))}
+    for filename in sorted(xhtml_paths):
+        root = _safe_xml(source(filename), filename)
         identifiers = [x.get("id") for x in root.iter() if x.get("id")]
         if len(identifiers) != len(set(identifiers)):
             raise StructureError(f"duplicate internal XHTML anchor id: {filename}")
@@ -467,21 +470,22 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         paths.append((filename, root))
     for path, root in paths:
         for element in root.iter():
-            if name(element.tag) not in {"a", "area"}:
-                continue
-            href = element.get("href")
-            if not href:
-                continue
-            url = urlsplit(href)
-            if url.scheme or href.startswith("//"):
-                if url.scheme.lower() not in {"https", "http", "mailto"}:
-                    raise StructureError(f"unsafe external link {href!r}")
-                continue
-            target = member_path(path, url.path) if url.path else path
-            if target not in names:
-                raise StructureError(f"broken internal link target {path}: {href}")
-            if url.fragment and target in seen_ids and unquote(url.fragment) not in seen_ids[target]:
-                raise StructureError(f"broken internal anchor {path}: {href}")
+            tag = name(element.tag)
+            for attr in ("href", "src"):
+                uri = element.get(attr)
+                if uri is None or not uri.strip():
+                    continue
+                url = urlsplit(uri.strip())
+                activated = tag in {"a", "area"} and attr == "href"
+                if url.scheme or url.netloc or uri.startswith("//"):
+                    if activated and url.scheme.lower() in {"https", "http", "mailto"}:
+                        continue
+                    raise StructureError(f"remote or unsafe automatic resource: {path}: {uri}")
+                target = member_path(path, url.path) if url.path else path
+                if target not in names:
+                    raise StructureError(f"broken internal resource target {path}: {uri}")
+                if url.fragment and target in seen_ids and unquote(url.fragment) not in seen_ids[target]:
+                    raise StructureError(f"broken internal anchor {path}: {uri}")
 
 
 def validate_structural_epub(content: bytes, *, expected_documents: int):
@@ -506,7 +510,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             raise StructureError("source EPUB spine changed since extraction")
         headings: dict[str, str] = {}
         for path, markdown in zip(paths, translations):
-            root = ET.fromstring(archive.read(path))
+            root = _safe_xml(archive.read(path), path)
             blocks = _leaves(root)
             translated = parse_translation(markdown, len(blocks))
             for block, content in zip(blocks, translated):
@@ -546,7 +550,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 continue
             # A nav document may itself be a translated spine document.
             # Never re-read the original and silently discard that translation.
-            nav = ET.fromstring(replacements.get(path, archive.read(path)))
+            nav = _safe_xml(replacements.get(path, archive.read(path)), path)
             for a in nav.iter():
                 if name(a.tag) != "a" or not a.get("href"):
                     continue
@@ -567,7 +571,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
         for ncx_path, item in manifest.values():
             if item.get("media-type") != "application/x-dtbncx+xml":
                 continue
-            ncx = ET.fromstring(archive.read(ncx_path))
+            ncx = _safe_xml(archive.read(ncx_path), ncx_path)
             for point in ncx.iter():
                 if name(point.tag) != "navpoint":
                     continue
@@ -584,7 +588,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 if target not in archive.namelist():
                     raise StructureError(f"missing NCX navigation target: {target}")
                 if url.fragment:
-                    target_root = ET.fromstring(replacements.get(target, archive.read(target)))
+                    target_root = _safe_xml(replacements.get(target, archive.read(target)), target)
                     if unquote(url.fragment) not in {n.get("id") for n in target_root.iter()}:
                         raise StructureError(f"missing NCX navigation anchor: {url.fragment}")
                 title_at_target = (headings.get(f"{target}#{unquote(url.fragment)}")
@@ -622,7 +626,7 @@ def audit_structural(source: Path, chapters: Sequence[object]) -> dict:
             if content != expected:
                 raise StructureError(f"extracted chapter {index} differs from original XHTML segments")
             raw = archive.read(path)
-            root = ET.fromstring(raw)
+            root = _safe_xml(raw, path)
             blocks = _leaves(root)
             extracted = parse_translation(content, len(blocks))
             # Do not reuse _inline_source to establish independent text coverage:
