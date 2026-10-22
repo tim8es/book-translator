@@ -30,6 +30,7 @@ class WorkflowReviewValidationTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / "scripts" / "book.py")
+        shutil.copy2(SCRIPTS / "corpus.py", self.repo / "scripts" / "corpus.py")
         shutil.copytree(WORKFLOW, self.repo / "scripts" / "workflow")
         (self.repo / ".book-translator-install.json").write_text(
             json.dumps(
