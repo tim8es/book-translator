@@ -487,16 +487,23 @@ class WaveManager:
             frozen_seal = frozen.get("publication_seal")
             if not isinstance(frozen_seal, Mapping):
                 raise WaveError("frozen reconciliation lacks verified publication seal")
-            current_seal = _reviewed_artifact_seal(
-                fresh_status(), manifest, read_source, read_translation,
-            )
-            if current_seal != frozen_seal:
-                raise WaveError(
-                    "wave inputs changed since reconciliation; do not publish stale literary memory"
-                )
             pointer, pointer_version = _json_read(self.storage, MEMORY_ACTIVE)
             if pointer["revision"] not in {manifest["memory_revision"], next_snapshot["revision"]}:
                 raise WaveError("memory changed outside the current wave")
+            if state["phase"] == "CLOSED":
+                # Committed publication may have been interrupted while removing
+                # the active pointer. Only clean up if publication is durable.
+                # Subsequent book edits do not invalidate a *committed* wave.
+                if pointer["revision"] != next_snapshot["revision"]:
+                    raise WaveError("CLOSED wave has no published memory revision")
+            else:
+                current_seal = _reviewed_artifact_seal(
+                    fresh_status(), manifest, read_source, read_translation,
+                )
+                if current_seal != frozen_seal:
+                    raise WaveError(
+                        "wave inputs changed since reconciliation; do not publish stale literary memory"
+                    )
 
             # Publish immutable artifacts before switching the authoritative pointer.
             _create(self.storage, _snapshot(next_snapshot["revision"]), next_snapshot)
