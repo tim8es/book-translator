@@ -36,6 +36,13 @@ class ReviewerQueueTests(unittest.TestCase):
         s["units"][2]["lifecycle"] = "reviewed"
         self.assertEqual(next_review(s, "r", wave_units={"chapter-000003"})["action"], "complete")
 
+    def test_requested_corrections_belong_to_translator_not_reviewer(self):
+        s = state()
+        s["units"][1]["review"] = "corrections_required"
+        self.assertEqual(next_review(s, "reviewer-a")["unit_id"], "chapter-000003")
+        s["units"][2]["lifecycle"] = "reviewed"
+        self.assertEqual(next_review(s, "reviewer-a")["action"], "wait")
+
     def test_invalid_preflight_blocks(self):
         s = state()
         s["valid"] = False

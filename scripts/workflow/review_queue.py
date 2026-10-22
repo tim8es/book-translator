@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
+from .operations import next_unit_operation
+
 
 def next_review(status: Mapping, session_id: str, *, wave_units=None) -> dict:
     base = {"schema_version": 1, "book_slug": status.get("book_slug"),
@@ -29,9 +31,7 @@ def next_review(status: Mapping, session_id: str, *, wave_units=None) -> dict:
             continue
         if unit["lifecycle"] == "reviewed":
             continue
-        if unit["lifecycle"] == "translated" and unit["review"] in {
-            "missing", "corrections_required", "stale", "unreviewed",
-        }:
+        if next_unit_operation(unit["lifecycle"], unit["review"]) == "review":
             claim = active_claims.get(unit["unit_id"])
             if claim:
                 if claim.get("session_id") == session_id and claim.get("role") == "reviewer":
