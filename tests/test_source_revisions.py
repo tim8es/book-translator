@@ -414,5 +414,68 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertEqual(after["chapters"][2]["status"], "extracted")
 
 
+    def test_structural_epub_new_edition_must_recertify_before_resuming(self):
+        """A source revision never inherits stale XHTML layout/coverage as PASS."""
+        source = self.make_epub("novel.epub", [("One", "Alpha."), ("Two", "Beta.")])
+        self.run_cli("extract", str(source), "--slug", "sample", "--target-language", "ru")
+        book = self.repo / "books" / "sample"
+        original_layout = (book / "layout" / "structure.json").read_bytes()
+        original_report = json.loads((book / "source-coverage.json").read_text())
+        self.assertEqual(original_report["validator"], "epub-xhtml-structure-v2")
+
+        later = self.make_epub(
+            "novel-v2.epub",
+            [("One", "Alpha."), ("Two", "Beta."), ("Three", "Gamma.")],
+        )
+        result = json.loads(self.run_cli(
+            "update-source", "sample", str(later), "--json"
+        ).stdout)
+        self.assertEqual(result["state"], "promoted")
+        # No evidence may be automatically inherited for the changed source EPUB.
+        stale = self.run_cli("validate", "sample", expect=1)
+        self.assertIn("coverage", (stale.stdout + stale.stderr).lower())
+        self.assertEqual((book / "layout" / "structure.json").read_bytes(), original_layout)
+        self.run_cli("source-coverage", "sample", "--source", str(later),
+                     "--record", "--replace-stale")
+        self.run_cli("validate", "sample")
+        layout = json.loads((book / "layout" / "structure.json").read_text())
+        coverage = json.loads((book / "source-coverage.json").read_text())
+        self.assertEqual(len(layout["documents"]), 3)
+        self.assertEqual(coverage["chapter_count"], 3)
+        self.assertEqual(coverage["source_sha256"], layout["source_sha256"])
+        self.assertEqual(coverage["validator"], "epub-xhtml-structure-v2")
+        self.assertEqual(
+            json.loads((book / "source-coverage-history" /
+                        (original_report["source_sha256"] + ".json")).read_text()),
+            original_report,
+        )
+        progress = json.loads((book / "progress.json").read_text())
+        self.assertEqual(progress["chapters"][-1]["status"], "extracted")
+        self.assertNotIn("translation_acceptance", progress["chapters"][-1])
+
+    def test_private_structural_source_update_recert_uses_supplied_original(self):
+        source = self.make_epub("private.epub", [("One", "Alpha.")])
+        self.run_cli("extract", str(source), "--slug", "sample",
+                     "--target-language", "ru", "--private-source")
+        book = self.repo / "books" / "sample"
+        self.assertFalse((book / "source" / source.name).exists())
+        later = self.make_epub("private-v2.epub", [("One", "Alpha."), ("Two", "Beta.")])
+        payload = json.loads(self.run_cli(
+            "update-source", "sample", str(later), "--json"
+        ).stdout)
+        self.assertEqual(payload["state"], "promoted")
+        self.run_cli("validate", "sample", expect=1)
+        self.run_cli("source-coverage", "sample", "--source", str(later),
+                     "--record", "--replace-stale")
+        self.run_cli("validate", "sample")
+        meta = json.loads((book / "metadata.json").read_text())
+        self.assertEqual(meta["source"]["storage_mode"], "private_external")
+        self.assertFalse((book / "source" / meta["source_file"]).exists())
+        self.assertEqual(
+            json.loads((book / "layout" / "structure.json").read_text())["source_sha256"],
+            meta["source"]["sha256"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
