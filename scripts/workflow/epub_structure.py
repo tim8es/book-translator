@@ -61,24 +61,69 @@ def member_path(base: str, href: str) -> str:
     return path
 
 
+def _parse_xml(raw: bytes, path: str = "EPUB XML") -> ET.Element:
+    """Never expand user-supplied XML internal entities in EPUB documents."""
+    if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", raw, flags=re.IGNORECASE):
+        raise StructureError(f"EPUB XML DTD/entities are unsupported: {path}")
+    try:
+        return ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise StructureError(f"invalid XML in {path}: {exc}") from exc
+
+
 def _validate_xhtml_security(raw: bytes, path: str) -> None:
-    """Fail closed on executable XHTML and unsafe URI/attribute constructs."""
-    if re.search(rb"<!\\s*(?:DOCTYPE|ENTITY)\\b", raw, re.IGNORECASE):
-        raise StructureError(f"XHTML DTD/entities are not supported: {path}")
-    root = ET.fromstring(raw)
-    disallowed = {"script", "iframe", "object", "embed", "form", "input",
-                  "canvas", "audio", "video", "svg", "math"}
+    """Reject active XHTML and any automatically loaded remote resource."""
+    root = _parse_xml(raw, path)
+    active = {"script", "iframe", "object", "embed", "form", "input",
+              "canvas", "audio", "video", "svg", "math", "source"}
     for element in root.iter():
         tag = name(element.tag)
-        if tag in disallowed:
+        if tag in active:
             raise StructureError(f"unsupported active XHTML element <{tag}>: {path}")
         for attribute, value in element.attrib.items():
             key = name(attribute)
-            if key.startswith("on") or key in {"srcdoc", "base"}:
+            if key.startswith("on") or key in {"srcdoc", "base", "srcset", "poster", "data"}:
                 raise StructureError(f"unsafe XHTML attribute {key}: {path}")
             if key in {"href", "src", "action", "formaction"}:
-                if urlsplit(value.strip()).scheme.lower() in {"javascript", "data", "file", "vbscript"}:
+                url = urlsplit(value.strip())
+                if url.scheme.lower() in {"javascript", "data", "file", "vbscript"}:
                     raise StructureError(f"unsafe XHTML URI in {key}: {path}")
+                # HTTP(S) and mailto are user-activated hyperlinks only; image,
+                # stylesheet, and other subresource loads must be package-local.
+                is_link = tag in {"a", "area"} and key == "href"
+                if (not is_link and (url.scheme or url.netloc or value.strip().startswith("//"))):
+                    raise StructureError(f"remote XHTML subresource forbidden: {path} {key}")
+                if is_link and url.scheme and url.scheme.lower() not in {"http", "https", "mailto"}:
+                    raise StructureError(f"unsafe external hyperlink: {path}")
+
+
+def _validate_navigation(nav: ET.Element, path: str) -> None:
+    """Navigation can contain link labels, but never arbitrary off-spine prose."""
+    allowable = {"nav", "ol", "ul", "li", "a", "span", "em", "strong",
+                 "b", "i", "small", "br", "h1", "h2", "h3", "h4", "h5", "h6"}
+    headings = {"h1", "h2", "h3", "h4", "h5", "h6"}
+    link_count = 0
+
+    def visit(node: ET.Element, in_link: bool = False, in_heading: bool = False) -> None:
+        nonlocal link_count
+        tag = name(node.tag)
+        if tag not in allowable:
+            raise StructureError(f"off-spine navigation has unsupported prose element <{tag}>: {path}")
+        linked = in_link or tag == "a"
+        heading = in_heading or tag in headings
+        if tag == "a":
+            if not node.get("href"):
+                raise StructureError(f"navigation link without target: {path}")
+            link_count += 1
+        if (node.text or "").strip() and not (linked or heading):
+            raise StructureError(f"off-spine navigation has unmapped prose: {path}")
+        for child in node:
+            visit(child, linked, heading)
+            if (child.tail or "").strip() and not (linked or heading):
+                raise StructureError(f"off-spine navigation has tail prose: {path}")
+    visit(nav)
+    if link_count < 1:
+        raise StructureError(f"off-spine navigation has no accessible link: {path}")
 
 
 def manifest_and_spine(archive: zipfile.ZipFile):
@@ -107,12 +152,12 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     # content but emit a standards-compliant first, uncompressed member.
     if "mimetype" in names and archive.read("mimetype") != b"application/epub+zip":
         raise StructureError("invalid EPUB mimetype")
-    container = ET.fromstring(archive.read("META-INF/container.xml"))
+    container = _parse_xml(archive.read("META-INF/container.xml"))
     roots = [e.attrib.get("full-path") for e in container.iter() if name(e.tag) == "rootfile"]
     if len(roots) != 1 or not roots[0] or roots[0].startswith("/") or ".." in roots[0].split("/"):
         raise StructureError("ambiguous or unsafe package path")
     opf_path = roots[0]
-    package = ET.fromstring(archive.read(opf_path))
+    package = _parse_xml(archive.read(opf_path))
     manifest = {}
     for item in package.iter():
         if name(item.tag) != "item":
@@ -139,15 +184,37 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     known = {path for path, _ in manifest.values()}
     for resource_path, item in manifest.values():
         media_type = item.get("media-type", "").lower()
+        if resource_path not in names:
+            raise StructureError(f"missing manifested resource: {resource_path}")
         if (media_type in {"application/javascript", "text/javascript",
                            "application/ecmascript", "text/ecmascript", "image/svg+xml"}
-                or resource_path.lower().endswith((".js", ".mjs"))):
+                or resource_path.lower().endswith((".js", ".mjs", ".svg"))):
             raise StructureError(f"executable EPUB resource is unsupported: {resource_path}")
         if media_type == "text/html":
             raise StructureError(f"HTML resource without XHTML coverage is unsupported: {resource_path}")
-    for resource_path in names:
-        if resource_path.lower().endswith((".xhtml", ".html", ".htm")):
+        if media_type == "application/xhtml+xml":
+            # MIME identity is authoritative, not the filename suffix.
             _validate_xhtml_security(archive.read(resource_path), resource_path)
+        if media_type == "text/css":
+            css = archive.read(resource_path)
+            if (re.search(rb"@import\b", css, re.IGNORECASE)
+                    or re.search(rb"url\s*\(\s*['\"]?\s*(?:https?:)?//", css, re.IGNORECASE)
+                    or re.search(rb"(?:javascript:|data:image/svg|expression\s*\()", css, re.IGNORECASE)):
+                raise StructureError(f"remote or executable CSS is unsupported: {resource_path}")
+    for resource_path in names:
+        lowered = resource_path.lower()
+        if lowered.endswith((".js", ".mjs", ".svg")):
+            raise StructureError(f"unsafe undeclared executable archive member: {resource_path}")
+        if lowered.endswith((".xhtml", ".html", ".htm")):
+            _validate_xhtml_security(archive.read(resource_path), resource_path)
+        if lowered.endswith((".xml", ".opf", ".ncx")):
+            # Reject DTDs in non-narrative XML as well as XHTML.
+            if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", archive.read(resource_path), re.IGNORECASE):
+                raise StructureError(f"EPUB XML DTD/entities are unsupported: {resource_path}")
+        if lowered.endswith((".png", ".gif", ".jpg", ".jpeg", ".webp", ".bin")):
+            prefix = archive.read(resource_path)[:512].lstrip()
+            if re.search(rb"(?:<svg\b|<\?xml[^>]*\?>\s*<svg\b)", prefix, re.IGNORECASE):
+                raise StructureError(f"SVG masquerading as passive asset: {resource_path}")
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {path}")
@@ -155,7 +222,7 @@ def manifest_and_spine(archive: zipfile.ZipFile):
         if path not in names:
             raise StructureError(f"missing manifested resource: {path}")
         if item.get("media-type") == "application/xhtml+xml" and path not in spine:
-            root = ET.fromstring(archive.read(path))
+            root = _parse_xml(archive.read(path))
             body = next((e for e in root.iter() if name(e.tag) == "body"), None)
             if body is None:
                 raise StructureError(f"off-spine XHTML is missing body: {path}")
@@ -165,6 +232,7 @@ def manifest_and_spine(archive: zipfile.ZipFile):
                     nonlocal count
                     if name(node.tag) == "nav":
                         count += 1
+                        _validate_navigation(node, path)
                         return
                     if node.text and node.text.strip():
                         raise StructureError(f"navigation has text outside its nav: {path}")
@@ -268,7 +336,7 @@ def segments(root: ET.Element) -> list[str]:
 
 
 def chapter_text(raw: bytes) -> tuple[str, str, int]:
-    root = ET.fromstring(raw)
+    root = _parse_xml(raw)
     chunks = segments(root)
     titles = [("".join(n.itertext()).strip()) for n in _leaves(root) if name(n.tag) in {"h1", "h2"}]
     title = next((t for t in titles if t), "Chapter")
@@ -376,10 +444,12 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         return replaced.get(path) or archive.read(path)
     seen_ids = {}
     paths = []
-    for filename in names:
-        if not filename.lower().endswith((".xhtml", ".html", ".htm")):
-            continue
-        root = ET.fromstring(source(filename))
+    _, _, manifest, _ = manifest_and_spine(archive)
+    xhtml_paths = {p for p, item in manifest.values()
+                   if item.get("media-type") == "application/xhtml+xml"}
+    xhtml_paths.update(p for p in names if p.lower().endswith((".xhtml", ".html", ".htm")))
+    for filename in sorted(xhtml_paths):
+        root = _parse_xml(source(filename), filename)
         identifiers = [x.get("id") for x in root.iter() if x.get("id")]
         if len(identifiers) != len(set(identifiers)):
             raise StructureError(f"duplicate internal XHTML anchor id: {filename}")
@@ -387,21 +457,26 @@ def _check_links(archive: zipfile.ZipFile, replaced: Mapping[str, bytes]):
         paths.append((filename, root))
     for path, root in paths:
         for element in root.iter():
-            if name(element.tag) not in {"a", "area"}:
-                continue
-            href = element.get("href")
-            if not href:
-                continue
-            url = urlsplit(href)
-            if url.scheme or href.startswith("//"):
-                if url.scheme.lower() not in {"https", "http", "mailto"}:
-                    raise StructureError(f"unsafe external link {href!r}")
-                continue
-            target = member_path(path, url.path) if url.path else path
-            if target not in names:
-                raise StructureError(f"broken internal link target {path}: {href}")
-            if url.fragment and target in seen_ids and unquote(url.fragment) not in seen_ids[target]:
-                raise StructureError(f"broken internal anchor {path}: {href}")
+            tag = name(element.tag)
+            checks = []
+            if element.get("href") is not None:
+                checks.append(("href", element.get("href"), tag in {"a", "area"}))
+            if element.get("src") is not None:
+                checks.append(("src", element.get("src"), False))
+            for attribute, href, user_activated in checks:
+                if not href:
+                    raise StructureError(f"empty XHTML {attribute} resource reference: {path}")
+                url = urlsplit(href)
+                if url.scheme or url.netloc or href.startswith("//"):
+                    if (not user_activated or url.netloc and not url.scheme
+                            or url.scheme.lower() not in {"https", "http", "mailto"}):
+                        raise StructureError(f"unsafe remote XHTML subresource {href!r} in {path}")
+                    continue
+                target = member_path(path, url.path) if url.path else path
+                if target not in names:
+                    raise StructureError(f"broken internal link/resource target {path}: {href}")
+                if url.fragment and target in seen_ids and unquote(url.fragment) not in seen_ids[target]:
+                    raise StructureError(f"broken internal anchor {path}: {href}")
 
 
 def validate_structural_epub(content: bytes, *, expected_documents: int):
@@ -426,7 +501,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             raise StructureError("source EPUB spine changed since extraction")
         headings: dict[str, str] = {}
         for path, markdown in zip(paths, translations):
-            root = ET.fromstring(archive.read(path))
+            root = _parse_xml(archive.read(path))
             blocks = _leaves(root)
             translated = parse_translation(markdown, len(blocks))
             for block, content in zip(blocks, translated):
@@ -466,7 +541,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 continue
             # A nav document may itself be a translated spine document.
             # Never re-read the original and silently discard that translation.
-            nav = ET.fromstring(replacements.get(path, archive.read(path)))
+            nav = _parse_xml(replacements.get(path, archive.read(path)))
             for a in nav.iter():
                 if name(a.tag) != "a" or not a.get("href"):
                     continue
@@ -487,7 +562,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
         for ncx_path, item in manifest.values():
             if item.get("media-type") != "application/x-dtbncx+xml":
                 continue
-            ncx = ET.fromstring(archive.read(ncx_path))
+            ncx = _parse_xml(archive.read(ncx_path))
             for point in ncx.iter():
                 if name(point.tag) != "navpoint":
                     continue
@@ -504,7 +579,7 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                 if target not in archive.namelist():
                     raise StructureError(f"missing NCX navigation target: {target}")
                 if url.fragment:
-                    target_root = ET.fromstring(replacements.get(target, archive.read(target)))
+                    target_root = _parse_xml(replacements.get(target, archive.read(target)))
                     if unquote(url.fragment) not in {n.get("id") for n in target_root.iter()}:
                         raise StructureError(f"missing NCX navigation anchor: {url.fragment}")
                 title_at_target = (headings.get(f"{target}#{unquote(url.fragment)}")
@@ -542,7 +617,7 @@ def audit_structural(source: Path, chapters: Sequence[object]) -> dict:
             if content != expected:
                 raise StructureError(f"extracted chapter {index} differs from original XHTML segments")
             raw = archive.read(path)
-            root = ET.fromstring(raw)
+            root = _parse_xml(raw)
             blocks = _leaves(root)
             extracted = parse_translation(content, len(blocks))
             # Do not reuse _inline_source to establish independent text coverage:
