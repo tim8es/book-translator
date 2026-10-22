@@ -35,7 +35,9 @@ ChatGPT GitHub sessions can inspect authoritatively stored files, workpacks, cla
 
 `agent-manifest.json.context_profiles` selects base instructions by role; when
 an ACTIVE wave exists, apply only that role's `context_overlays.waves`. For
-Translator/Reviewer this adds the short [WAVE_WORKER.md](WAVE_WORKER.md) contract.
+Translator/Reviewer this adds the short [WAVE_WORKER.md](WAVE_WORKER.md) contract;
+for Orchestrator it routes to this document. Do not load wave instructions
+outside an active wave.
 
 `wave-next` now includes `load_plan` for `claim` and `work` actions.
 It lists instruction paths, pinned glossary/style revisions, original source,

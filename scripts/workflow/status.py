@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
+
+from .context_routing import ContextRoutingError, contract_paths, read_manifest
 
 from .claims import ClaimManager, unit_id_for_chapter
 from .coordination import FINALIZATION_PATH
@@ -39,6 +42,7 @@ class StatusResolver:
     ):
         self.repository = repository
         self._artifact_reader = artifact_reader
+        self._routing: dict | None = None
 
     def status(
         self,
@@ -362,21 +366,21 @@ class StatusResolver:
             return "review"
         return None
 
-    @staticmethod
     def _context(
+        self,
         operation: str,
         unit: Mapping[str, Any] | None,
         status: Mapping[str, Any],
     ) -> dict[str, Any]:
-        if operation in {"translate", "correct_translation"}:
-            role = "translator"
-            contracts = ["AGENTS.md", "docs/TRANSLATION.md"]
-        elif operation == "review":
-            role = "reviewer"
-            contracts = ["AGENTS.md", "docs/TRANSLATION.md"]
-        else:
-            role = "orchestrator"
-            contracts = ["AGENTS.md", "docs/ORCHESTRATION.md"]
+        role = ("reviewer" if operation == "review"
+                else "translator" if operation in {"translate", "correct_translation"}
+                else "orchestrator")
+        try:
+            if self._routing is None:
+                self._routing = read_manifest(Path(__file__).resolve().parents[2])
+            contracts = contract_paths(self._routing, role)
+        except ContextRoutingError as exc:
+            raise StatusError(f"cannot resolve {role} instructions: {exc}") from exc
 
         files = ["metadata.json", "progress.json"]
         if role in {"translator", "reviewer"}:

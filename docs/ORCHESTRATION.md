@@ -2,7 +2,7 @@
 
 This file is authoritative for Book Translator execution topology, durable state transitions, claims, review evidence, source integrity, resume behavior, finalization, and output sequencing. The repository supports one current workflow contract; older workspace formats must be converted outside the production runtime before use.
 
-The Orchestrator loads the current `agent-manifest.json`, follows its `context_profiles`, and uses `metadata.json.workflow` as durable provenance. `contract_read_order` is not a supported routing mechanism. Do not silently reinterpret an incompatible workspace as current state.
+The Orchestrator loads the selected revision's `agent-manifest.json`, follows its `context_profiles` and action-specific `context_overlays`, and uses `metadata.json.workflow` as durable provenance. Load `source_update` instructions only when updating an edition, and `waves` instructions only when managing an active literary wave. `contract_read_order` is not a supported routing mechanism. Do not silently reinterpret an incompatible workspace as current state.
 
 Literary translation and review quality belong to `docs/TRANSLATION.md`. Commit boundaries and recovery-friendly history are defined in `docs/COMMIT_DISCIPLINE.md`.
 

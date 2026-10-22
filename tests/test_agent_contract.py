@@ -43,21 +43,26 @@ class AgentContractTests(unittest.TestCase):
                 "source_updates": "docs/SOURCE_UPDATES.md",
                 "translation": "docs/TRANSLATION.md",
                 "wave_worker": "docs/WAVE_WORKER.md",
+                "waves": "docs/WAVES.md",
             },
         )
         self.assertEqual(
             manifest["context_overlays"],
-            {"waves": {
-                "translator": ["wave_worker"],
-                "reviewer": ["wave_worker"],
-            }},
+            {
+                "waves": {
+                    "translator": ["wave_worker"],
+                    "reviewer": ["wave_worker"],
+                    "orchestrator": ["waves"],
+                },
+                "source_update": {"orchestrator": ["source_updates"]},
+            },
         )
         self.assertNotIn("wave_worker", manifest["context_profiles"]["translator"])
         self.assertNotIn("wave_worker", manifest["context_profiles"]["reviewer"])
         self.assertEqual(manifest["context_profiles"]["bootstrap"], ["global", "setup"])
         self.assertEqual(
             manifest["context_profiles"]["orchestrator"],
-            ["global", "orchestration", "source_updates"],
+            ["global", "orchestration"],
         )
         self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation"])
         self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation"])
@@ -92,7 +97,11 @@ class AgentContractTests(unittest.TestCase):
         self.assertNotIn("orchestration", profiles["bootstrap"])
         self.assertNotIn("setup", profiles["orchestrator"])
         self.assertNotIn("translation", profiles["orchestrator"])
-        self.assertIn("source_updates", profiles["orchestrator"])
+        self.assertNotIn("source_updates", profiles["orchestrator"])
+        self.assertEqual(
+            self.load_manifest()["context_overlays"]["source_update"]["orchestrator"],
+            ["source_updates"],
+        )
         self.assertNotIn("setup", profiles["translator"])
         self.assertNotIn("orchestration", profiles["translator"])
         self.assertNotIn("setup", profiles["reviewer"])

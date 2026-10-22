@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
 
+from .context_routing import ContextRoutingError, contract_paths, read_manifest
 from .filesystem import FilesystemStorage
 from .literary_memory import MemoryError, context_pack
 from .session_planner import SessionPlanError, plan_sessions
@@ -43,28 +44,10 @@ def _wave_load_plan(decision: Mapping[str, object], status: Mapping[str, object]
     role = decision.get("role")
     if role not in {"translator", "reviewer"}:
         raise WaveError("wave work action requires a recognized worker role")
-    contracts = routing.get("contracts")
-    profiles = routing.get("context_profiles")
-    overlays = routing.get("context_overlays")
-    if not isinstance(contracts, Mapping) or not isinstance(profiles, Mapping) or not isinstance(overlays, Mapping):
-        raise WaveError("agent manifest lacks role-context routing")
-    wave_overlays = overlays.get("waves")
-    if not isinstance(wave_overlays, Mapping):
-        raise WaveError("agent manifest lacks active wave role overlays")
-    base = profiles.get(role)
-    overlay = wave_overlays.get(role)
-    if not isinstance(base, list) or not isinstance(overlay, list) or not overlay:
-        raise WaveError("active wave worker contracts are not configured")
-    keys = base + overlay
-    if any(not isinstance(key, str) or key not in contracts for key in keys):
-        raise WaveError("worker contract routing contains unknown document keys")
-    paths = [contracts[key] for key in keys]
-    if any(not isinstance(path, str) or
-           not (path == "AGENTS.md" or (path.startswith("docs/") and path.endswith(".md"))) or
-           ".." in path.split("/") for path in paths):
-        raise WaveError("invalid worker contract path")
-    # Distinct role contracts, in stable manifest order.
-    paths = list(dict.fromkeys(paths))
+    try:
+        paths = contract_paths(routing, role, overlays=("waves",))
+    except ContextRoutingError as exc:
+        raise WaveError(str(exc)) from exc
 
     unit_id = decision["unit_id"]
     units = [unit for unit in status["units"] if unit["unit_id"] == unit_id]
@@ -116,15 +99,11 @@ def _wave_load_plan(decision: Mapping[str, object], status: Mapping[str, object]
 
 
 def _read_role_routing(root: Path) -> Mapping[str, object]:
-    """Load only the selected installation's agent routing table."""
-    path = root / "agent-manifest.json"
+    """Load the selected installation's routing table."""
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError) as exc:
-        raise WaveError(f"cannot read pinned agent manifest: {exc}") from exc
-    if not isinstance(doc, Mapping) or doc.get("schema_version") != 3:
-        raise WaveError("unsupported pinned agent manifest")
-    return doc
+        return read_manifest(root)
+    except ContextRoutingError as exc:
+        raise WaveError(str(exc)) from exc
 
 
 def register_wave_commands(subparsers, root: Path, preflight, error_factory) -> None:

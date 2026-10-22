@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+from workflow.context_routing import ContextRoutingError, contract_paths
 from workflow.wave_cli import _read_role_routing, _wave_load_plan
 from workflow.waves import WaveError
 
@@ -105,6 +106,20 @@ class WaveRoleContextTests(unittest.TestCase):
         with self.assertRaisesRegex(WaveError, "not configured"):
             _wave_load_plan(decision, status, wave, bad)
 
+    def test_orchestrator_overlays_load_only_when_requested(self):
+        base = contract_paths(self.routing, "orchestrator")
+        self.assertEqual(base, ["AGENTS.md", "docs/ORCHESTRATION.md"])
+        self.assertEqual(
+            contract_paths(self.routing, "orchestrator", overlays=("source_update",)),
+            base + ["docs/SOURCE_UPDATES.md"],
+        )
+        self.assertEqual(
+            contract_paths(self.routing, "orchestrator", overlays=("waves",)),
+            base + ["docs/WAVES.md"],
+        )
+        with self.assertRaises(ContextRoutingError):
+            contract_paths(self.routing, "reviewer", overlays=("source_update",))
+
     def test_contract_overlays_are_conditional_not_base_profiles(self):
         manifest = self.routing
         self.assertNotIn("wave_worker", manifest["context_profiles"]["translator"])
@@ -113,6 +128,7 @@ class WaveRoleContextTests(unittest.TestCase):
                          ["wave_worker"])
         self.assertEqual(manifest["context_overlays"]["waves"]["reviewer"],
                          ["wave_worker"])
+        self.assertEqual(manifest["context_overlays"]["waves"]["orchestrator"], ["waves"])
         self.assertTrue((ROOT / manifest["contracts"]["wave_worker"]).is_file())
 
 

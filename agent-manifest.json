@@ -15,7 +15,8 @@
     "orchestration": "docs/ORCHESTRATION.md",
     "translation": "docs/TRANSLATION.md",
     "source_updates": "docs/SOURCE_UPDATES.md",
-    "wave_worker": "docs/WAVE_WORKER.md"
+    "wave_worker": "docs/WAVE_WORKER.md",
+    "waves": "docs/WAVES.md"
   },
   "context_profiles": {
     "bootstrap": [
@@ -24,8 +25,7 @@
     ],
     "orchestrator": [
       "global",
-      "orchestration",
-      "source_updates"
+      "orchestration"
     ],
     "translator": [
       "global",
@@ -93,6 +93,14 @@
       ],
       "reviewer": [
         "wave_worker"
+      ],
+      "orchestrator": [
+        "waves"
+      ]
+    },
+    "source_update": {
+      "orchestrator": [
+        "source_updates"
       ]
     }
   }
