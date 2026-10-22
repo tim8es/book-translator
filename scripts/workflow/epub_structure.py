@@ -147,6 +147,15 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
         tag = name(element.tag)
         if tag in disallowed:
             raise StructureError(f"unsupported active XHTML element <{tag}>: {path}")
+        if tag == "meta":
+            # In particular, http-equiv=refresh initiates navigation without
+            # any user activation. Keep only inert historical content-type.
+            equivalence = next((value.strip().lower() for key, value in element.attrib.items()
+                                if name(key) == "http-equiv"), None)
+            safe_directives = {"content-type", "x-ua-compatible", "content-language",
+                               "content-style-type", "default-style"}
+            if equivalence is not None and equivalence not in safe_directives:
+                raise StructureError(f"unsafe meta HTTP directive {equivalence!r}: {path}")
         for attribute, value in element.attrib.items():
             key = name(attribute)
             if key.startswith("on") or key in {"srcdoc", "base"}:
