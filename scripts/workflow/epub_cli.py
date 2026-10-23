@@ -410,6 +410,7 @@ def epub_build_command(args: argparse.Namespace, root: Path) -> int:
                 translations=[item["markdown"] for item in units],
                 target_language=metadata["target_language"],
                 title=metadata["title"],
+                author=metadata.get("author"),
             )
             validate_structural_epub(artifact_bytes, expected_documents=len(units))
         else:
