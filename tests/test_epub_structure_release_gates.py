@@ -698,5 +698,41 @@ class NavigationSecurityTests(unittest.TestCase):
 
 
 
+    def test_escaped_css_url_delimiter_cannot_redirect_to_unexamined_member(self):
+        source = make_epub()
+        # A CSS parser resolves \29 to a literal ')' within the url token.
+        # An ordinary regex would instead audit only "evil", missing evil).data.
+        data = self.mutate_epub(
+            source,
+            {"OPS/content.opf": [
+                (b"</manifest>",
+                 b'<item id="css" href="style.css" media-type="text/css"/></manifest>')
+            ]},
+            {
+                "OPS/style.css": b'@import url(evil\\29 .data);',
+                "OPS/evil": b'p { color: black; }',
+                "OPS/evil).data": b'@import "https://tracker.invalid/pixel.css";',
+            },
+        )
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            with self.assertRaisesRegex(StructureError, "escaped CSS import delimiter"):
+                manifest_and_spine(z)
+
+    def test_ordinary_unescaped_css_imports_remain_supported(self):
+        source = make_epub()
+        data = self.mutate_epub(
+            source,
+            {"OPS/content.opf": [
+                (b"</manifest>",
+                 b'<item id="css" href="style.css" media-type="text/css"/></manifest>')
+            ]},
+            {"OPS/style.css": b'@import url("nested.data") screen;',
+             "OPS/nested.data": b'body { font-weight: normal; }'},
+        )
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            manifest_and_spine(z)
+
+
+
 if __name__ == "__main__":
     unittest.main()
