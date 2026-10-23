@@ -441,6 +441,13 @@ def manifest_and_spine(archive: zipfile.ZipFile):
         if (media_type == "application/xhtml+xml"
                 or resource_path.lower().endswith((".xhtml", ".html", ".htm"))):
             _validate_xhtml_security(archive.read(resource_path), resource_path)
+            # EPUB XHTML can itself contain a local <style>@import</style>.
+            # Its indirect resources require the same recursive CSS checks.
+            root = _safe_xml(archive.read(resource_path), resource_path)
+            for index, element in enumerate(root.iter()):
+                if name(element.tag) == "style":
+                    css = "".join(element.itertext()).encode("utf-8")
+                    check_css(f"{resource_path}#embedded-style-{index}", css)
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {path}")
