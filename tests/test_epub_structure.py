@@ -43,7 +43,7 @@ def fixture(*, broken=False) -> bytes:
         '<section class="chapter"><h1>Chapter One</h1>'
         '<p class="lead">He <em>really</em> <strong>liked</strong> '
         '<a class="ref" href="ch2.xhtml#note" id="noteref">her</a>.<br/>'
-        'Then rested. <img src="../assets/pic.png" alt="portrait"/></p>'
+        'Then rested. <img src="../assets/pic.png" alt=""/></p>'
         '<blockquote><p style="margin-top:2em">A short quote.</p></blockquote>'
         '<p><a href="#noteref">Return</a>.</p>'
         '</section></body></html>'
