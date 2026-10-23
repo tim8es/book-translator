@@ -183,7 +183,7 @@ class NavigationSecurityTests(unittest.TestCase):
                     with self.assertRaisesRegex(StructureError, "unsafe|active"):
                         manifest_and_spine(z)
 
-    def test_duplicate_anchor_ids_are_rejected_at_build(self):
+    def test_duplicate_anchor_ids_are_rejected_at_admission(self):
         raw = make_epub()
         corrupted = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(raw)) as original, zipfile.ZipFile(corrupted, "w") as out:
@@ -193,10 +193,9 @@ class NavigationSecurityTests(unittest.TestCase):
                     value = value.replace(b'id="first"', b'id="second"')
                 out.writestr(info, value)
         source = corrupted.getvalue()
-        units = source_units(source)
+        # Duplicate anchors must be rejected at admission, before translation.
         with self.assertRaisesRegex(StructureError, "duplicate internal XHTML anchor"):
-            build(source, document_paths=[x[2] for x in units],
-                  translations=[x[1] for x in units], target_language="ru", title="История")
+            source_units(source)
 
     def test_partial_protected_marker_is_never_accepted_as_prose(self):
         raw = make_epub()
