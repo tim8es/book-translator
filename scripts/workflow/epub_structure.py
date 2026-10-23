@@ -183,8 +183,9 @@ def _validate_navigation(body: ET.Element, path: str) -> None:
                  "em", "strong", "i", "b", "small", "abbr", "cite", "sup", "sub"}
     allowed = text_tags | {"nav", "ol", "ul", "li", "br"}
 
-    def navigation(node: ET.Element) -> None:
+    def navigation(node: ET.Element, in_link: bool = False) -> None:
         tag = name(node.tag)
+        in_link = in_link or tag == "a"
         if tag not in allowed:
             raise StructureError(f"unmapped prose/element <{tag}> inside navigation: {path}")
         if tag == "nav":
@@ -196,13 +197,13 @@ def _validate_navigation(body: ET.Element, path: str) -> None:
         if re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
                      node.get("style", ""), re.IGNORECASE):
             raise StructureError(f"hidden navigation CSS is unsupported: {path}")
-        if (node.text or "").strip() and tag not in text_tags:
-            raise StructureError(f"unmapped text inside navigation <{tag}>: {path}")
+        if (node.text or "").strip() and not in_link:
+            raise StructureError(f"unmapped non-link navigation label in <{tag}>: {path}")
         if tag == "li" and not any(name(x.tag) in {"a", "span"} for x in node.iter() if x is not node):
             raise StructureError(f"navigation list item without label: {path}")
         for child in node:
-            navigation(child)
-            if (child.tail or "").strip() and tag not in text_tags:
+            navigation(child, in_link)
+            if (child.tail or "").strip() and not in_link:
                 raise StructureError(f"unmapped text between navigation elements: {path}")
 
     def outside(node: ET.Element) -> None:
@@ -707,7 +708,7 @@ def validate_structural_epub(content: bytes, *, expected_documents: int):
 
 
 def build(source: bytes, *, document_paths: Sequence[str], translations: Sequence[str],
-          target_language: str, title: str) -> bytes:
+          target_language: str, title: str, author: str | None = None) -> bytes:
     if len(document_paths) != len(translations):
         raise StructureError("translation count does not match EPUB spine")
     replacements: dict[str, bytes] = {}
@@ -758,8 +759,33 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
         for element in package.iter():
             if element.tag == f"{{{DC}}}language":
                 element.text = target_language
-            elif element.tag == f"{{{DC}}}title":
-                element.text = title
+        # EPUB 3 metadata may contain a primary title, subtitle and other
+        # refined title entries. Never replace all dc:title values with the
+        # main book title while retaining refinements that declare subtitles.
+        titles = [element for element in package.iter() if element.tag == f"{{{DC}}}title"]
+        primary = titles[0] if titles else None
+        for title_node in titles:
+            node_id = title_node.get("id")
+            if node_id and any(
+                name(meta.tag) == "meta"
+                and meta.get("refines") == "#" + node_id
+                and meta.get("property") == "title-type"
+                and (meta.text or "").strip().lower() == "main"
+                for meta in package.iter()
+            ):
+                primary = title_node
+                break
+        if primary is not None:
+            primary.text = title
+        if author is not None and author.strip():
+            creators = [node for node in package.iter() if node.tag == f"{{{DC}}}creator"]
+            if creators:
+                creators[0].text = author
+            else:
+                metadata_node = next((node for node in package if name(node.tag) == "metadata"), None)
+                if metadata_node is None:
+                    raise StructureError("cannot set author in EPUB without OPF metadata")
+                ET.SubElement(metadata_node, f"{{{DC}}}creator").text = author
         replacements[opf_path] = ET.tostring(package, encoding="utf-8", xml_declaration=True)
 
         # Duplicate IDs are a structural source/output violation independently
