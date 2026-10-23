@@ -437,6 +437,33 @@ def manifest_and_spine(archive: zipfile.ZipFile):
                 raise StructureError(f"XHTML contains untranslated text outside EPUB spine: {path}")
             elif any("".join(t.itertext()).strip() for t in _head_titles(root)):
                 raise StructureError(f"unmapped off-spine XHTML head title: {path}")
+    # NCX labels are excluded from the chapter translation surface. Reject
+    # any source NCX navigation that cannot be localized deterministically.
+    for ncx_path, item in manifest.values():
+        if item.get("media-type") != "application/x-dtbncx+xml":
+            continue
+        ncx = _safe_xml(archive.read(ncx_path), ncx_path)
+        if any(name(node.tag) in {"pagelist", "navlist"} and
+               "".join(node.itertext()).strip() for node in ncx.iter()):
+            raise StructureError(f"unmapped NCX page/list labels: {ncx_path}")
+        for point in ncx.iter():
+            if name(point.tag) != "navpoint":
+                continue
+            content = next((node for node in point if name(node.tag) == "content"), None)
+            label = next((node for node in point if name(node.tag) == "navlabel"), None)
+            text_nodes = ([node for node in label.iter() if name(node.tag) == "text"]
+                          if label is not None else [])
+            if content is None or not content.get("src") or len(text_nodes) != 1:
+                raise StructureError(f"unmappable NCX navigation label: {ncx_path}")
+            url = urlsplit(content.get("src"))
+            if url.scheme or url.netloc:
+                raise StructureError(f"unsafe NCX navigation target: {ncx_path}")
+            target = member_path(ncx_path, url.path) if url.path else ncx_path
+            key = f"{target}#{unquote(url.fragment)}" if url.fragment else target
+            if key not in source_headings:
+                raise StructureError(
+                    f"NCX navigation label cannot be mapped to translated heading: {ncx_path}: {content.get('src')}"
+                )
     return opf_path, package, manifest, spine
 
 
@@ -759,14 +786,11 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             if path not in paths:
                 for heading in _head_titles(nav):
                     if "".join(heading.itertext()).strip():
-                        if target_language.lower().split("-")[0] == "ru":
-                            heading.text = "Оглавление"
-                        elif target_language.lower().split("-")[0] == "en":
-                            heading.text = "Contents"
-                        else:
-                            raise StructureError(
-                                f"cannot localize off-spine navigation head title for {target_language}"
-                            )
+                        # The provided localized book title is meaningful
+                        # metadata for the navigation document in any language.
+                        # Avoid republishing source-language "Contents" or
+                        # hard-coding a restricted list of target languages.
+                        heading.text = title
             for a in nav.iter():
                 if name(a.tag) != "a" or not a.get("href"):
                     continue
@@ -813,6 +837,11 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             if item.get("media-type") != "application/x-dtbncx+xml":
                 continue
             ncx = _safe_xml(archive.read(ncx_path), ncx_path)
+            for doc_title in ncx.iter():
+                if name(doc_title.tag) == "doctitle":
+                    for title_node in doc_title.iter():
+                        if name(title_node.tag) == "text":
+                            title_node.text = title
             for point in ncx.iter():
                 if name(point.tag) != "navpoint":
                     continue
@@ -834,8 +863,11 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                         raise StructureError(f"missing NCX navigation anchor: {url.fragment}")
                 title_at_target = (headings.get(f"{target}#{unquote(url.fragment)}")
                                    if url.fragment else headings.get(target))
-                if title_at_target:
-                    label_text.text = title_at_target
+                if not title_at_target:
+                    raise StructureError(
+                        f"untranslated NCX navigation label lacks mapped heading: {ncx_path}: {content.get('src')}"
+                    )
+                label_text.text = title_at_target
             replacements[ncx_path] = ET.tostring(ncx, encoding="utf-8", xml_declaration=True)
 
         _check_links(archive, replacements)
