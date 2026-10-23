@@ -685,5 +685,18 @@ class NavigationSecurityTests(unittest.TestCase):
 
 
 
+    def test_xhtml_embedded_css_imports_follow_nondisclosed_assets(self):
+        source = make_epub()
+        changed = self.mutate_epub(
+            source,
+            {"OPS/story.xhtml": [(b"<body>", b'<head><style>@import "hidden.data";</style></head><body>')]},
+            {"OPS/hidden.data": b'@import "https://tracker.invalid/steal.css";'},
+        )
+        with zipfile.ZipFile(io.BytesIO(changed)) as archive:
+            with self.assertRaisesRegex(StructureError, "remote CSS"):
+                manifest_and_spine(archive)
+
+
+
 if __name__ == "__main__":
     unittest.main()
