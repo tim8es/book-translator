@@ -551,5 +551,68 @@ class NavigationSecurityTests(unittest.TestCase):
 
 
 
+    def test_offspine_nonlink_navigation_labels_block_source_admission(self):
+        original = make_epub(multi_nav=False)
+        for replacement in (
+            b'<nav><h1>Table of Contents</h1><ol>',
+            b'<nav><ol><li><span>Part One</span><ol><li><a href="story.xhtml#first">First chapter</a></li></ol></li>',
+        ):
+            with self.subTest(label=replacement[:55]):
+                if b"<h1>" in replacement:
+                    patched = self.mutate_epub(original, {
+                        "OPS/nav.xhtml": [(b"<nav><ol>", replacement)]
+                    })
+                else:
+                    patched = self.mutate_epub(original, {
+                        "OPS/nav.xhtml": [(b'<nav><ol><li><a href="story.xhtml#first">First chapter</a></li>',
+                                            replacement)]
+                    })
+                with zipfile.ZipFile(io.BytesIO(patched)) as z:
+                    with self.assertRaisesRegex(StructureError, "unmapped non-link navigation label"):
+                        manifest_and_spine(z)
+
+    def test_structural_opf_author_override_preserves_subtitle_refinements(self):
+        raw = make_epub(multi_nav=False)
+        expanded = self.mutate_epub(raw, {
+            "OPS/content.opf": [(
+                b"<dc:title>Story</dc:title>",
+                b'<dc:title id="book-title">Story</dc:title>'
+                b'<dc:title id="subtitle">The Original Subtitle</dc:title>'
+                b'<meta refines="#subtitle" property="title-type">subtitle</meta>'
+            )]
+        })
+        units = source_units(expanded)
+        built = build(expanded, document_paths=[x[2] for x in units],
+                      translations=[units[0][1]],
+                      target_language="ru", title="Русская книга", author="Исправленный автор")
+        with zipfile.ZipFile(io.BytesIO(built)) as z:
+            package = ET.fromstring(z.read("OPS/content.opf"))
+            titles = [el.text for el in package.iter() if el.tag.rsplit("}", 1)[-1] == "title"]
+            creators = [el.text for el in package.iter() if el.tag.rsplit("}", 1)[-1] == "creator"]
+            self.assertEqual(titles, ["Русская книга", "The Original Subtitle"])
+            self.assertEqual(creators, ["Исправленный автор"])
+            self.assertTrue(any(el.get("refines") == "#subtitle" for el in package.iter()))
+
+    def test_refined_primary_title_is_updated_without_overwriting_secondary(self):
+        raw = make_epub(multi_nav=False)
+        expanded = self.mutate_epub(raw, {
+            "OPS/content.opf": [(
+                b"<dc:title>Story</dc:title>",
+                b'<dc:title id="sub">Source Subtitle</dc:title>'
+                b'<dc:title id="primary">Story</dc:title>'
+                b'<meta refines="#primary" property="title-type">main</meta>'
+            )]
+        })
+        units = source_units(expanded)
+        built = build(expanded, document_paths=[x[2] for x in units],
+                      translations=[units[0][1]], target_language="ru",
+                      title="Русское название")
+        with zipfile.ZipFile(io.BytesIO(built)) as z:
+            package = ET.fromstring(z.read("OPS/content.opf"))
+            titles = [el.text for el in package.iter() if el.tag.rsplit("}", 1)[-1] == "title"]
+            self.assertEqual(titles, ["Source Subtitle", "Русское название"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
