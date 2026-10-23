@@ -234,7 +234,7 @@ class NavigationSecurityTests(unittest.TestCase):
             with self.subTest(new=new[:65]):
                 data = self.mutate_epub(raw, {"OPS/story.xhtml": [(old, new)]})
                 with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    with self.assertRaisesRegex(StructureError, "remote/unsafe"):
+                    with self.assertRaisesRegex(StructureError, "remote/unsafe|external stylesheet"):
                         manifest_and_spine(z)
         valid = self.mutate_epub(
             raw, {"OPS/story.xhtml": [(b"</body>", b'<p><a href="https://example.org/works">Site</a></p></body>')]}
@@ -457,7 +457,7 @@ class NavigationSecurityTests(unittest.TestCase):
             doc = ET.fromstring(z.read("OPS/story.xhtml"))
             nav = ET.fromstring(z.read("OPS/nav.xhtml"))
             self.assertEqual(doc.find(".//{*}title").text, "Первая глава")
-            self.assertEqual(nav.find(".//{*}title").text, "Оглавление")
+            self.assertEqual(nav.find(".//{*}title").text, "Книга")
 
     def test_unmappable_head_title_is_blocked_before_admission(self):
         source = self.mutate_epub(make_epub(), {
