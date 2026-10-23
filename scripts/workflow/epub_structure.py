@@ -76,6 +76,9 @@ def _has_remote_css(raw: bytes) -> bool:
     sources whose CSS cannot be safely interpreted must not be published.
     """
     content = raw.decode("utf-8", "replace")
+    # CSS removes backslash-newline continuations inside quoted URLs before
+    # resolving their schemes (including escaped CRLF and form feed).
+    content = re.sub(r"\\(?:\r\n|\n|\r|\f)", "", content)
 
     def unescape(match):
         hex_digits, single = match.groups()
@@ -243,6 +246,20 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
         if tag == "style" and _has_remote_css("".join(element.itertext()).encode("utf-8")):
             raise StructureError(f"remote embedded CSS resource is unsupported: {path}")
         if tag == "meta":
+            # Metadata with natural-language content must enter the translation
+            # surface. Only known inert machine values may pass unchanged.
+            meta_name = element.get("name", "").strip().lower()
+            meta_property = element.get("property", "").strip().lower()
+            meta_content = element.get("content", "").strip()
+            inert_meta = {"viewport", "generator", "referrer", "theme-color",
+                          "color-scheme", "format-detection", "robots",
+                          "apple-mobile-web-app-capable",
+                          "apple-mobile-web-app-status-bar-style", "twitter:card"}
+            if meta_content and (meta_property or
+                                 (meta_name and meta_name not in inert_meta) or
+                                 (not meta_name and not meta_property and
+                                  "http-equiv" not in element.attrib)):
+                raise StructureError(f"untranslated XHTML meta content: {path}")
             # In particular, http-equiv=refresh initiates navigation without
             # any user activation. Keep only inert historical content-type.
             equivalence = next((value.strip().lower() for key, value in element.attrib.items()
@@ -341,6 +358,29 @@ def manifest_and_spine(archive: zipfile.ZipFile):
             raise StructureError(f"embedded SVG markup is unsupported: {resource_path}")
         if suffix.endswith((".xhtml", ".html", ".htm")) and resource_path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {resource_path}")
+    # MIME metadata is not sufficient: every archived CSS file and any
+    # stylesheet referenced by XHTML must be scanned before source admission.
+    for resource_path in names:
+        if resource_path.lower().endswith(".css") and _has_remote_css(archive.read(resource_path)):
+            raise StructureError(f"remote CSS resource is unsupported: {resource_path}")
+    for xhtml_path, item in manifest.values():
+        if (item.get("media-type") != "application/xhtml+xml"
+                and not xhtml_path.lower().endswith((".xhtml", ".html", ".htm"))):
+            continue
+        document_root = _safe_xml(archive.read(xhtml_path), xhtml_path)
+        for link in document_root.iter():
+            if (name(link.tag) != "link"
+                    or "stylesheet" not in (link.get("rel") or "").lower().split()
+                    or not link.get("href")):
+                continue
+            url = urlsplit(link.get("href"))
+            if url.scheme or url.netloc:
+                raise StructureError(f"external stylesheet is unsupported: {xhtml_path}")
+            target = member_path(xhtml_path, url.path)
+            if target not in names:
+                raise StructureError(f"missing referenced stylesheet: {target}")
+            if _has_remote_css(archive.read(target)):
+                raise StructureError(f"remote CSS resource is unsupported: {target}")
     for resource_path, item in manifest.values():
         media_type = item.get("media-type", "").lower()
         if (media_type in {"application/javascript", "text/javascript",
@@ -397,6 +437,33 @@ def manifest_and_spine(archive: zipfile.ZipFile):
                 raise StructureError(f"XHTML contains untranslated text outside EPUB spine: {path}")
             elif any("".join(t.itertext()).strip() for t in _head_titles(root)):
                 raise StructureError(f"unmapped off-spine XHTML head title: {path}")
+    # NCX labels are excluded from the chapter translation surface. Reject
+    # any source NCX navigation that cannot be localized deterministically.
+    for ncx_path, item in manifest.values():
+        if item.get("media-type") != "application/x-dtbncx+xml":
+            continue
+        ncx = _safe_xml(archive.read(ncx_path), ncx_path)
+        if any(name(node.tag) in {"pagelist", "navlist"} and
+               "".join(node.itertext()).strip() for node in ncx.iter()):
+            raise StructureError(f"unmapped NCX page/list labels: {ncx_path}")
+        for point in ncx.iter():
+            if name(point.tag) != "navpoint":
+                continue
+            content = next((node for node in point if name(node.tag) == "content"), None)
+            label = next((node for node in point if name(node.tag) == "navlabel"), None)
+            text_nodes = ([node for node in label.iter() if name(node.tag) == "text"]
+                          if label is not None else [])
+            if content is None or not content.get("src") or len(text_nodes) != 1:
+                raise StructureError(f"unmappable NCX navigation label: {ncx_path}")
+            url = urlsplit(content.get("src"))
+            if url.scheme or url.netloc:
+                raise StructureError(f"unsafe NCX navigation target: {ncx_path}")
+            target = member_path(ncx_path, url.path) if url.path else ncx_path
+            key = f"{target}#{unquote(url.fragment)}" if url.fragment else target
+            if key not in source_headings:
+                raise StructureError(
+                    f"NCX navigation label cannot be mapped to translated heading: {ncx_path}: {content.get('src')}"
+                )
     return opf_path, package, manifest, spine
 
 
@@ -719,14 +786,11 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             if path not in paths:
                 for heading in _head_titles(nav):
                     if "".join(heading.itertext()).strip():
-                        if target_language.lower().split("-")[0] == "ru":
-                            heading.text = "Оглавление"
-                        elif target_language.lower().split("-")[0] == "en":
-                            heading.text = "Contents"
-                        else:
-                            raise StructureError(
-                                f"cannot localize off-spine navigation head title for {target_language}"
-                            )
+                        # The provided localized book title is meaningful
+                        # metadata for the navigation document in any language.
+                        # Avoid republishing source-language "Contents" or
+                        # hard-coding a restricted list of target languages.
+                        heading.text = title
             for a in nav.iter():
                 if name(a.tag) != "a" or not a.get("href"):
                     continue
@@ -773,6 +837,11 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             if item.get("media-type") != "application/x-dtbncx+xml":
                 continue
             ncx = _safe_xml(archive.read(ncx_path), ncx_path)
+            for doc_title in ncx.iter():
+                if name(doc_title.tag) == "doctitle":
+                    for title_node in doc_title.iter():
+                        if name(title_node.tag) == "text":
+                            title_node.text = title
             for point in ncx.iter():
                 if name(point.tag) != "navpoint":
                     continue
@@ -794,8 +863,11 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
                         raise StructureError(f"missing NCX navigation anchor: {url.fragment}")
                 title_at_target = (headings.get(f"{target}#{unquote(url.fragment)}")
                                    if url.fragment else headings.get(target))
-                if title_at_target:
-                    label_text.text = title_at_target
+                if not title_at_target:
+                    raise StructureError(
+                        f"untranslated NCX navigation label lacks mapped heading: {ncx_path}: {content.get('src')}"
+                    )
+                label_text.text = title_at_target
             replacements[ncx_path] = ET.tostring(ncx, encoding="utf-8", xml_declaration=True)
 
         _check_links(archive, replacements)

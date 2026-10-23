@@ -234,7 +234,7 @@ class NavigationSecurityTests(unittest.TestCase):
             with self.subTest(new=new[:65]):
                 data = self.mutate_epub(raw, {"OPS/story.xhtml": [(old, new)]})
                 with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    with self.assertRaisesRegex(StructureError, "remote/unsafe"):
+                    with self.assertRaisesRegex(StructureError, "remote/unsafe|external stylesheet"):
                         manifest_and_spine(z)
         valid = self.mutate_epub(
             raw, {"OPS/story.xhtml": [(b"</body>", b'<p><a href="https://example.org/works">Site</a></p></body>')]}
@@ -457,7 +457,7 @@ class NavigationSecurityTests(unittest.TestCase):
             doc = ET.fromstring(z.read("OPS/story.xhtml"))
             nav = ET.fromstring(z.read("OPS/nav.xhtml"))
             self.assertEqual(doc.find(".//{*}title").text, "Первая глава")
-            self.assertEqual(nav.find(".//{*}title").text, "Оглавление")
+            self.assertEqual(nav.find(".//{*}title").text, "Книга")
 
     def test_unmappable_head_title_is_blocked_before_admission(self):
         source = self.mutate_epub(make_epub(), {
@@ -472,6 +472,82 @@ class NavigationSecurityTests(unittest.TestCase):
             path.write_bytes(source)
             with self.assertRaisesRegex(StructureError, "unmappable XHTML head title"):
                 read_chapters(path)
+
+
+
+    def test_css_escaped_line_continuation_and_misdeclared_stylesheet_fail_closed(self):
+        original = make_epub()
+        escaped = b'@import "h' + bytes([92, 10]) + b'ttps://tracker.invalid/x.css";'
+        for path, media in (("evil.css", "image/png"), ("evil.data", "application/octet-stream")):
+            with self.subTest(resource=path):
+                revised = self.mutate_epub(original, {
+                    "OPS/content.opf": [(
+                        b"</manifest>",
+                        (f'<item id="evil" href="{path}" media-type="{media}"/></manifest>').encode()
+                    )],
+                    "OPS/story.xhtml": [(b"<body>",
+                        (f'<head><link rel="stylesheet" href="{path}"/></head><body>').encode())],
+                }, {f"OPS/{path}": escaped})
+                with zipfile.ZipFile(io.BytesIO(revised)) as z:
+                    with self.assertRaisesRegex(StructureError, "remote CSS"):
+                        manifest_and_spine(z)
+
+    def test_description_meta_is_rejected_and_viewport_passes(self):
+        original = make_epub()
+        content = b'<head><meta name="description" content="English blurb"/></head><body>'
+        bad = self.mutate_epub(original, {"OPS/story.xhtml": [(b"<body>", content)]})
+        with zipfile.ZipFile(io.BytesIO(bad)) as z:
+            with self.assertRaisesRegex(StructureError, "untranslated XHTML meta content"):
+                manifest_and_spine(z)
+        viewport = b'<head><meta name="viewport" content="width=device-width,initial-scale=1"/></head><body>'
+        good = self.mutate_epub(original, {"OPS/story.xhtml": [(b"<body>", viewport)]})
+        with zipfile.ZipFile(io.BytesIO(good)) as z:
+            manifest_and_spine(z)
+
+    def test_offspine_navigation_head_title_supports_french(self):
+        source = self.mutate_epub(make_epub(multi_nav=False), {
+            "OPS/nav.xhtml": [(b"<body>", b"<head><title>Contents</title></head><body>")]
+        })
+        units = source_units(source)
+        output = build(source, document_paths=[x[2] for x in units],
+                       translations=[units[0][1].replace("First chapter", "Premier chapitre")],
+                       target_language="fr", title="Livre traduit")
+        with zipfile.ZipFile(io.BytesIO(output)) as z:
+            nav = ET.fromstring(z.read("OPS/nav.xhtml"))
+            self.assertEqual(nav.find(".//{*}title").text, "Livre traduit")
+
+    def test_unmappable_ncx_label_is_rejected_before_translation(self):
+        original = make_epub(ncx=True)
+        tampered = self.mutate_epub(original, {
+            "OPS/story.xhtml": [(b"<p>Text one.</p>", b'<p id="plain">Text one.</p>')],
+            "OPS/toc.ncx": [(b"story.xhtml#first", b"story.xhtml#plain")],
+        })
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "book.epub"
+            path.write_bytes(tampered)
+            with self.assertRaisesRegex(StructureError, "NCX navigation label cannot be mapped"):
+                read_chapters(path)
+
+    def test_ncx_doc_title_is_localized_and_page_list_text_rejected(self):
+        original = make_epub(ncx=True)
+        source = self.mutate_epub(original, {
+            "OPS/toc.ncx": [(b"<ncx>", b"<ncx><docTitle><text>English Book</text></docTitle>")]
+        })
+        units = source_units(source)
+        output = build(source, document_paths=[x[2] for x in units],
+                       translations=[units[0][1].replace("First chapter", "Premier chapitre")],
+                       target_language="fr", title="Livre traduit")
+        with zipfile.ZipFile(io.BytesIO(output)) as z:
+            tree = ET.fromstring(z.read("OPS/toc.ncx"))
+            doc_title = next(x for x in tree.iter()
+                             if x.tag.rsplit("}", 1)[-1] == "docTitle")
+            self.assertEqual("".join(doc_title.itertext()), "Livre traduit")
+        bad = self.mutate_epub(source, {
+            "OPS/toc.ncx": [(b"</ncx>", b'<pageList><pageTarget><navLabel><text>English page</text></navLabel></pageTarget></pageList></ncx>')]
+        })
+        with zipfile.ZipFile(io.BytesIO(bad)) as z:
+            with self.assertRaisesRegex(StructureError, "unmapped NCX page/list labels"):
+                manifest_and_spine(z)
 
 
 
