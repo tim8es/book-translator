@@ -97,6 +97,22 @@ def _css_import_targets(raw: bytes) -> list[str]:
         targets.append(target)
     if len(statements) != len(re.findall(r"(?i)@import\b", css)):
         raise StructureError("unterminated CSS @import declaration")
+    if statements:
+        # CSS escape processing can produce syntactic ')'/'('/quotes that
+        # were *literal URL bytes*, not delimiters in the original token stream.
+        # The stdlib mapper does not implement a complete CSS tokenizer:
+        # refuse such imports rather than resolving a shortened wrong target.
+        source_css = raw.decode("utf-8", "replace")
+        for escape in re.finditer(
+            r"\\(?:([0-9a-fA-F]{1,6})(?:[ \t\r\n\f])?|([^\r\n\f]))",
+            source_css,
+        ):
+            hexadecimal, literal = escape.groups()
+            character = (chr(int(hexadecimal, 16)) if hexadecimal else literal)
+            if character in {"(", ")", "'", '"', ";"}:
+                raise StructureError(
+                    "escaped CSS import delimiter requires a dedicated CSS tokenizer"
+                )
     return targets
 
 
