@@ -69,6 +69,99 @@ _REMOTE_CSS = re.compile(
 )
 
 
+def _has_remote_css(raw: bytes) -> bool:
+    """Decode CSS escapes before checking auto-fetched URL and @import values.
+
+    This gate is conservative. It does not claim to be a full CSS tokenizer;
+    sources whose CSS cannot be safely interpreted must not be published.
+    """
+    content = raw.decode("utf-8", "replace")
+
+    def unescape(match):
+        hex_digits, single = match.groups()
+        if hex_digits:
+            code = int(hex_digits, 16)
+            if code == 0 or code > 0x10FFFF:
+                return "\ufffd"
+            return chr(code)
+        return single or ""
+
+    content = re.sub(r"\\(?:([0-9a-fA-F]{1,6})(?:[ \t\r\n\f])?|([^\r\n\f]))",
+                     unescape, content)
+    content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+    for match in re.finditer(r"(?i)\burl\s*\(\s*(['\"]?)(.*?)\1\s*\)", content, re.DOTALL):
+        value = match.group(2).strip()
+        uri = urlsplit(value)
+        if uri.scheme or uri.netloc or value.startswith("//"):
+            return True
+    for match in re.finditer(r"(?i)@import\s+(['\"])(.*?)\1", content, re.DOTALL):
+        value = match.group(2).strip()
+        uri = urlsplit(value)
+        if uri.scheme or uri.netloc or value.startswith("//"):
+            return True
+    return bool(_REMOTE_CSS.search(content.encode("utf-8")))
+
+
+_TEXTUAL_ATTRIBUTES = {"alt", "title", "aria-label", "aria-description",
+                       "placeholder", "summary", "longdesc"}
+
+
+def _first_heading_label(root: ET.Element) -> str | None:
+    body = next((x for x in root.iter() if name(x.tag) == "body"), None)
+    if body is None:
+        return None
+    return next((label for el in body.iter()
+                 if name(el.tag) in {"h1", "h2", "h3", "h4", "h5", "h6"}
+                 if (label := "".join(el.itertext()).strip())), None)
+
+
+def _head_titles(root: ET.Element) -> list[ET.Element]:
+    heads = [el for el in root if name(el.tag) == "head"]
+    if len(heads) > 1:
+        raise StructureError("multiple XHTML head elements are unsupported")
+    return [el for el in heads[0] if name(el.tag) == "title"] if heads else []
+
+
+def _headings_by_anchor(archive: zipfile.ZipFile, spine: list[str]) -> dict[str, str]:
+    """Map only targets for which a translated heading can be regenerated."""
+    heading_map: dict[str, str] = {}
+    for document in spine:
+        root = _safe_xml(archive.read(document), document)
+        # Duplicate IDs are invalid independently of NAV target mapping.
+        # Check before extracting/reviewing a book, not only at final build.
+        identifiers = [node.get("id") for node in root.iter() if node.get("id")]
+        if len(identifiers) != len(set(identifiers)):
+            raise StructureError(f"duplicate internal XHTML anchor id: {document}")
+        for el in root.iter():
+            tag = name(el.tag)
+            if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                text = "".join(el.itertext()).strip()
+                if text:
+                    heading_map.setdefault(document, text)
+                    if el.get("id"):
+                        heading_map[f"{document}#{el.get('id')}"] = text
+            elif el.get("id"):
+                subheading = next(
+                    (h for h in el.iter() if name(h.tag) in
+                     {"h1", "h2", "h3", "h4", "h5", "h6"}), None
+                )
+                if subheading is not None:
+                    text = "".join(subheading.itertext()).strip()
+                    if text:
+                        heading_map[f"{document}#{el.get('id')}"] = text
+    return heading_map
+
+
+def _navigation_label_slots(element: ET.Element) -> list[tuple[ET.Element, str]]:
+    slots = []
+    for child in element.iter():
+        if (child.text or "").strip():
+            slots.append((child, "text"))
+        if child is not element and (child.tail or "").strip():
+            slots.append((child, "tail"))
+    return slots
+
+
 def _safe_xml(raw: bytes, path: str = "EPUB XML") -> ET.Element:
     """Reject DTD/entity declarations in every XML package member."""
     if _DTD.search(raw):
@@ -147,7 +240,7 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
         tag = name(element.tag)
         if tag in disallowed:
             raise StructureError(f"unsupported active XHTML element <{tag}>: {path}")
-        if tag == "style" and _REMOTE_CSS.search("".join(element.itertext()).encode("utf-8")):
+        if tag == "style" and _has_remote_css("".join(element.itertext()).encode("utf-8")):
             raise StructureError(f"remote embedded CSS resource is unsupported: {path}")
         if tag == "meta":
             # In particular, http-equiv=refresh initiates navigation without
@@ -160,6 +253,8 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
                 raise StructureError(f"unsafe meta HTTP directive {equivalence!r}: {path}")
         for attribute, value in element.attrib.items():
             key = name(attribute)
+            if key in _TEXTUAL_ATTRIBUTES and value.strip():
+                raise StructureError(f"untranslated XHTML textual attribute {key}: {path}")
             if key.startswith("on") or key in {"srcdoc", "base"}:
                 raise StructureError(f"unsafe XHTML attribute {key}: {path}")
             if key in {"srcset", "ping", "action", "formaction", "poster"}:
@@ -175,7 +270,7 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
                     raise StructureError(f"remote/unsafe XHTML resource URI in {key}: {path}")
                 if url.path:
                     member_path(path, url.path)
-            if key == "style" and _REMOTE_CSS.search(value.encode("utf-8")):
+            if key == "style" and _has_remote_css(value.encode("utf-8")):
                 raise StructureError(f"remote inline CSS resource is unsupported: {path}")
 
 
@@ -254,7 +349,7 @@ def manifest_and_spine(archive: zipfile.ZipFile):
             raise StructureError(f"executable EPUB resource is unsupported: {resource_path}")
         if media_type == "text/html":
             raise StructureError(f"HTML resource without XHTML coverage is unsupported: {resource_path}")
-        if media_type == "text/css" and _REMOTE_CSS.search(archive.read(resource_path)):
+        if media_type == "text/css" and _has_remote_css(archive.read(resource_path)):
             raise StructureError(f"remote CSS resource is unsupported: {resource_path}")
         if (media_type == "application/xhtml+xml"
                 or resource_path.lower().endswith((".xhtml", ".html", ".htm"))):
@@ -262,6 +357,16 @@ def manifest_and_spine(archive: zipfile.ZipFile):
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {path}")
+    # Admission must guarantee every off-spine TOC label is regenerable.
+    # Otherwise a book could reach independent literary review and fail only
+    # at the final build, after expensive translation work has finished.
+    source_headings = _headings_by_anchor(archive, spine)
+    for spine_path in spine:
+        doc = _safe_xml(archive.read(spine_path), spine_path)
+        titles = _head_titles(doc)
+        if len(titles) > 1 or (titles and "".join(titles[0].itertext()).strip()
+                               and not _first_heading_label(doc)):
+            raise StructureError(f"unmappable XHTML head title: {spine_path}")
     for path, item in manifest.values():
         if path not in names:
             raise StructureError(f"missing manifested resource: {path}")
@@ -272,8 +377,26 @@ def manifest_and_spine(archive: zipfile.ZipFile):
                 raise StructureError(f"off-spine XHTML is missing body: {path}")
             if "nav" in item.get("properties", "").split():
                 _validate_navigation(body, path)
+                for link in body.iter():
+                    if name(link.tag) != "a" or not link.get("href"):
+                        continue
+                    url = urlsplit(link.get("href"))
+                    if url.scheme or url.netloc:
+                        raise StructureError(f"off-spine navigation target is external: {path}")
+                    target = member_path(path, url.path) if url.path else path
+                    key = f"{target}#{unquote(url.fragment)}" if url.fragment else target
+                    if key not in source_headings:
+                        raise StructureError(
+                            f"off-spine navigation label cannot be translated without a mapped heading: {path}: {link.get('href')}"
+                        )
+                    if len(_navigation_label_slots(link)) != 1:
+                        raise StructureError(
+                            f"off-spine styled navigation cannot be mapped without losing formatting: {path}: {link.get('href')}"
+                        )
             elif "".join(body.itertext()).strip():
                 raise StructureError(f"XHTML contains untranslated text outside EPUB spine: {path}")
+            elif any("".join(t.itertext()).strip() for t in _head_titles(root)):
+                raise StructureError(f"unmapped off-spine XHTML head title: {path}")
     return opf_path, package, manifest, spine
 
 
@@ -532,6 +655,16 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             translated = parse_translation(markdown, len(blocks))
             for block, content in zip(blocks, translated):
                 replace_block(block, content)
+            # XHTML head titles can be displayed by reading systems. They
+            # must not remain in source language after translating the body.
+            doc_titles = _head_titles(root)
+            if len(doc_titles) > 1:
+                raise StructureError(f"multiple XHTML titles in {path}")
+            if doc_titles and "".join(doc_titles[0].itertext()).strip():
+                translated_heading = _first_heading_label(root)
+                if not translated_heading:
+                    raise StructureError(f"unmappable translated XHTML head title: {path}")
+                doc_titles[0].text = translated_heading
             root.set("lang", target_language)
             root.set("{http://www.w3.org/XML/1998/namespace}lang", target_language)
             # Localize navigation labels using the *translated* heading at
@@ -583,6 +716,17 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
             # A nav document may itself be a translated spine document.
             # Never re-read the original and silently discard that translation.
             nav = _safe_xml(replacements.get(path, archive.read(path)), path)
+            if path not in paths:
+                for heading in _head_titles(nav):
+                    if "".join(heading.itertext()).strip():
+                        if target_language.lower().split("-")[0] == "ru":
+                            heading.text = "Оглавление"
+                        elif target_language.lower().split("-")[0] == "en":
+                            heading.text = "Contents"
+                        else:
+                            raise StructureError(
+                                f"cannot localize off-spine navigation head title for {target_language}"
+                            )
             for a in nav.iter():
                 if name(a.tag) != "a" or not a.get("href"):
                     continue

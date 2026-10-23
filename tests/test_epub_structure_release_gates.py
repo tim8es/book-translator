@@ -183,7 +183,7 @@ class NavigationSecurityTests(unittest.TestCase):
                     with self.assertRaisesRegex(StructureError, "unsafe|active"):
                         manifest_and_spine(z)
 
-    def test_duplicate_anchor_ids_are_rejected_at_build(self):
+    def test_duplicate_anchor_ids_are_rejected_at_admission(self):
         raw = make_epub()
         corrupted = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(raw)) as original, zipfile.ZipFile(corrupted, "w") as out:
@@ -193,10 +193,9 @@ class NavigationSecurityTests(unittest.TestCase):
                     value = value.replace(b'id="first"', b'id="second"')
                 out.writestr(info, value)
         source = corrupted.getvalue()
-        units = source_units(source)
+        # Duplicate anchors must be rejected at admission, before translation.
         with self.assertRaisesRegex(StructureError, "duplicate internal XHTML anchor"):
-            build(source, document_paths=[x[2] for x in units],
-                  translations=[x[1] for x in units], target_language="ru", title="История")
+            source_units(source)
 
     def test_partial_protected_marker_is_never_accepted_as_prose(self):
         raw = make_epub()
@@ -384,11 +383,12 @@ class NavigationSecurityTests(unittest.TestCase):
                 "OPS/nav.xhtml": [(b"story.xhtml#first", b"story.xhtml#plain")],
             }
         )
-        units = source_units(source)
-        with self.assertRaisesRegex(StructureError, "label cannot be translated"):
-            build(source, document_paths=[x[2] for x in units],
-                  translations=[x[1] for x in units],
-                  target_language="ru", title="Книга")
+        # Source admission must reject unusable labels before translation.
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "original.epub"
+            source_path.write_bytes(source)
+            with self.assertRaisesRegex(StructureError, "label cannot be translated"):
+                read_chapters(source_path)
 
     def test_off_spine_multitext_styled_label_is_rejected(self):
         source = self.mutate_epub(
@@ -396,11 +396,82 @@ class NavigationSecurityTests(unittest.TestCase):
                 (b">First chapter</a>", b">First <em>chapter</em></a>")
             ]}
         )
-        units = source_units(source)
-        with self.assertRaisesRegex(StructureError, "without losing formatting"):
-            build(source, document_paths=[x[2] for x in units],
-                  translations=[x[1] for x in units],
-                  target_language="ru", title="Книга")
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "original.epub"
+            source_path.write_bytes(source)
+            with self.assertRaisesRegex(StructureError, "without losing formatting"):
+                read_chapters(source_path)
+
+
+    def test_css_escape_remote_loads_are_rejected_before_translation(self):
+        source = make_epub()
+        cases = (
+            b'url(h\\74 tps://tracker.invalid/pixel)',
+            b'@im\\70 ort url(https://tracker.invalid/style.css)',
+            b'body {background:url(\\68\\74\\74\\70\\73://tracker.invalid/x)}',
+        )
+        for css in cases:
+            with self.subTest(css=css):
+                epub = self.mutate_epub(source, {
+                    "OPS/content.opf": [(b"</manifest>", b'<item id="xcss" href="x.css" media-type="text/css"/></manifest>')]
+                }, {"OPS/x.css": css})
+                with zipfile.ZipFile(io.BytesIO(epub)) as archive:
+                    with self.assertRaisesRegex(StructureError, "remote CSS"):
+                        manifest_and_spine(archive)
+
+    def test_text_attributes_are_rejected_at_source_admission(self):
+        original = make_epub()
+        samples = (
+            b'<p><img src="cover.png" alt="English description"/></p>',
+            b'<p><em title="Meaning">Word</em></p>',
+            b'<p aria-label="English accessibility label">Text</p>',
+        )
+        for element in samples:
+            with self.subTest(element=element):
+                revised = self.mutate_epub(original, {
+                    "OPS/story.xhtml": [(b"</body>", element + b"</body>")]
+                })
+                with zipfile.ZipFile(io.BytesIO(revised)) as z:
+                    with self.assertRaisesRegex(StructureError, "untranslated XHTML textual attribute"):
+                        manifest_and_spine(z)
+
+    def test_local_css_escapes_remain_supported(self):
+        source = make_epub()
+        css = b'body { background:url(cover.png); } p::before { content:"\\00a0"; }'
+        revised = self.mutate_epub(source, {
+            "OPS/content.opf": [(b"</manifest>", b'<item id="xcss" href="x.css" media-type="text/css"/></manifest>')]
+        }, {"OPS/x.css": css})
+        with zipfile.ZipFile(io.BytesIO(revised)) as archive:
+            manifest_and_spine(archive)
+
+    def test_head_title_localizes_from_translated_heading(self):
+        source = self.mutate_epub(make_epub(multi_nav=False), {
+            "OPS/story.xhtml": [(b"<body>", b"<head><title>First chapter</title></head><body>")],
+            "OPS/nav.xhtml": [(b"<body>", b"<head><title>Contents</title></head><body>")]
+        })
+        chapters = source_units(source)
+        revised = chapters[0][1].replace("First chapter", "Первая глава")
+        result = build(source, document_paths=[x[2] for x in chapters],
+                       translations=[revised], target_language="ru", title="Книга")
+        with zipfile.ZipFile(io.BytesIO(result)) as z:
+            doc = ET.fromstring(z.read("OPS/story.xhtml"))
+            nav = ET.fromstring(z.read("OPS/nav.xhtml"))
+            self.assertEqual(doc.find(".//{*}title").text, "Первая глава")
+            self.assertEqual(nav.find(".//{*}title").text, "Оглавление")
+
+    def test_unmappable_head_title_is_blocked_before_admission(self):
+        source = self.mutate_epub(make_epub(), {
+            "OPS/story.xhtml": [
+                (b"<body>", b"<head><title>English title</title></head><body>"),
+                (b"<h1 id=\"first\">First chapter</h1>", b"<p id=\"first\">First chapter</p>"),
+                (b"<h2 id=\"second\">Second section</h2>", b"<p id=\"second\">Second section</p>")
+            ]
+        })
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "book.epub"
+            path.write_bytes(source)
+            with self.assertRaisesRegex(StructureError, "unmappable XHTML head title"):
+                read_chapters(path)
 
 
 
