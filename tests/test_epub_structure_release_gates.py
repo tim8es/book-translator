@@ -614,5 +614,76 @@ class NavigationSecurityTests(unittest.TestCase):
 
 
 
+    def test_nested_misdeclared_css_import_cannot_load_remote_resources(self):
+        source = make_epub()
+        for imported in (b'@import "https://tracker.invalid/pixel.css";',
+                         b'@import url(h\\74 tps://tracker.invalid/pixel.css);'):
+            with self.subTest(imported=imported):
+                epub = self.mutate_epub(
+                    source,
+                    {"OPS/content.opf": [(
+                        b"</manifest>",
+                        b'<item id="style" href="style.css" media-type="text/css"/></manifest>',
+                    )]},
+                    {"OPS/style.css": b'@import "nested.data";',
+                     "OPS/nested.data": imported},
+                )
+                with zipfile.ZipFile(io.BytesIO(epub)) as z:
+                    with self.assertRaisesRegex(StructureError, "remote CSS"):
+                        manifest_and_spine(z)
+
+    def test_multi_level_local_css_import_is_allowed(self):
+        source = make_epub()
+        epub = self.mutate_epub(
+            source,
+            {"OPS/content.opf": [(
+                b"</manifest>",
+                b'<item id="style" href="style.css" media-type="text/css"/></manifest>',
+            )]},
+            {"OPS/style.css": b'@import "nested.data";',
+             "OPS/nested.data": b'@import url("final.css") screen;',
+             "OPS/final.css": b'p {line-height: 1.4}'},
+        )
+        with zipfile.ZipFile(io.BytesIO(epub)) as z:
+            manifest_and_spine(z)
+
+    def test_missing_import_is_blocked_at_source_admission(self):
+        source = make_epub()
+        epub = self.mutate_epub(
+            source,
+            {"OPS/content.opf": [(
+                b"</manifest>",
+                b'<item id="style" href="style.css" media-type="text/css"/></manifest>',
+            )]},
+            {"OPS/style.css": b'@import "missing.data";'},
+        )
+        with zipfile.ZipFile(io.BytesIO(epub)) as z:
+            with self.assertRaisesRegex(StructureError, "CSS import target is missing"):
+                manifest_and_spine(z)
+
+    def test_author_override_changes_author_not_prior_illustrator_or_editor(self):
+        source = make_epub(multi_nav=False)
+        creators = (
+            b'<dc:creator id="editor">A. Editor</dc:creator>'
+            b'<meta refines="#editor" property="role">edt</meta>'
+            b'<dc:creator id="writer">Real Author</dc:creator>'
+            b'<meta refines="#writer" property="role">aut</meta>'
+        )
+        source = self.mutate_epub(source, {"OPS/content.opf": [
+            (b"</metadata>", creators + b"</metadata>"),
+        ]})
+        units = source_units(source)
+        result = build(source, document_paths=[u[2] for u in units],
+                       translations=[u[1] for u in units], target_language="ru",
+                       title="Книга", author="Новый автор")
+        with zipfile.ZipFile(io.BytesIO(result)) as z:
+            package = ET.fromstring(z.read("OPS/content.opf"))
+            vals = {node.get("id"): (node.text or "") for node in package.iter()
+                    if node.tag.rsplit("}", 1)[-1] == "creator"}
+            self.assertEqual(vals["editor"], "A. Editor")
+            self.assertEqual(vals["writer"], "Новый автор")
+
+
+
 if __name__ == "__main__":
     unittest.main()
