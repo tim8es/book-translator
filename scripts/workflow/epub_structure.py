@@ -69,6 +69,37 @@ _REMOTE_CSS = re.compile(
 )
 
 
+def _css_import_targets(raw: bytes) -> list[str]:
+    """Normalize escaped CSS import URLs, including local misdeclared assets."""
+    css = raw.decode("utf-8", "replace")
+    css = re.sub(r"\\(?:\r\n|\n|\r|\f)", "", css)
+
+    def unescape(match):
+        hex_digits, single = match.groups()
+        if hex_digits:
+            code = int(hex_digits, 16)
+            return chr(code) if 0 < code <= 0x10FFFF else "\ufffd"
+        return single or ""
+
+    css = re.sub(r"\\(?:([0-9a-fA-F]{1,6})(?:[ \t\r\n\f])?|([^\r\n\f]))",
+                 unescape, css)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    targets = []
+    statements = re.findall(r"(?is)@import\b([^;]*);", css)
+    for statement in statements:
+        match = re.match(r"""(?is)^\s*(?:url\s*\(\s*(['"]?)(.*?)\1\s*\)|(['"])(.*?)\3)""",
+                         statement)
+        if not match:
+            raise StructureError("unsupported CSS @import syntax")
+        target = (match.group(2) if match.group(2) is not None else match.group(4)).strip()
+        if not target:
+            raise StructureError("empty CSS @import target")
+        targets.append(target)
+    if len(statements) != len(re.findall(r"(?i)@import\b", css)):
+        raise StructureError("unterminated CSS @import declaration")
+    return targets
+
+
 def _has_remote_css(raw: bytes) -> bool:
     """Decode CSS escapes before checking auto-fetched URL and @import values.
 
@@ -359,11 +390,27 @@ def manifest_and_spine(archive: zipfile.ZipFile):
             raise StructureError(f"embedded SVG markup is unsupported: {resource_path}")
         if suffix.endswith((".xhtml", ".html", ".htm")) and resource_path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {resource_path}")
-    # MIME metadata is not sufficient: every archived CSS file and any
-    # stylesheet referenced by XHTML must be scanned before source admission.
+    # Each local @import may reference a misdeclared or unmanifested file;
+    # recursively audit it before permitting any book source to be accepted.
+    checked_css: set[str] = set()
+    def check_css(origin: str, raw: bytes) -> None:
+        if origin in checked_css:
+            return
+        checked_css.add(origin)
+        if _has_remote_css(raw):
+            raise StructureError(f"remote CSS resource is unsupported: {origin}")
+        for imported in _css_import_targets(raw):
+            uri = urlsplit(imported)
+            if uri.scheme or uri.netloc or imported.startswith("//"):
+                raise StructureError(f"remote CSS import is unsupported: {origin}")
+            target = member_path(origin, uri.path)
+            if target not in names:
+                raise StructureError(f"CSS import target is missing: {origin}: {imported}")
+            check_css(target, archive.read(target))
+
     for resource_path in names:
-        if resource_path.lower().endswith(".css") and _has_remote_css(archive.read(resource_path)):
-            raise StructureError(f"remote CSS resource is unsupported: {resource_path}")
+        if resource_path.lower().endswith(".css"):
+            check_css(resource_path, archive.read(resource_path))
     for xhtml_path, item in manifest.values():
         if (item.get("media-type") != "application/xhtml+xml"
                 and not xhtml_path.lower().endswith((".xhtml", ".html", ".htm"))):
@@ -380,8 +427,7 @@ def manifest_and_spine(archive: zipfile.ZipFile):
             target = member_path(xhtml_path, url.path)
             if target not in names:
                 raise StructureError(f"missing referenced stylesheet: {target}")
-            if _has_remote_css(archive.read(target)):
-                raise StructureError(f"remote CSS resource is unsupported: {target}")
+            check_css(target, archive.read(target))
     for resource_path, item in manifest.values():
         media_type = item.get("media-type", "").lower()
         if (media_type in {"application/javascript", "text/javascript",
@@ -390,11 +436,18 @@ def manifest_and_spine(archive: zipfile.ZipFile):
             raise StructureError(f"executable EPUB resource is unsupported: {resource_path}")
         if media_type == "text/html":
             raise StructureError(f"HTML resource without XHTML coverage is unsupported: {resource_path}")
-        if media_type == "text/css" and _has_remote_css(archive.read(resource_path)):
-            raise StructureError(f"remote CSS resource is unsupported: {resource_path}")
+        if media_type == "text/css":
+            check_css(resource_path, archive.read(resource_path))
         if (media_type == "application/xhtml+xml"
                 or resource_path.lower().endswith((".xhtml", ".html", ".htm"))):
             _validate_xhtml_security(archive.read(resource_path), resource_path)
+            # EPUB XHTML can itself contain a local <style>@import</style>.
+            # Its indirect resources require the same recursive CSS checks.
+            root = _safe_xml(archive.read(resource_path), resource_path)
+            for index, element in enumerate(root.iter()):
+                if name(element.tag) == "style":
+                    css = "".join(element.itertext()).encode("utf-8")
+                    check_css(f"{resource_path}#embedded-style-{index}", css)
     for path in names:
         if path.lower().endswith((".xhtml", ".html", ".htm")) and path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {path}")
@@ -780,7 +833,23 @@ def build(source: bytes, *, document_paths: Sequence[str], translations: Sequenc
         if author is not None and author.strip():
             creators = [node for node in package.iter() if node.tag == f"{{{DC}}}creator"]
             if creators:
-                creators[0].text = author
+                # In OPF, an illustrator/editor can precede the actual author.
+                # Respect EPUB 2 opf:role and EPUB 3 metadata refinements.
+                selected = None
+                for creator in creators:
+                    ident = creator.get("id")
+                    roles = [value for attr, value in creator.attrib.items()
+                             if name(attr) == "role"]
+                    roles += [
+                        (node.text or "").strip() for node in package.iter()
+                        if ident and name(node.tag) == "meta"
+                        and node.get("refines") == f"#{ident}"
+                        and node.get("property") == "role"
+                    ]
+                    if any(role.strip().lower() == "aut" for role in roles):
+                        selected = creator
+                        break
+                (selected if selected is not None else creators[0]).text = author
             else:
                 metadata_node = next((node for node in package if name(node.tag) == "metadata"), None)
                 if metadata_node is None:
