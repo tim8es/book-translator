@@ -734,5 +734,42 @@ class NavigationSecurityTests(unittest.TestCase):
 
 
 
+    def test_css_image_and_image_set_string_urls_fail_closed(self):
+        source = make_epub()
+        snippets = (
+            b'background-image: image-set("https://tracker.invalid/pixel.png" 1x);',
+            b'background-image: image("https://tracker.invalid/pixel.png");',
+            b'background-image: -webkit-image-set("https://tracker.invalid/x" 2x);',
+            b'background-image: image-set("cover.png" 1x);',
+        )
+        for css in snippets:
+            with self.subTest(css=css):
+                changed = self.mutate_epub(
+                    source,
+                    {"OPS/content.opf": [
+                        (b"</manifest>",
+                         b'<item id="stylesheet" href="stylesheet.css" media-type="text/css"/></manifest>')
+                    ]},
+                    {"OPS/stylesheet.css": b"body{" + css + b"}"},
+                )
+                with zipfile.ZipFile(io.BytesIO(changed)) as z:
+                    with self.assertRaisesRegex(StructureError, "remote CSS"):
+                        manifest_and_spine(z)
+
+    def test_css_image_function_names_hidden_with_escapes_are_rejected(self):
+        changed = self.mutate_epub(
+            make_epub(),
+            {"OPS/content.opf": [
+                (b"</manifest>",
+                 b'<item id="stylesheet" href="stylesheet.css" media-type="text/css"/></manifest>')
+            ]},
+            {"OPS/stylesheet.css": b'body { background: im\\61 ge("https://tracker.invalid/x.png"); }'},
+        )
+        with zipfile.ZipFile(io.BytesIO(changed)) as z:
+            with self.assertRaisesRegex(StructureError, "remote CSS"):
+                manifest_and_spine(z)
+
+
+
 if __name__ == "__main__":
     unittest.main()

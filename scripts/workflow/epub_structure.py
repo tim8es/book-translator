@@ -149,6 +149,11 @@ def _has_remote_css(raw: bytes) -> bool:
         uri = urlsplit(value)
         if uri.scheme or uri.netloc or value.startswith("//"):
             return True
+    # CSS Images Level 4 permits automatically fetched string-form URLs in
+    # image() and image-set(). Without a complete CSS tokenizer it is unsafe
+    # to preserve either function, even when it looks like a local image.
+    if re.search(r"(?i)(?<![\w-])(?:(?:-webkit-)?image-set|image)\s*\(", content):
+        return True
     return bool(_REMOTE_CSS.search(content.encode("utf-8")))
 
 
