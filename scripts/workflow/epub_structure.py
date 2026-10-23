@@ -127,6 +127,11 @@ def _headings_by_anchor(archive: zipfile.ZipFile, spine: list[str]) -> dict[str,
     heading_map: dict[str, str] = {}
     for document in spine:
         root = _safe_xml(archive.read(document), document)
+        # Duplicate IDs are invalid independently of NAV target mapping.
+        # Check before extracting/reviewing a book, not only at final build.
+        identifiers = [node.get("id") for node in root.iter() if node.get("id")]
+        if len(identifiers) != len(set(identifiers)):
+            raise StructureError(f"duplicate internal XHTML anchor id: {document}")
         for el in root.iter():
             tag = name(el.tag)
             if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
