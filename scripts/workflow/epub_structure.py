@@ -76,6 +76,9 @@ def _has_remote_css(raw: bytes) -> bool:
     sources whose CSS cannot be safely interpreted must not be published.
     """
     content = raw.decode("utf-8", "replace")
+    # CSS removes backslash-newline continuations inside quoted URLs before
+    # resolving their schemes (including escaped CRLF and form feed).
+    content = re.sub(r"\\(?:\r\n|\n|\r|\f)", "", content)
 
     def unescape(match):
         hex_digits, single = match.groups()
@@ -243,6 +246,20 @@ def _validate_xhtml_security(raw: bytes, path: str) -> None:
         if tag == "style" and _has_remote_css("".join(element.itertext()).encode("utf-8")):
             raise StructureError(f"remote embedded CSS resource is unsupported: {path}")
         if tag == "meta":
+            # Metadata with natural-language content must enter the translation
+            # surface. Only known inert machine values may pass unchanged.
+            meta_name = element.get("name", "").strip().lower()
+            meta_property = element.get("property", "").strip().lower()
+            meta_content = element.get("content", "").strip()
+            inert_meta = {"viewport", "generator", "referrer", "theme-color",
+                          "color-scheme", "format-detection", "robots",
+                          "apple-mobile-web-app-capable",
+                          "apple-mobile-web-app-status-bar-style", "twitter:card"}
+            if meta_content and (meta_property or
+                                 (meta_name and meta_name not in inert_meta) or
+                                 (not meta_name and not meta_property and
+                                  "http-equiv" not in element.attrib)):
+                raise StructureError(f"untranslated XHTML meta content: {path}")
             # In particular, http-equiv=refresh initiates navigation without
             # any user activation. Keep only inert historical content-type.
             equivalence = next((value.strip().lower() for key, value in element.attrib.items()
@@ -341,6 +358,29 @@ def manifest_and_spine(archive: zipfile.ZipFile):
             raise StructureError(f"embedded SVG markup is unsupported: {resource_path}")
         if suffix.endswith((".xhtml", ".html", ".htm")) and resource_path not in known:
             raise StructureError(f"XHTML outside the EPUB manifest: {resource_path}")
+    # MIME metadata is not sufficient: every archived CSS file and any
+    # stylesheet referenced by XHTML must be scanned before source admission.
+    for resource_path in names:
+        if resource_path.lower().endswith(".css") and _has_remote_css(archive.read(resource_path)):
+            raise StructureError(f"remote CSS resource is unsupported: {resource_path}")
+    for xhtml_path, item in manifest.values():
+        if (item.get("media-type") != "application/xhtml+xml"
+                and not xhtml_path.lower().endswith((".xhtml", ".html", ".htm"))):
+            continue
+        document_root = _safe_xml(archive.read(xhtml_path), xhtml_path)
+        for link in document_root.iter():
+            if (name(link.tag) != "link"
+                    or "stylesheet" not in (link.get("rel") or "").lower().split()
+                    or not link.get("href")):
+                continue
+            url = urlsplit(link.get("href"))
+            if url.scheme or url.netloc:
+                raise StructureError(f"external stylesheet is unsupported: {xhtml_path}")
+            target = member_path(xhtml_path, url.path)
+            if target not in names:
+                raise StructureError(f"missing referenced stylesheet: {target}")
+            if _has_remote_css(archive.read(target)):
+                raise StructureError(f"remote CSS resource is unsupported: {target}")
     for resource_path, item in manifest.values():
         media_type = item.get("media-type", "").lower()
         if (media_type in {"application/javascript", "text/javascript",
