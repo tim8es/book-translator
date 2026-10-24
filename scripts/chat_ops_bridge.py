@@ -263,6 +263,7 @@ def process(root: Path, engine: Path, request_id: str) -> str:
     """Retries only a *rejected push*, never an ambiguous successful write."""
     for attempt in range(3):
         reset(root)
+        request = None
         receipt_path = root / RESULTS / (request_id + ".json")
         if receipt_path.exists():
             return "already-recorded"
@@ -274,6 +275,10 @@ def process(root: Path, engine: Path, request_id: str) -> str:
             request = validate(strict_json(request_path), request_id)
             book_slug = request["book_slug"]
             outcome = execute(root, engine, request)
+            # Admission and acceptance may have written several files; verify
+            # the resulting complete book before staging a single commit.
+            cli(root, "book.py", "validate", book_slug)
+            cli(root, "corpus.py", "verify", book_slug)
             status = "ok"
             error = None
         except (RequestError, OSError, subprocess.CalledProcessError, KeyError,
@@ -287,7 +292,7 @@ def process(root: Path, engine: Path, request_id: str) -> str:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt = {"schema_version": 1, "request_id": request_id,
                    "status": status, "operation": request.get("operation") if
-                   "request" in locals() else None, "result": outcome, "error": error}
+                   request is not None else None, "result": outcome, "error": error}
         receipt_path.write_text(json.dumps(receipt, ensure_ascii=False,
                                            indent=2) + "\n", encoding="utf-8")
         paths = [str(RESULTS / (request_id + ".json"))]
@@ -299,6 +304,14 @@ def process(root: Path, engine: Path, request_id: str) -> str:
             "commit", "-m", "chat-ops: " + status + " " + request_id)
         pushed = git(root, "push", "origin", "HEAD:main", check=False)
         if pushed.returncode == 0:
+            # Re-read the persisted receipt from the remote branch, not our
+            # local worktree. The receipt and book mutation share one commit.
+            git(root, "fetch", "--quiet", "origin", "main")
+            remote = git(root, "show",
+                         "origin/main:" + str(RESULTS / (request_id + ".json")),
+                         check=False)
+            if remote.returncode != 0 or remote.stdout != receipt_path.read_text("utf-8"):
+                raise RuntimeError("published receipt could not be verified")
             return status
         # The remote branch may have advanced. Restart from fresh state and
         # re-check every claim/hash. If transport failed ambiguously, the next
