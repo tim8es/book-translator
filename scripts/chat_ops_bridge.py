@@ -329,6 +329,7 @@ def process(root: Path, engine: Path, request_id: str) -> str:
                          check=False)
             if remote.returncode != 0 or remote.stdout != receipt_path.read_text("utf-8"):
                 raise RuntimeError("published receipt could not be verified")
+            reset(root)  # discard temporary pinned scripts and install marker
             return status
         # Git transports can fail after a successful push. Check the remote
         # receipt before considering replay; never blindly re-run an operation.
@@ -341,6 +342,7 @@ def process(root: Path, engine: Path, request_id: str) -> str:
         if remote.returncode == 0:
             if remote.stdout != receipt_path.read_text("utf-8"):
                 raise RuntimeError("another writer published a conflicting receipt")
+            reset(root)
             return status
         # Only a proven stale-head rejection is eligible for full revalidation.
         if not any(token in pushed.stderr.lower() for token in
