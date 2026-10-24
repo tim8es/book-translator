@@ -132,7 +132,7 @@ class BlockHTMLParser(HTMLParser):
         if not self._skip_depth:
             # Literal Markdown markers in source prose are not formatting.
             # Escape them without changing the handling of generated markers.
-            self._parts.append(re.sub(r"([*\\`\\[\\]\\\\])", r"\\\\\\1", data))
+            self._parts.append("".join(chr(92) + c if c in ("*", "`", "[", "]", chr(92)) else c for c in data))
 
     def close(self) -> None:
         super().close()
