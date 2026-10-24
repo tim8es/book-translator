@@ -122,6 +122,7 @@ class TocAndCoverTests(unittest.TestCase):
         work = self.folder / "runtime"
         (work / "scripts").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts" / "book.py", work / "scripts" / "book.py")
+        shutil.copy2(ROOT / "scripts" / "corpus.py", work / "scripts" / "corpus.py")
         shutil.copytree(ROOT / "scripts" / "workflow", work / "scripts" / "workflow")
         (work / "docs" / "templates").mkdir(parents=True)
         run = subprocess.run(
@@ -136,6 +137,19 @@ class TocAndCoverTests(unittest.TestCase):
         self.assertEqual(metadata["cover_path"], "source/cover.gif")
         self.assertEqual((folder / metadata["cover_path"]).read_bytes(), COVER)
         self.assertFalse(coverage_integrity_errors(folder, metadata, progress))
+        for command in (
+            ("corpus.py", "seal", "complex"),
+            ("book.py", "validate", "complex"),
+            ("corpus.py", "verify", "complex"),
+        ):
+            checked = subprocess.run(
+                [sys.executable, str(work / "scripts" / command[0]), *command[1:]],
+                cwd=work, capture_output=True, text=True,
+            )
+            self.assertEqual(
+                checked.returncode, 0,
+                " ".join(command) + ": " + checked.stdout + checked.stderr,
+            )
         (folder / metadata["cover_path"]).write_bytes(b"corrupted")
         self.assertIn("fingerprint mismatch",
                       " ".join(coverage_integrity_errors(folder, metadata, progress)))
