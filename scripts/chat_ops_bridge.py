@@ -313,9 +313,22 @@ def process(root: Path, engine: Path, request_id: str) -> str:
             if remote.returncode != 0 or remote.stdout != receipt_path.read_text("utf-8"):
                 raise RuntimeError("published receipt could not be verified")
             return status
-        # The remote branch may have advanced. Restart from fresh state and
-        # re-check every claim/hash. If transport failed ambiguously, the next
-        # iteration reads a committed receipt before considering a replay.
+        # Git transports can fail after a successful push. Check the remote
+        # receipt before considering replay; never blindly re-run an operation.
+        refreshed = git(root, "fetch", "--quiet", "origin", "main", check=False)
+        if refreshed.returncode != 0:
+            raise RuntimeError("push failed and remote state cannot be verified")
+        remote = git(root, "show",
+                     "origin/main:" + str(RESULTS / (request_id + ".json")),
+                     check=False)
+        if remote.returncode == 0:
+            if remote.stdout != receipt_path.read_text("utf-8"):
+                raise RuntimeError("another writer published a conflicting receipt")
+            return status
+        # Only a proven stale-head rejection is eligible for full revalidation.
+        if not any(token in pushed.stderr.lower() for token in
+                   ("non-fast-forward", "fetch first", "stale info")):
+            raise RuntimeError("push was rejected for a reason other than concurrent head drift")
     raise RuntimeError("unable to publish request after 3 fresh-state attempts")
 
 
