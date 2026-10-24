@@ -8,6 +8,7 @@ and Markdown assembly. It does not call an LLM and does not perform literary rev
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -129,7 +130,9 @@ class BlockHTMLParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if not self._skip_depth:
-            self._parts.append(data)
+            # Literal Markdown markers in source prose are not formatting.
+            # Escape them without changing the handling of generated markers.
+            self._parts.append(re.sub(r"([*\\`\\[\\]\\\\])", r"\\\\\\1", data))
 
     def close(self) -> None:
         super().close()
