@@ -107,6 +107,20 @@ class TocAndCoverTests(unittest.TestCase):
             self.assertIn("<a href=", content)
             self.assertIn("part-4", nav)
 
+    def test_standalone_html_navigation_content_is_not_discarded(self):
+        html_source = self.folder / "standalone.html"
+        html_source.write_text(
+            '<html><body><nav><p>Contents remain available.</p></nav>'
+            '<h1>Chapter</h1><p>Body.</p></body></html>',
+            encoding="utf-8",
+        )
+        chapters, _ = book.extract_chapters(html_source, "html")
+        self.assertIn("Contents remain available.", chapters[0].content)
+        epub_only = book.split_html_document(
+            html_source.read_text(encoding="utf-8"), "standalone"
+        )
+        self.assertNotIn("Contents remain available.", epub_only[0].content)
+
     def test_invalid_toc_fragment_blocks_coverage(self):
         fixture(self.path, broken_toc=True)
         with self.assertRaisesRegex(SourceCoverageError, "broken TOC fragment"):
