@@ -129,8 +129,8 @@ def _prose_from_markdown(text: str) -> str:
 def _from_markdown(chapters: Sequence[Any]) -> list[str]:
     parts: list[str] = []
     for chapter in chapters:
-        text = re.sub(r"(?m)^[ \\t]*#{1,6}[ \\t]+", "", chapter.content)
-        text = re.sub(r"(?m)^[ \\t]*-[ \\t]+", "", text)
+        text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", "", chapter.content)
+        text = re.sub(r"(?m)^[ \t]*-[ \t]+", "", text)
         text = LINK_RE.sub(lambda match: match.group(1), text)
         parts.append(_prose_from_markdown(text))
     return _tokens(" ".join(parts))
