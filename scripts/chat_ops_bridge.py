@@ -167,6 +167,23 @@ def pinned_engine(root: Path, engine: Path, revision: str) -> None:
     if target.exists():
         shutil.rmtree(target)
     shutil.copytree(scripts, target)
+    # The book repository may have been globally installed at a *newer*
+    # revision. Canonical CLI mutation guards compare the global install
+    # marker to this book's exact workflow revision. Adapt ONLY the
+    # disposable runner checkout; never stage or push this global marker.
+    install_path = root / ".book-translator-install.json"
+    installation = strict_json(install_path)
+    require(installation.get("schema_version") == 1 and
+            installation.get("canonical_repository") ==
+            "https://github.com/tim8es/book-translator" and
+            installation.get("install_root") == ".",
+            "invalid existing global workflow installation")
+    installation["resolved_revision"] = revision
+    install_path.write_text(
+        json.dumps(installation, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    require(strict_json(install_path)["resolved_revision"] == revision,
+            "temporary workflow installation pin was not applied")
 
 
 def chapter_and_claim(book: Path, request: dict, *, role: str) -> dict:
