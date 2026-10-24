@@ -354,18 +354,25 @@ def resolve_output_status(
 
 
 _INLINE_MARKUP = re.compile(
-    r"(\[[^\[\]\n]+\]\((?:https?://|mailto:)[^\s()\[\]]+\)|"
-    r"`[^`\n]+`|\*\*.+?\*\*(?!\*)|\*[^*\n]+?\*)"
+    r"(?<!\\\\)\\[[^\\[\\]\\n]+\\]\\((?:https?://|mailto:)[^\\s()\\[\\]]+\\)|"
+    r"(?<!\\\\)`[^`\\n]+(?<!\\\\)`|"
+    r"(?<!\\\\)\\*\\*.+?(?<!\\\\)\\*\\*(?!\\*)|"
+    r"(?<!\\\\)\\*[^*\\n]+?(?<!\\\\)\\*"
 )
-_SAFE_LINK = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+)\)\Z")
+_SAFE_LINK = re.compile(r"\\[([^\\[\\]\\n]+)\\]\\(((?:https?://|mailto:)[^\\s()\\[\\]]+)\\)\\Z")
 
+
+def _escaped_plain(text: str) -> str:
+    for marker in ("*", chr(96), "[", "]", chr(92)):
+        text = text.replace(chr(92) + marker, marker)
+    return html_escape(text)
 
 def _render_inline(text: str) -> str:
     """Escape plain text while retaining the supported emphasis/code subset."""
     output: list[str] = []
     offset = 0
     for match in _INLINE_MARKUP.finditer(text):
-        output.append(html_escape(text[offset:match.start()]))
+        output.append(_escaped_plain(text[offset:match.start()]))
         value = match.group()
         if value.startswith("["):
             anchor = _SAFE_LINK.fullmatch(value)
@@ -382,7 +389,7 @@ def _render_inline(text: str) -> str:
         elif value.startswith("`") and value.endswith("`"):
             output.append(f"<code>{html_escape(value[1:-1])}</code>")
         offset = match.end()
-    output.append(html_escape(text[offset:]))
+    output.append(_escaped_plain(text[offset:]))
     return "".join(output)
 
 
