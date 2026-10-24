@@ -23,12 +23,16 @@ VALIDATOR = "epub-xhtml-text-v1"
 TEXT_MEDIA = {"application/xhtml+xml", "text/html"}
 BLOCKS = {"body", "section", "article", "div", "p", "li", "blockquote",
           "pre", "h1", "h2", "h3", "h4", "h5", "h6", "header", "footer"}
-UNSUPPORTED = {"a", "img", "table", "figure", "figcaption", "aside", "sup",
+UNSUPPORTED = {"img", "table", "figure", "figcaption", "aside", "sup",
                "sub", "math", "ruby", "audio", "video", "svg", "script",
                "style", "nav", "ol", "hr", "iframe", "object", "canvas",
                "form", "input", "button"}
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-ALLOWED_BODY = BLOCKS | {"br", "ul", "span", "em", "i", "strong", "b", "code"}
+# The same deliberately narrow, unambiguous subset is used by the extractor
+# and EPUB renderer. Relative EPUB targets require source-to-output remapping.
+LINK_RE = re.compile(r"\\[([^\\[\\]\\n]+)\\]\\(((?:https?://|mailto:)[^\\s()\\[\\]]+)\\)")
+SAFE_HREF_RE = re.compile(r"(?:https?://|mailto:)[^\\s()\\[\\]]+\\Z")
+ALLOWED_BODY = BLOCKS | {"a", "br", "ul", "span", "em", "i", "strong", "b", "code"}
 
 
 class SourceCoverageError(ValueError):
@@ -66,10 +70,14 @@ def _reference(raw: bytes, path: str) -> tuple[list[str], int]:
         tag = _name(node.tag)
         if tag in UNSUPPORTED or tag not in ALLOWED_BODY:
             raise SourceCoverageError(f"{path}: unsupported semantic element <{tag}>")
+        if tag == "a":
+            href = node.attrib.get("href", "")
+            if href and not SAFE_HREF_RE.fullmatch(href):
+                raise SourceCoverageError(f"{path}: unsupported anchor destination {href!r}")
         for key, value in node.attrib.items():
             attr = _name(key)
             folded = str(value).lower()
-            if attr in {"hidden", "href", "src"}:
+            if attr in {"hidden", "src"} or (attr == "href" and tag != "a"):
                 raise SourceCoverageError(f"{path}: unsupported attribute {attr}")
             if attr in {"type", "role", "class"} and any(
                 term in folded for term in ("footnote", "endnote", "noteref", "pagebreak")
@@ -95,7 +103,7 @@ def _reference(raw: bytes, path: str) -> tuple[list[str], int]:
 
     visit(bodies[0])
     reference = "".join(parts)
-    if "*" in reference or chr(96) in reference:
+    if any(mark in reference for mark in ("*", chr(96), "[", "]")):
         raise SourceCoverageError(
             f"{path}: literal Markdown delimiters make faithful comparison ambiguous"
         )
@@ -107,6 +115,7 @@ def _from_markdown(chapters: Sequence[Any]) -> list[str]:
     for chapter in chapters:
         text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", "", chapter.content)
         text = re.sub(r"(?m)^[ \t]*-[ \t]+", "", text)
+        text = LINK_RE.sub(lambda match: match.group(1), text)
         parts.append(text.replace("*", "").replace(chr(96), ""))
     return _tokens(" ".join(parts))
 
@@ -226,6 +235,18 @@ def audit_epub(
             fallback = Path(path).stem.replace("_", " ").replace("-", " ").strip() or item_id
             generated = list(extract_document(text, fallback))
             extracted = _from_markdown(generated)
+            original_links = [
+                (node.attrib["href"], _tokens("".join(node.itertext())))
+                for node in ET.fromstring(raw).iter()
+                if _name(node.tag) == "a" and node.attrib.get("href")
+            ]
+            markdown_links = [
+                (match.group(2), _tokens(match.group(1).replace("*", "").replace(chr(96), "")))
+                for chapter in generated
+                for match in LINK_RE.finditer(chapter.content)
+            ]
+            if original_links != markdown_links:
+                raise SourceCoverageError(f"{path}: link text or destination lost or changed")
             if reference != extracted:
                 first = next((i for i, pair in enumerate(zip(reference, extracted))
                               if pair[0] != pair[1]), min(len(reference), len(extracted)))
