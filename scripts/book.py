@@ -64,7 +64,7 @@ class BlockHTMLParser(HTMLParser):
     SKIP_TAGS = {"script", "style", "svg", "head"}
     INLINE_MARKERS = {"em": "*", "i": "*", "strong": "**", "b": "**", "code": "`"}
     # The plain-text extractor cannot represent these structures faithfully.
-    UNSUPPORTED_SEMANTICS = {"a", "img", "table", "figure", "figcaption", "aside",
+    UNSUPPORTED_SEMANTICS = {"img", "table", "figure", "figcaption", "aside",
                              "sup", "sub", "math", "ruby", "audio", "video"}
 
     def __init__(self) -> None:
@@ -84,6 +84,14 @@ class BlockHTMLParser(HTMLParser):
             return
         if tag in self.UNSUPPORTED_SEMANTICS:
             raise BookError(f"Unsupported semantic HTML element <{tag}>; extraction would lose structure")
+        if tag == "a":
+            href = dict(attrs).get("href") or ""
+            if href and not re.fullmatch(r"(?:https?://|mailto:)[^\\s()\\[\\]]+", href):
+                raise BookError("Unsupported anchor destination; only safe external/mail links are supported")
+            if href:
+                self._parts.append("[")
+            self._inline_stack.append(("a", href))
+            return
         if tag in self.INLINE_MARKERS:
             marker = self.INLINE_MARKERS[tag]
             self._parts.append(marker)
@@ -101,6 +109,13 @@ class BlockHTMLParser(HTMLParser):
             self._skip_depth -= 1
             return
         if self._skip_depth:
+            return
+        if tag == "a":
+            if not self._inline_stack or self._inline_stack[-1][0] != "a":
+                raise BookError("Unbalanced HTML anchor")
+            href = self._inline_stack.pop()[1]
+            if href:
+                self._parts.append(f"]({href})")
             return
         if tag in self.INLINE_MARKERS:
             if not self._inline_stack or self._inline_stack[-1][0] != tag:
