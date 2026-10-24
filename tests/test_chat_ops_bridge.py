@@ -156,6 +156,13 @@ class RequestTests(unittest.TestCase):
                 [sys.executable, str(work / "scripts/corpus.py"), "seal", "novel"],
                 cwd=work, text=True, capture_output=True)
             self.assertEqual(seal.returncode, 0, seal.stderr)
+            # Mimic Obsession: book pin is older than the repository-wide
+            # installation marker. The runner must not publish this override.
+            install_path = work / ".book-translator-install.json"
+            global_pin = "0" * 40
+            installation = json.loads(install_path.read_text("utf-8"))
+            installation["resolved_revision"] = global_pin
+            install_path.write_text(json.dumps(installation), encoding="utf-8")
             # Git omits empty directories. Keep the canonical workspace layout
             # in the remote fixture without bypassing book.py validation.
             for folder in ("translated", "output"):
@@ -231,6 +238,13 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(issue("accept-review", "orchestrator-1")["status"], "ok")
             self.assertEqual(json.loads((book / "progress.json").read_text())[
                 "chapters"][0]["status"], "reviewed")
+            # The engine override was runner-local; persisted global provenance
+            # remains pinned to the original installation revision.
+            self.assertEqual(json.loads(install_path.read_text("utf-8"))[
+                "resolved_revision"], global_pin)
+            self.assertEqual(json.loads(run("-C", str(work), "show",
+                                            "HEAD:.book-translator-install.json").stdout)[
+                "resolved_revision"], global_pin)
 
 
 if __name__ == "__main__":
