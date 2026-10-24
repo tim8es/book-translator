@@ -4,7 +4,7 @@ This bridge is **not** a second Workflow engine. It submits allowlisted, immutab
 
 ## Deployment
 
-Install the separate `.github/workflows/chat-operations.yml` workflow in the **book repository**, not the public workflow repository. Keep `scripts/chat_ops_bridge.py` and its tests in the canonical public repository. The Actions job checks out the book repository on `main`, then the current public bridge, and checks out the **exact** `metadata.json.workflow.resolved_revision` for the existing book's `scripts/book.py` and `scripts/corpus.py`. Never use the current main engine as a substitute for the book's selected revision.
+Install the separate `.github/workflows/chat-operations.yml` workflow in the **book repository**, not the public workflow repository. Keep `scripts/chat_ops_bridge.py` and its tests in the canonical public repository. The Actions job checks out the book repository on `main`, then a reviewed, immutable public bridge commit (pin its 40-hex SHA), and checks out the **exact** `metadata.json.workflow.resolved_revision` for the existing book's `scripts/book.py` and `scripts/corpus.py`. Never use the current main engine as a substitute for the book's selected revision.
 
 The private-side Actions file must have `contents:write` on the book repository, only accept `push` to `main` for `.chat-ops/requests/*.json`, and use `concurrency: chat-operations-main` with `cancel-in-progress: false`. Use a scheduled replay (e.g. every 15 minutes) because GitHub concurrency may replace pending runs. All requests not yet carrying results are re-evaluated from fresh `origin/main` on each run; never assume each push receives its own run.
 
@@ -72,4 +72,6 @@ After receiving an `ok` claim receipt, fetch the exact current source, glossary,
 
 ## Testing before activation
 
-Run `python -m unittest discover -s tests -v` on the public PR. On a disposable test book and an isolated branch/repository, test claim/translation/review/release, two concurrent claims for the same unit, a stale claim/hash, a deliberately rejected push, duplicate delivery, a missed workflow event recovered by schedule, and a protected branch denying pushes. Confirm no tests mutate real book state. Only then activate the book repository workflow on `main`.
+Run `python -m unittest discover -s tests -v` on the public PR. For a freshly initialized book, track placeholders for empty `translated/` and `output/` directories in Git before running canonical corpus validation; do not silently recreate missing structure in the worker.
+
+On a disposable test book and an isolated branch/repository, test claim/translation/review/release, two concurrent claims for the same unit, a stale claim/hash, a deliberately rejected push, duplicate delivery, a missed workflow event recovered by schedule, and a protected branch denying pushes. Confirm no tests mutate real book state. Only then activate the book repository workflow on `main`.
