@@ -61,7 +61,9 @@ class BlockHTMLParser(HTMLParser):
 
     BLOCK_TAGS = {"p", "div", "li", "blockquote", "pre"}
     HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-    SKIP_TAGS = {"script", "style", "svg", "head"}
+    # Navigation is recreated from the verified ordered chapter list.
+    # The source-coverage audit independently validates all TOC targets.
+    SKIP_TAGS = {"script", "style", "svg", "head", "nav"}
     INLINE_MARKERS = {"em": "*", "i": "*", "strong": "**", "b": "**", "code": "`"}
     # The plain-text extractor cannot represent these structures faithfully.
     UNSUPPORTED_SEMANTICS = {"img", "table", "figure", "figcaption", "aside",
@@ -525,6 +527,28 @@ def extract_command(args: argparse.Namespace) -> int:
             )
         except SourceCoverageError as exc:
             raise BookError(f"EPUB source coverage blocked: {exc}") from exc
+    cover_path = None
+    if coverage is not None:
+        cover_records = [
+            record["cover_image"] for record in coverage["documents"]
+            if isinstance(record, dict) and "cover_image" in record
+        ]
+        if len(cover_records) > 1:
+            raise BookError("Multiple cover images cannot be preserved unambiguously")
+        if cover_records:
+            cover = cover_records[0]
+            suffix = Path(cover["path"]).suffix.lower()
+            if suffix not in {".jpeg", ".jpg", ".png", ".gif"}:
+                raise BookError("Unsupported embedded cover extension")
+            cover_path = (Path("source") / ("cover" + suffix)).as_posix()
+            with zipfile.ZipFile(stored_source) as archive:
+                data = archive.read(cover["path"])
+            if hashlib.sha256(data).hexdigest() != cover["sha256"]:
+                raise BookError("Embedded cover differs from coverage attestation")
+            target = book_dir / cover_path
+            if target.exists():
+                raise BookError("Refusing to overwrite existing cover asset")
+            target.write_bytes(data)
     chapter_records: list[dict] = []
     used_slugs: set[str] = set()
 
@@ -562,6 +586,7 @@ def extract_command(args: argparse.Namespace) -> int:
         "source_language": args.source_language or detected.get("source_language") or "unknown",
         "target_language": args.target_language,
         "source_format": source_format,
+        **({"cover_path": cover_path} if cover_path is not None else {}),
         "source_file": source.name,
         "chapter_count": len(chapter_records),
         "imported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
