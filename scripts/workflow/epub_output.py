@@ -354,10 +354,10 @@ def resolve_output_status(
 
 
 _INLINE_MARKUP = re.compile(
-    r"(\\[[^\\[\\]\\n]+\\]\\((?:https?://|mailto:)[^\\s()\\[\\]]+\\)|"
-    r"`[^`\\n]+`|\\*\\*.+?\\*\\*(?!\\*)|\\*[^*\\n]+?\\*)"
+    r"(\[[^\[\]\n]+\]\((?:https?://|mailto:)[^\s()\[\]]+\)|"
+    r"`[^`\n]+`|\*\*.+?\*\*(?!\*)|\*[^*\n]+?\*)"
 )
-_SAFE_LINK = re.compile(r"\\[([^\\[\\]\\n]+)\\]\\(((?:https?://|mailto:)[^\\s()\\[\\]]+)\\)\\Z")
+_SAFE_LINK = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+)\)\Z")
 
 
 def _render_inline(text: str) -> str:
