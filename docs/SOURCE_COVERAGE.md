@@ -8,15 +8,28 @@ listed in the EPUB manifest, including documents omitted from the spine.
 Undeclared XHTML members in the ZIP also block certification.
 
 The supported subset comprises text blocks, headings, lists without numbering,
-and inline bold/emphasis/code. External `http://`, `https://` and
-`mailto:` anchors with unambiguous destinations are extracted as Markdown
-links and independently verified for exact label/destination preservation.
-The EPUB renderer converts them back to clickable anchors. Empty `href`
-anchors keep their visible text without a fabricated destination. Relative
-EPUB links, footnotes, tables, images, pagebreaks, complex semantics, malformed
-XHTML, off-spine prose and ambiguous literal Markdown formatting characters
-remain **blocked**, not silently skipped. Relative links need source-to-output
-path remapping before they can be certified.
+inline bold/emphasis/code, and unambiguous external links. Literal Markdown
+punctuation in XHTML text is escaped and independently audited against the
+original, so source prose such as `d*bcon` is not truncated.
+
+For EPUBs with an in-spine `<nav epub:type="toc">`, its navigation links are
+not sent to the translator as prose. The audit requires one nonempty link per
+list entry, rejects duplicate targets and missing spine documents/fragment IDs,
+and verifies prose *outside* the navigation remains in extracted units. EPUB
+output regenerates an ordered navigation document from accepted translated
+units. This does **not** implement arbitrary internal cross-references in prose;
+relative links outside an approved TOC remain blocked.
+
+A cover consisting of a single SVG `<image>` wrapper pointing to a manifest-listed
+JPEG/PNG/GIF asset is independently checked. Its raster bytes are preserved
+under the book workspace, referenced by `metadata.json.cover_path`, and hash-bound
+to `source-coverage.json`. SVG graphics, scripts, multiple images, embedded SVG
+text and other complex visual material still block certification.
+
+Decorative `aria-hidden="true"` spans are included in text coverage (they
+remain visible prose), not skipped. Footnotes, tables, unrelated images,
+pagebreaks, complex semantic elements, malformed XHTML, off-spine prose
+and non-TOC relative links remain **blocked**, not silently skipped.
 The audit does not claim pixel-level layout fidelity or universal EPUB support.
 
 ## New books
