@@ -64,7 +64,7 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
                 '<a href="https://example.com">our site</a>.</p></body></html>')
         chapters, _ = book.read_epub(self.path)
         def broken(_html, _fallback):
-            return [book.Chapter(chapters[0].title, "Visit our site.\\n")]
+            return [book.Chapter(chapters[0].title, "Visit our site.\n")]
         with self.assertRaisesRegex(SourceCoverageError, "link text or destination"):
             self.audit(chapters, extractor=broken)
 
@@ -73,7 +73,7 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
                 '<a href="https://example.com/a">Visit</a></p></body></html>')
         chapters, _ = book.read_epub(self.path)
         def swapped(_html, _fallback):
-            return [book.Chapter(chapters[0].title, "[Visit](https://example.com/b)\\n")]
+            return [book.Chapter(chapters[0].title, "[Visit](https://example.com/b)\n")]
         with self.assertRaisesRegex(SourceCoverageError, "link text or destination"):
             self.audit(chapters, extractor=swapped)
 
@@ -95,7 +95,7 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
         html = '<html><body><h1>Title</h1><p>Hello <strong>world</strong>.</p></body></html>'
         self.assertEqual(
             book.split_html_document(html, "Fallback")[0].content,
-            "# Title\\n\\nHello **world**.\\n"
+            "# Title\n\nHello **world**.\n"
         )
 
 
