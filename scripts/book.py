@@ -8,6 +8,7 @@ and Markdown assembly. It does not call an LLM and does not perform literary rev
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -61,14 +62,17 @@ class BlockHTMLParser(HTMLParser):
 
     BLOCK_TAGS = {"p", "div", "li", "blockquote", "pre"}
     HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+    # Navigation is recreated from the verified ordered chapter list.
+    # The source-coverage audit independently validates all TOC targets.
     SKIP_TAGS = {"script", "style", "svg", "head"}
     INLINE_MARKERS = {"em": "*", "i": "*", "strong": "**", "b": "**", "code": "`"}
     # The plain-text extractor cannot represent these structures faithfully.
-    UNSUPPORTED_SEMANTICS = {"a", "img", "table", "figure", "figcaption", "aside",
+    UNSUPPORTED_SEMANTICS = {"img", "table", "figure", "figcaption", "aside",
                              "sup", "sub", "math", "ruby", "audio", "video"}
 
-    def __init__(self) -> None:
+    def __init__(self, *, skip_navigation: bool = True) -> None:
         super().__init__(convert_charrefs=True)
+        self._skip_tags = self.SKIP_TAGS | ({"nav"} if skip_navigation else set())
         self.blocks: list[tuple[str, str]] = []
         self._tag: str | None = None
         self._parts: list[str] = []
@@ -77,13 +81,21 @@ class BlockHTMLParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
-        if tag in self.SKIP_TAGS:
+        if tag in self._skip_tags:
             self._skip_depth += 1
             return
         if self._skip_depth:
             return
         if tag in self.UNSUPPORTED_SEMANTICS:
             raise BookError(f"Unsupported semantic HTML element <{tag}>; extraction would lose structure")
+        if tag == "a":
+            href = dict(attrs).get("href") or ""
+            if href and not re.fullmatch(r"(?:https?://|mailto:)[^\s()\[\]]+", href):
+                raise BookError("Unsupported anchor destination; only safe external/mail links are supported")
+            if href:
+                self._parts.append("[")
+            self._inline_stack.append(("a", href))
+            return
         if tag in self.INLINE_MARKERS:
             marker = self.INLINE_MARKERS[tag]
             self._parts.append(marker)
@@ -97,10 +109,17 @@ class BlockHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if tag in self.SKIP_TAGS and self._skip_depth:
+        if tag in self._skip_tags and self._skip_depth:
             self._skip_depth -= 1
             return
         if self._skip_depth:
+            return
+        if tag == "a":
+            if not self._inline_stack or self._inline_stack[-1][0] != "a":
+                raise BookError("Unbalanced HTML anchor")
+            href = self._inline_stack.pop()[1]
+            if href:
+                self._parts.append(f"]({href})")
             return
         if tag in self.INLINE_MARKERS:
             if not self._inline_stack or self._inline_stack[-1][0] != tag:
@@ -112,7 +131,9 @@ class BlockHTMLParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if not self._skip_depth:
-            self._parts.append(data)
+            # Literal Markdown markers in source prose are not formatting.
+            # Escape them without changing the handling of generated markers.
+            self._parts.append("".join(chr(92) + c if c in ("*", "`", "[", "]", chr(92)) else c for c in data))
 
     def close(self) -> None:
         super().close()
@@ -177,8 +198,8 @@ def detect_format(path: Path) -> str:
     raise BookError(f"Unsupported source format: {suffix or '<no extension>'}")
 
 
-def html_blocks(text: str) -> list[tuple[str, str]]:
-    parser = BlockHTMLParser()
+def html_blocks(text: str, *, skip_navigation: bool = True) -> list[tuple[str, str]]:
+    parser = BlockHTMLParser(skip_navigation=skip_navigation)
     parser.feed(text)
     parser.close()
     return parser.blocks
@@ -196,8 +217,10 @@ def blocks_to_markdown(blocks: Iterable[tuple[str, str]]) -> str:
     return "\n\n".join(lines).strip() + "\n"
 
 
-def split_html_document(text: str, fallback_title: str) -> list[Chapter]:
-    blocks = html_blocks(text)
+def split_html_document(
+    text: str, fallback_title: str, *, skip_navigation: bool = True
+) -> list[Chapter]:
+    blocks = html_blocks(text, skip_navigation=skip_navigation)
     if not blocks:
         raise BookError(f"No readable text found in {fallback_title}.")
 
@@ -365,7 +388,8 @@ def extract_chapters(source: Path, source_format: str) -> tuple[list[Chapter], d
     text = decode_text(source.read_bytes(), str(source))
     fallback = source.stem.replace("_", " ").replace("-", " ").strip() or "Book"
     if source_format in {"html", "xhtml"}:
-        return split_html_document(text, fallback), {}
+        # Standalone HTML navigation may be substantive and is not EPUB-certified.
+        return split_html_document(text, fallback, skip_navigation=False), {}
     if source_format == "markdown":
         return split_markdown(text, fallback), {}
     if source_format == "txt":
@@ -510,6 +534,28 @@ def extract_command(args: argparse.Namespace) -> int:
             )
         except SourceCoverageError as exc:
             raise BookError(f"EPUB source coverage blocked: {exc}") from exc
+    cover_path = None
+    if coverage is not None:
+        cover_records = [
+            record["cover_image"] for record in coverage["documents"]
+            if isinstance(record, dict) and "cover_image" in record
+        ]
+        if len(cover_records) > 1:
+            raise BookError("Multiple cover images cannot be preserved unambiguously")
+        if cover_records:
+            cover = cover_records[0]
+            suffix = Path(cover["path"]).suffix.lower()
+            if suffix not in {".jpeg", ".jpg", ".png", ".gif"}:
+                raise BookError("Unsupported embedded cover extension")
+            cover_path = (Path("source") / ("cover" + suffix)).as_posix()
+            with zipfile.ZipFile(stored_source) as archive:
+                data = archive.read(cover["path"])
+            if hashlib.sha256(data).hexdigest() != cover["sha256"]:
+                raise BookError("Embedded cover differs from coverage attestation")
+            target = book_dir / cover_path
+            if target.exists():
+                raise BookError("Refusing to overwrite existing cover asset")
+            target.write_bytes(data)
     chapter_records: list[dict] = []
     used_slugs: set[str] = set()
 
@@ -547,6 +593,7 @@ def extract_command(args: argparse.Namespace) -> int:
         "source_language": args.source_language or detected.get("source_language") or "unknown",
         "target_language": args.target_language,
         "source_format": source_format,
+        **({"cover_path": cover_path} if cover_path is not None else {}),
         "source_file": source.name,
         "chapter_count": len(chapter_records),
         "imported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
