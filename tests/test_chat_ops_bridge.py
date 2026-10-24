@@ -156,6 +156,12 @@ class RequestTests(unittest.TestCase):
                 [sys.executable, str(work / "scripts/corpus.py"), "seal", "novel"],
                 cwd=work, text=True, capture_output=True)
             self.assertEqual(seal.returncode, 0, seal.stderr)
+            # Git omits empty directories. Keep the canonical workspace layout
+            # in the remote fixture without bypassing book.py validation.
+            for folder in ("translated", "output"):
+                directory = work / "books" / "novel" / folder
+                directory.mkdir(exist_ok=True)
+                (directory / ".gitkeep").write_text("", encoding="utf-8")
             run("-C", str(work), "checkout", "-b", "main")
             run("-C", str(work), "config", "user.name", "Bridge Test")
             run("-C", str(work), "config", "user.email", "bridge@example.invalid")
