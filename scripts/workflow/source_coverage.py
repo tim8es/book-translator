@@ -96,8 +96,6 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
                 raise SourceCoverageError(f"{path}: hidden content requires explicit handling")
             if attr == "aria-hidden" and folded not in {"true", "false"}:
                 raise SourceCoverageError(f"{path}: unsupported aria-hidden value")
-            if False:
-                raise SourceCoverageError(f"{path}: hidden content requires explicit handling")
         if tag in BLOCKS or tag == "br":
             parts.append(" ")
         if tag in {"p", "li", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}:
@@ -113,20 +111,28 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
 
     visit(bodies[0])
     reference = "".join(parts)
-    if any(mark in reference for mark in ("*", chr(96), "[", "]")):
-        raise SourceCoverageError(
-            f"{path}: literal Markdown delimiters make faithful comparison ambiguous"
-        )
     return _tokens(reference), count
+
+
+def _prose_from_markdown(text: str) -> str:
+    """Strip generated markup while retaining escaped original punctuation."""
+    protected = {chr(92) + char: chr(0xE000 + index)
+                 for index, char in enumerate(("*", chr(96), "[", "]", chr(92)))}
+    for escaped, sentinel in protected.items():
+        text = text.replace(escaped, sentinel)
+    text = text.replace("*", "").replace(chr(96), "")
+    for escaped, sentinel in protected.items():
+        text = text.replace(sentinel, escaped[-1])
+    return text
 
 
 def _from_markdown(chapters: Sequence[Any]) -> list[str]:
     parts: list[str] = []
     for chapter in chapters:
-        text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", "", chapter.content)
-        text = re.sub(r"(?m)^[ \t]*-[ \t]+", "", text)
+        text = re.sub(r"(?m)^[ \\t]*#{1,6}[ \\t]+", "", chapter.content)
+        text = re.sub(r"(?m)^[ \\t]*-[ \\t]+", "", text)
         text = LINK_RE.sub(lambda match: match.group(1), text)
-        parts.append(text.replace("*", "").replace(chr(96), ""))
+        parts.append(_prose_from_markdown(text))
     return _tokens(" ".join(parts))
 
 
@@ -348,7 +354,7 @@ def audit_epub(
                 and node.attrib.get("href")
             ]
             markdown_links = [
-                (match.group(2), _tokens(match.group(1).replace("*", "").replace(chr(96), "")))
+                (match.group(2), _tokens(_prose_from_markdown(match.group(1))))
                 for chapter in generated
                 for match in LINK_RE.finditer(chapter.content)
             ]
