@@ -30,8 +30,8 @@ UNSUPPORTED = {"img", "table", "figure", "figcaption", "aside", "sup",
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # The same deliberately narrow, unambiguous subset is used by the extractor
 # and EPUB renderer. Relative EPUB targets require source-to-output remapping.
-LINK_RE = re.compile(r"\\[([^\\[\\]\\n]+)\\]\\(((?:https?://|mailto:)[^\\s()\\[\\]]+)\\)")
-SAFE_HREF_RE = re.compile(r"(?:https?://|mailto:)[^\\s()\\[\\]]+\\Z")
+LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+)\)")
+SAFE_HREF_RE = re.compile(r"(?:https?://|mailto:)[^\s()\[\]]+\Z")
 ALLOWED_BODY = BLOCKS | {"a", "br", "ul", "span", "em", "i", "strong", "b", "code"}
 
 
