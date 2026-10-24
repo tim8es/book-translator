@@ -1,3 +1,14 @@
+## Structural EPUB coverage
+
+On the new default EPUB layout profile, independent original-XHTML coverage
+uses validator `epub-xhtml-structure-v2`. The checker binds the exact original
+archive SHA-256, ordered spine documents, every extracted unit SHA-256 and
+the `layout/structure.json` profile. It independently compares each
+XHTML text block's XML `itertext` to the text exposed to the translator
+after removing *only* structural protection tokens. Missing/malformed
+markers and unmapped prose block the final output. Existing old EPUB
+workspaces still use their original pinned workflow.
+
 # EPUB source coverage
 
 The original EPUB is independently inventoried before a book can be admitted to

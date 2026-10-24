@@ -106,6 +106,29 @@ def coverage_command(args: argparse.Namespace, root: Path) -> int:
                     storage.write_if_version(COVERAGE_PATH, payload, current.version)
                 except StorageVersionConflict as exc:
                     raise CoverageCliError("coverage evidence changed concurrently; re-run verification") from exc
+    if args.record and report.get("validator") == "epub-xhtml-structure-v2":
+        # An explicitly certified later source edition supplies the new
+        # SHA-bound layout. This is not a silent workflow upgrade: it only
+        # follows a separately authorized source-revision promotion.
+        from .epub_structure import STRUCTURE_PATH, read_chapters, layout_bytes
+        try:
+            _, layout = read_chapters(source)
+            layout_payload = layout_bytes(layout)
+            current_layout = storage.read(STRUCTURE_PATH)
+            if current_layout.content != layout_payload:
+                storage.write_if_version(
+                    STRUCTURE_PATH, layout_payload, current_layout.version
+                )
+        except StorageError as exc:
+            from .storage import StorageNotFound
+            if isinstance(exc, StorageNotFound):
+                try:
+                    storage.create_if_absent(STRUCTURE_PATH, layout_payload)
+                except StorageError as error:
+                    raise CoverageCliError(f"cannot persist verified EPUB layout: {error}") from error
+            else:
+                raise CoverageCliError(f"cannot update verified EPUB layout: {exc}") from exc
+
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:

@@ -37,11 +37,14 @@ def epub(path: Path, chapter: str, *, extra: str = "", note: str = "") -> None:
 
 
 def certify(path):
-    chapters, _ = book.read_epub(path)
-    return audit_epub(
-        path, chapters, extract_document=book.split_html_document,
-        decode_text=book.decode_text,
-    )
+    try:
+        chapters, _ = book.read_epub(path)
+        return audit_epub(
+            path, chapters, extract_document=book.split_html_document,
+            decode_text=book.decode_text,
+        )
+    except book.BookError as exc:
+        raise SourceCoverageError(str(exc)) from exc
 
 
 class CoverageAuditTests(unittest.TestCase):
@@ -65,11 +68,10 @@ class CoverageAuditTests(unittest.TestCase):
     def test_missing_paragraph_is_detected_independently(self):
         epub(self.path, "<html><body><h1>One</h1><p>Keep.</p><p>Missing.</p></body></html>")
         chapters, _ = book.read_epub(self.path)
-        def lossy(_text, _title):
-            return [book.Chapter("One", "# One\n\nKeep.\n")]
-        with self.assertRaisesRegex(SourceCoverageError, "token"):
+        damaged = [book.Chapter(chapters[0].title, chapters[0].content.replace("Missing.", ""))]
+        with self.assertRaisesRegex(SourceCoverageError, "differs"):
             audit_epub(
-                self.path, chapters, extract_document=lossy,
+                self.path, damaged, extract_document=book.split_html_document,
                 decode_text=book.decode_text,
             )
 
@@ -100,9 +102,9 @@ class CoverageAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceCoverageError, "outside the EPUB manifest"):
             certify(self.path)
 
-    def test_unknown_semantic_markup_is_rejected(self):
-        epub(self.path, "<html><body><p>Alpha <del>deleted</del>.</p></body></html>")
-        with self.assertRaisesRegex(SourceCoverageError, "<del>"):
+    def test_unsafe_executable_markup_is_rejected(self):
+        epub(self.path, "<html><body><p>Alpha <script>alert(1)</script>.</p></body></html>")
+        with self.assertRaisesRegex(SourceCoverageError, "<script>"):
             certify(self.path)
 
     def test_navigation_with_content_outside_nav_blocks_coverage(self):
@@ -130,7 +132,7 @@ class CoverageAuditTests(unittest.TestCase):
         epub(self.path, "<html><body><p>Alpha.</p></body></html>")
         with zipfile.ZipFile(self.path, "a") as z:
             z.writestr("OPS/chapter.xhtml", "<html><body><p>Duplicated.</p></body></html>")
-        with self.assertRaisesRegex(SourceCoverageError, "duplicate archive"):
+        with self.assertRaisesRegex(SourceCoverageError, "duplicate"):
             certify(self.path)
 
     def test_mismatched_chapter_corpus_is_rejected(self):

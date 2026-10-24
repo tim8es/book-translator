@@ -304,82 +304,30 @@ def split_txt(text: str, fallback_title: str) -> list[Chapter]:
 
 
 def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
-    with zipfile.ZipFile(source) as zf:
-        try:
-            container = ET.fromstring(zf.read("META-INF/container.xml"))
-        except (KeyError, ET.ParseError) as exc:
-            raise BookError(f"Invalid EPUB container: {exc}") from exc
-
-        rootfile = next(
-            (node.attrib.get("full-path") for node in container.iter() if node.tag.endswith("rootfile")),
-            None,
-        )
-        if not rootfile:
-            raise BookError("EPUB container.xml has no rootfile.")
-
-        try:
-            opf = ET.fromstring(zf.read(rootfile))
-        except (KeyError, ET.ParseError) as exc:
-            raise BookError(f"Invalid EPUB package document: {exc}") from exc
-
-        def metadata_text(local_name: str) -> str | None:
-            for node in opf.iter():
-                if node.tag.endswith(local_name) and node.text and node.text.strip():
-                    return node.text.strip()
-            return None
-
-        metadata = {
-            "title": metadata_text("title"),
-            "author": metadata_text("creator"),
-            "source_language": metadata_text("language"),
-        }
-
-        manifest: dict[str, tuple[str, str, str]] = {}
-        for node in opf.iter():
-            if not node.tag.endswith("item"):
-                continue
-            item_id = node.attrib.get("id")
-            href = node.attrib.get("href")
-            if item_id and href:
-                manifest[item_id] = (
-                    href,
-                    node.attrib.get("media-type", ""),
-                    node.attrib.get("properties", ""),
+    """Extract EPUB as protected, per-XHTML block streams by default."""
+    from workflow.epub_structure import read_chapters, StructureError
+    try:
+        units, _ = read_chapters(source)
+        with zipfile.ZipFile(source) as archive:
+            container = ET.fromstring(archive.read("META-INF/container.xml"))
+            opf_path = next(
+                e.get("full-path") for e in container.iter()
+                if e.tag.endswith("rootfile")
+            )
+            opf = ET.fromstring(archive.read(opf_path))
+            def meta(tag):
+                return next(
+                    (e.text.strip() for e in opf.iter()
+                     if e.tag.endswith(tag) and e.text and e.text.strip()), None
                 )
-
-        spine_ids = [
-            node.attrib["idref"]
-            for node in opf.iter()
-            if node.tag.endswith("itemref") and node.attrib.get("idref")
-        ]
-        opf_dir = Path(rootfile).parent
-
-        chapters: list[Chapter] = []
-        for idref in spine_ids:
-            item = manifest.get(idref)
-            if not item:
-                raise BookError(f"EPUB spine references unknown manifest item: {idref}")
-            href, media_type, properties = item
-            if "nav" in properties.split():
-                continue
-            if media_type not in {"application/xhtml+xml", "text/html"}:
-                raise BookError(f"Unsupported EPUB spine media type {media_type!r}: {idref}")
-            epub_path = (opf_dir / unquote(href.split("#", 1)[0])).as_posix()
-            try:
-                raw = zf.read(epub_path)
-            except KeyError as exc:
-                raise BookError(f"EPUB spine references missing file: {epub_path}") from exc
-            text = decode_text(raw, epub_path)
-            fallback = Path(epub_path).stem.replace("_", " ").replace("-", " ").strip() or idref
-            try:
-                chapters.extend(split_html_document(text, fallback))
-            except BookError as exc:
-                raise BookError(f"Cannot extract EPUB spine document {epub_path}: {exc}") from exc
-
-        if not chapters:
-            raise BookError("No readable XHTML/HTML chapters found in EPUB spine.")
-        return chapters, metadata
-
+            metadata = {
+                "title": meta("title"),
+                "author": meta("creator"),
+                "source_language": meta("language"),
+            }
+        return [Chapter(title, content) for title, content, _, _ in units], metadata
+    except (StructureError, KeyError, StopIteration, ET.ParseError, OSError, ValueError) as exc:
+        raise BookError(f"Cannot structurally extract EPUB without losing content: {exc}") from exc
 
 def extract_chapters(source: Path, source_format: str) -> tuple[list[Chapter], dict[str, str | None]]:
     if source_format == "epub":
@@ -524,6 +472,15 @@ def extract_command(args: argparse.Namespace) -> int:
         shutil.copy2(source, stored_source)
 
     chapters, detected = extract_chapters(stored_source, source_format)
+    if source_format == "epub":
+        from workflow.epub_structure import read_chapters, layout_bytes, STRUCTURE_PATH
+        try:
+            _, layout = read_chapters(stored_source)
+        except ValueError as exc:
+            raise BookError(f"Cannot preserve EPUB structure: {exc}") from exc
+        structure_file = book_dir / STRUCTURE_PATH
+        structure_file.parent.mkdir(parents=True, exist_ok=True)
+        structure_file.write_bytes(layout_bytes(layout))
     coverage = None
     if source_format == "epub":
         try:

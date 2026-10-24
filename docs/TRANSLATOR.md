@@ -1,3 +1,15 @@
+# EPUB protected blocks
+
+For a newly extracted EPUB using the `epub-structural-v1` layout,
+translate complete natural-language text blocks marked
+`⟦BT:SEG:000001⟧` while preserving each identifier. Preserve all protected
+`⟦BT:O:0001⟧`, `⟦BT:C:0001⟧` and `⟦BT:V:0002⟧` markers, including their
+nesting and block membership. They protect emphasis, links, images, notes,
+hard breaks, and other original XHTML. Do not edit HTML or CSS; translate
+the prose naturally around protected spans. Damage to a marker blocks
+acceptance/build, rather than causing formatting loss. For details see
+[EPUB structural contract](EPUB_STRUCTURE.md).
+
 # Translator contract
 
 Read with `AGENTS.md` and the shared `docs/TRANSLATION.md` standard. This role produces a complete translation, not a review verdict. State mutation and worker admission remain governed by the Orchestrator.
