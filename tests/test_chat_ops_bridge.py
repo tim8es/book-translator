@@ -125,5 +125,107 @@ class RequestTests(unittest.TestCase):
             self.assertFalse((book / ".workflow").exists())
 
 
+    def test_real_engine_claim_accept_review_cycle_with_remote_receipts(self):
+        """A disposable Git remote exercises the actual pinned CLI, not mocks."""
+        import shutil
+        import sys
+
+        public = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            remote, work, engine = root / "remote.git", root / "books-repo", root / "engine"
+            run("init", "--bare", str(remote))
+            run("clone", str(remote), str(work))
+            run("clone", str(public), str(engine))
+            rev = run("-C", str(engine), "rev-parse", "HEAD").stdout.strip()
+            shutil.copytree(public / "scripts", work / "scripts")
+            shutil.copy2(public / "agent-manifest.json", work / "agent-manifest.json")
+            (work / ".book-translator-install.json").write_text(json.dumps({
+                "schema_version": 1,
+                "canonical_repository": "https://github.com/tim8es/book-translator",
+                "requested_ref": "main", "resolved_revision": rev, "install_root": "."
+            }), encoding="utf-8")
+            src = work / "novel.md"
+            src.write_text("# First\n\nSome original English prose.\n", encoding="utf-8")
+            extract = subprocess.run(
+                [sys.executable, str(work / "scripts/book.py"), "extract", str(src),
+                 "--slug", "novel", "--target-language", "ru"],
+                cwd=work, text=True, capture_output=True)
+            self.assertEqual(extract.returncode, 0, extract.stderr)
+            seal = subprocess.run(
+                [sys.executable, str(work / "scripts/corpus.py"), "seal", "novel"],
+                cwd=work, text=True, capture_output=True)
+            self.assertEqual(seal.returncode, 0, seal.stderr)
+            run("-C", str(work), "checkout", "-b", "main")
+            run("-C", str(work), "config", "user.name", "Bridge Test")
+            run("-C", str(work), "config", "user.email", "bridge@example.invalid")
+            run("-C", str(work), "add", "-A")
+            run("-C", str(work), "commit", "-m", "book fixture")
+            run("-C", str(work), "push", "-u", "origin", "main")
+
+            book = work / "books" / "novel"
+            count = 0
+
+            def issue(op, session, **extra):
+                nonlocal count
+                count += 1
+                rid = f"{count:032x}"
+                payload = {"schema_version": 1, "request_id": rid,
+                           "book_slug": "novel", "workflow_revision": rev,
+                           "operation": op, "chapter": 1, "session_id": session}
+                payload.update(extra)
+                file = work / bridge.REQUESTS / (rid + ".json")
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                run("-C", str(work), "add", "-A")
+                run("-C", str(work), "commit", "-m", "request " + rid)
+                run("-C", str(work), "push", "origin", "HEAD:main")
+                status = bridge.process(work, engine, rid)
+                receipt = json.loads((work / bridge.RESULTS / (rid + ".json")).read_text())
+                self.assertEqual(receipt["status"], status)
+                self.assertEqual(bridge.process(work, engine, rid), "already-recorded")
+                return receipt
+
+            claim = issue("claim", "writer-1", role="translator")
+            self.assertEqual(claim["status"], "ok", claim["error"])
+            conflict = issue("claim", "writer-2", role="translator")
+            self.assertEqual(conflict["status"], "failed")
+            progress = json.loads((book / "progress.json").read_text(encoding="utf-8"))
+            chapter = progress["chapters"][0]
+            claim_file = book / ".workflow/claims" / (chapter["unit_id"] + ".json")
+            source_hash = hashlib.sha256((book / chapter["source_path"]).read_bytes()).hexdigest()
+            claim_hash = hashlib.sha256(claim_file.read_bytes()).hexdigest()
+
+            bad = issue("accept-translation", "writer-1", translation="# Ошибка\n",
+                        translation_sha256=hashlib.sha256("# Ошибка\n".encode()).hexdigest(),
+                        source_sha256=source_hash, claim_sha256="0" * 64)
+            self.assertEqual(bad["status"], "failed")
+            self.assertEqual(json.loads((book / "progress.json").read_text())[
+                "chapters"][0]["status"], "extracted")
+
+            translated = "# Первая глава\n\nНебольшой полный перевод.\n"
+            accepted = issue("accept-translation", "writer-1",
+                             translation=translated,
+                             translation_sha256=hashlib.sha256(translated.encode()).hexdigest(),
+                             source_sha256=source_hash, claim_sha256=claim_hash)
+            self.assertEqual(accepted["status"], "ok", accepted["error"])
+            self.assertEqual(json.loads((book / "progress.json").read_text())[
+                "chapters"][0]["status"], "translated")
+            self.assertEqual(issue("release", "writer-1")["status"], "ok")
+            self.assertEqual(issue("claim", "reviewer-1", role="reviewer")["status"], "ok")
+            claim_hash = hashlib.sha256(claim_file.read_bytes()).hexdigest()
+            recorded = issue("review-record", "reviewer-1", outcome="PASS",
+                             quality_report={"context": "bounded_context",
+                                             "checks": {"coverage": True, "meaning": True,
+                                                        "terminology": True, "style": True,
+                                                        "structure": True}, "findings": []},
+                             source_sha256=source_hash, claim_sha256=claim_hash,
+                             translation_sha256=hashlib.sha256(translated.encode()).hexdigest())
+            self.assertEqual(recorded["status"], "ok", recorded["error"])
+            self.assertEqual(issue("accept-review", "orchestrator-1")["status"], "ok")
+            self.assertEqual(json.loads((book / "progress.json").read_text())[
+                "chapters"][0]["status"], "reviewed")
+
+
 if __name__ == "__main__":
     unittest.main()
