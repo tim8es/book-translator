@@ -86,7 +86,7 @@ class BlockHTMLParser(HTMLParser):
             raise BookError(f"Unsupported semantic HTML element <{tag}>; extraction would lose structure")
         if tag == "a":
             href = dict(attrs).get("href") or ""
-            if href and not re.fullmatch(r"(?:https?://|mailto:)[^\\s()\\[\\]]+", href):
+            if href and not re.fullmatch(r"(?:https?://|mailto:)[^\s()\[\]]+", href):
                 raise BookError("Unsupported anchor destination; only safe external/mail links are supported")
             if href:
                 self._parts.append("[")
