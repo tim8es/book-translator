@@ -492,6 +492,32 @@ def coverage_integrity_errors(
             and type(d.get("chapter_count")) is int
         ) != len(chapters):
             errors.append("EPUB coverage document chapter totals disagree with progress")
+    cover_documents = [
+        d["cover_image"] for d in docs
+        if isinstance(d, Mapping) and isinstance(d.get("cover_image"), Mapping)
+    ] if isinstance(docs, list) else []
+    if len(cover_documents) > 1:
+        errors.append("Multiple embedded raster covers require explicit handling")
+    if cover_documents:
+        cover = cover_documents[0]
+        cover_path = metadata.get("cover_path")
+        if (not isinstance(cover_path, str)
+                or Path(cover_path).is_absolute()
+                or Path(cover_path).parts[:1] != ("source",)
+                or ".." in Path(cover_path).parts):
+            errors.append("Certified cover asset is missing or has an unsafe path")
+        elif (cover.get("media_type") not in {"image/jpeg", "image/png", "image/gif"}
+              or not isinstance(cover.get("sha256"), str)
+              or not SHA_RE.fullmatch(cover["sha256"])):
+            errors.append("Invalid cover identity in EPUB coverage")
+        else:
+            try:
+                current_cover = _sha((book_dir / cover_path).read_bytes())
+            except OSError:
+                errors.append("Certified cover artwork is missing")
+            else:
+                if current_cover != cover["sha256"]:
+                    errors.append("Certified cover artwork fingerprint mismatch")
     for chapter, record in zip(chapters, recorded):
         if not isinstance(chapter, Mapping) or not isinstance(record, Mapping):
             errors.append("Invalid EPUB source-coverage chapter entry")
