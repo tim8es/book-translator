@@ -53,7 +53,7 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"\w+|[^\w\s]", unicodedata.normalize("NFC", text))
 
 
-def _reference(raw: bytes, path: str) -> tuple[list[str], int]:
+def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: bool = False) -> tuple[list[str], int]:
     """Inventory prose directly from XHTML XML, not the chapter extraction code."""
     try:
         root = ET.fromstring(raw)
@@ -68,6 +68,12 @@ def _reference(raw: bytes, path: str) -> tuple[list[str], int]:
     def visit(node: ET.Element) -> None:
         nonlocal count
         tag = _name(node.tag)
+        if (tag == "nav" and allow_toc) or (tag == "svg" and allow_svg):
+            # Subtrees have already passed independent structural/target checks.
+            # Their content is not prose: the output builder regenerates the TOC
+            # and the source cover asset is carried separately.
+            parts.append(" ")
+            return
         if tag in UNSUPPORTED or tag not in ALLOWED_BODY:
             raise SourceCoverageError(f"{path}: unsupported semantic element <{tag}>")
         if tag == "a":
@@ -83,10 +89,14 @@ def _reference(raw: bytes, path: str) -> tuple[list[str], int]:
                 term in folded for term in ("footnote", "endnote", "noteref", "pagebreak")
             ):
                 raise SourceCoverageError(f"{path}: unsupported annotation {attr}={value!r}")
-            if attr in {"style", "aria-hidden"} and any(
-                term in folded for term in ("display:none", "display: none", "visibility:hidden",
-                                             "visibility: hidden", "true")
+            if attr == "style" and any(
+                term in folded for term in ("display:none", "display: none",
+                                             "visibility:hidden", "visibility: hidden")
             ):
+                raise SourceCoverageError(f"{path}: hidden content requires explicit handling")
+            if attr == "aria-hidden" and folded not in {"true", "false"}:
+                raise SourceCoverageError(f"{path}: unsupported aria-hidden value")
+            if False:
                 raise SourceCoverageError(f"{path}: hidden content requires explicit handling")
         if tag in BLOCKS or tag == "br":
             parts.append(" ")
@@ -162,6 +172,88 @@ def _archive_path(opf_path: str, href: str) -> str:
     return result
 
 
+def _verify_toc(root: ET.Element, path: str, archive: zipfile.ZipFile,
+                spine_paths: set[str]) -> set[str]:
+    """An in-spine TOC is regenerable only with resolvable, unambiguous entries."""
+    navs = [node for node in root.iter() if _name(node.tag) == "nav"]
+    if not navs:
+        return set()
+    if len(navs) != 1:
+        raise SourceCoverageError(f"{path}: multiple navigation regions unsupported")
+    nav = navs[0]
+    if not any(_name(key) == "type" and value == "toc"
+               for key, value in nav.attrib.items()):
+        raise SourceCoverageError(f"{path}: only an explicit epub:type=toc nav is supported")
+    allowed = {"nav", "ol", "li", "a", "span", "em", "i", "strong", "b"}
+    for node in nav.iter():
+        if _name(node.tag) not in allowed:
+            raise SourceCoverageError(f"{path}: unsupported TOC element <{_name(node.tag)}>")
+        if _name(node.tag) not in {"a", "span", "em", "i", "strong", "b"} and (
+            (node.text or "").strip() or (node.tail or "").strip()
+        ):
+            raise SourceCoverageError(f"{path}: prose inside TOC outside link label")
+    entries = [node for node in nav.iter() if _name(node.tag) == "li"]
+    if not entries:
+        raise SourceCoverageError(f"{path}: empty TOC")
+    targets: set[str] = set()
+    for li in entries:
+        anchors = [node for node in li.iter() if _name(node.tag) == "a"]
+        if len(anchors) != 1 or not "".join(anchors[0].itertext()).strip():
+            raise SourceCoverageError(f"{path}: ambiguous TOC entry")
+        href = anchors[0].attrib.get("href", "")
+        if not href or "?" in href or "#" not in href:
+            raise SourceCoverageError(f"{path}: TOC link requires a relative document fragment")
+        target, fragment = href.split("#", 1)
+        if not target or not fragment:
+            raise SourceCoverageError(f"{path}: empty TOC target or fragment")
+        target_path = _archive_path(path, target)
+        if target_path not in spine_paths or target_path in targets:
+            raise SourceCoverageError(f"{path}: missing or repeated TOC spine target {target_path}")
+        try:
+            document = ET.fromstring(archive.read(target_path))
+        except (KeyError, ET.ParseError) as exc:
+            raise SourceCoverageError(f"{path}: broken TOC target {target_path}") from exc
+        if not any(node.attrib.get("id") == unquote(fragment) for node in document.iter()):
+            raise SourceCoverageError(f"{path}: broken TOC fragment {fragment}")
+        targets.add(target_path)
+    return targets
+
+
+def _verify_svg_cover(root: ET.Element, path: str, archive: zipfile.ZipFile,
+                      media_by_path: Mapping[str, str]) -> dict[str, str] | None:
+    """Accept only a transparent, image-only SVG cover wrapper; seal raster bytes."""
+    svgs = [node for node in root.iter() if _name(node.tag) == "svg"]
+    if not svgs:
+        return None
+    if len(svgs) != 1:
+        raise SourceCoverageError(f"{path}: multiple SVG regions unsupported")
+    svg = svgs[0]
+    children = list(svg)
+    if len(children) != 1 or _name(children[0].tag) != "image" or (
+        "".join(svg.itertext()).strip()
+    ):
+        raise SourceCoverageError(f"{path}: SVG cover must contain exactly one image and no prose")
+    image = children[0]
+    if list(image):
+        raise SourceCoverageError(f"{path}: nested image markup unsupported")
+    if any(_name(key).startswith("on") for node in (svg, image) for key in node.attrib):
+        raise SourceCoverageError(f"{path}: executable SVG attributes unsupported")
+    hrefs = [v for k, v in image.attrib.items() if _name(k) == "href"]
+    if len(hrefs) != 1:
+        raise SourceCoverageError(f"{path}: SVG image must have one href")
+    image_path = _archive_path(path, hrefs[0])
+    media_type = media_by_path.get(image_path)
+    if media_type not in {"image/jpeg", "image/png", "image/gif"}:
+        raise SourceCoverageError(f"{path}: cover image not declared as supported raster artwork")
+    try:
+        data = archive.read(image_path)
+    except KeyError as exc:
+        raise SourceCoverageError(f"{path}: missing embedded cover {image_path}") from exc
+    if not data:
+        raise SourceCoverageError(f"{path}: empty embedded cover")
+    return {"path": image_path, "media_type": media_type, "sha256": _sha(data)}
+
+
 def audit_epub(
     source: Path,
     chapters: Sequence[Any],
@@ -206,6 +298,8 @@ def audit_epub(
         if not spine or len(spine) != len(set(spine)):
             raise SourceCoverageError("Empty or duplicated EPUB spine")
 
+        spine_paths = {manifest[i]["path"] for i in spine if i in manifest}
+        media_by_path = {item["path"]: item["media"] for item in manifest.values()}
         covered: set[str] = set()
         reproduced: list[Any] = []
         documents: list[dict[str, Any]] = []
@@ -230,15 +324,28 @@ def audit_epub(
                 raw = archive.read(path)
             except KeyError as exc:
                 raise SourceCoverageError(f"Missing spine document {path}") from exc
-            reference, blocks = _reference(raw, path)
+            try:
+                xml_root = ET.fromstring(raw)
+            except ET.ParseError as exc:
+                raise SourceCoverageError(f"{path}: invalid XHTML: {exc}") from exc
+            toc_targets = _verify_toc(xml_root, path, archive, spine_paths)
+            cover_image = _verify_svg_cover(xml_root, path, archive, media_by_path)
+            reference, blocks = _reference(
+                raw, path, allow_toc=bool(toc_targets), allow_svg=cover_image is not None
+            )
             text = decode_text(raw, path)
             fallback = Path(path).stem.replace("_", " ").replace("-", " ").strip() or item_id
             generated = list(extract_document(text, fallback))
             extracted = _from_markdown(generated)
+            toc_ids = {
+                id(node) for nav in xml_root.iter() if _name(nav.tag) == "nav"
+                for node in nav.iter()
+            }
             original_links = [
                 (node.attrib["href"], _tokens("".join(node.itertext())))
-                for node in ET.fromstring(raw).iter()
-                if _name(node.tag) == "a" and node.attrib.get("href")
+                for node in xml_root.iter()
+                if id(node) not in toc_ids and _name(node.tag) == "a"
+                and node.attrib.get("href")
             ]
             markdown_links = [
                 (match.group(2), _tokens(match.group(1).replace("*", "").replace(chr(96), "")))
@@ -262,6 +369,8 @@ def audit_epub(
                 "reference_sha256": _sha("\n".join(reference).encode("utf-8")),
                 "text_tokens": len(reference), "text_blocks": blocks,
                 "chapter_count": len(generated),
+                **({"cover_image": cover_image} if cover_image is not None else {}),
+                **({"toc_targets": len(toc_targets)} if toc_targets else {}),
             })
 
         for item in manifest.values():
