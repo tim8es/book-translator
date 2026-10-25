@@ -20,6 +20,7 @@ from .storage import StorageAlreadyExists, StorageError, StorageNotFound, Storag
 SELECTOR_RE = re.compile(r"^([1-9][0-9]*)(?:-([1-9][0-9]*))?$")
 HEX_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 MAX_CHAPTER_NUMBER = 999_999
+MAX_CLAIM_LEASE_SECONDS = 15 * 60
 CLAIM_PREFIX = ".workflow/claims"
 CLAIM_EVENT_PREFIX = ".workflow/claim-events"
 
@@ -267,7 +268,7 @@ class ClaimManager:
         base_commit: str | None,
         workflow_revision: str,
         shared_state_revisions: Mapping[str, str] | None = None,
-        lease_seconds: int = 3600,
+        lease_seconds: int = MAX_CLAIM_LEASE_SECONDS,
     ) -> list[ActiveClaim]:
         unit_ids = resolve_selector(progress, selector)
         if role not in {"translator", "reviewer"}:
@@ -282,8 +283,8 @@ class ClaimManager:
         frozen_shared_state = (
             dict(shared_state_revisions) if shared_state_revisions is not None else None
         )
-        if type(lease_seconds) is not int or lease_seconds <= 0:
-            raise ClaimError("lease_seconds must be a positive integer")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= MAX_CLAIM_LEASE_SECONDS:
+            raise ClaimError("lease_seconds must be between 1 and 900")
 
         try:
             admission = self._coordination.acquire(
@@ -425,7 +426,7 @@ class ClaimManager:
         selector: str,
         *,
         session_id: str,
-        lease_seconds: int = 3600,
+        lease_seconds: int = MAX_CLAIM_LEASE_SECONDS,
     ) -> list[ActiveClaim]:
         """Extend live claims held by this session; never revive expired claims.
 
@@ -434,8 +435,8 @@ class ClaimManager:
         must win the same storage version.
         """
         session_id = self._require_nonempty(session_id, "session_id")
-        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 86400:
-            raise ClaimError("lease_seconds must be between 1 and 86400")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= MAX_CLAIM_LEASE_SECONDS:
+            raise ClaimError("lease_seconds must be between 1 and 900")
         unit_ids = resolve_selector(progress, selector)
         updated: list[ActiveClaim] = []
         for unit_id in unit_ids:
@@ -446,13 +447,19 @@ class ClaimManager:
             if previous.data["session_id"] != session_id:
                 raise ClaimOwnershipError(unit_id, previous.data["session_id"])
             now = self._now()
-            old_expiry = _parse_claim_timestamp(previous.data["expires_at"])
+            max_expiry = _parse_claim_timestamp(previous.data["claimed_at"]) + timedelta(
+                seconds=MAX_CLAIM_LEASE_SECONDS
+            )
+            old_expiry = min(_parse_claim_timestamp(previous.data["expires_at"]), max_expiry)
             if old_expiry <= now:
                 raise ClaimConflict(unit_id, f"unit {unit_id} claim has expired; cleanup and reacquire")
-            extended = dict(previous.data)
-            extended["expires_at"] = _format_utc(
-                max(old_expiry, now) + timedelta(seconds=lease_seconds)
+            new_expiry = min(
+                max(old_expiry, now) + timedelta(seconds=lease_seconds), max_expiry
             )
+            if new_expiry <= old_expiry:
+                raise ClaimConflict(unit_id, f"unit {unit_id} cannot exceed 15 minutes total")
+            extended = dict(previous.data)
+            extended["expires_at"] = _format_utc(new_expiry)
             request_id = self._request_event(
                 action="renew_requested", claim=previous, occurred_at=now,
                 reason="owner_renewal",
@@ -588,7 +595,12 @@ class ClaimManager:
         results: list[ClaimLifecycleResult] = []
         for claim in self.list_active():
             unit_id = claim.data["unit_id"]
-            expires_at = _parse_claim_timestamp(claim.data["expires_at"])
+            expires_at = min(
+                _parse_claim_timestamp(claim.data["expires_at"]),
+                _parse_claim_timestamp(claim.data["claimed_at"]) + timedelta(
+                    seconds=MAX_CLAIM_LEASE_SECONDS
+                ),
+            )
             if expires_at > now:
                 results.append(ClaimLifecycleResult(unit_id=unit_id, status="live"))
                 continue

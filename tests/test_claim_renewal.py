@@ -45,10 +45,22 @@ class ClaimRenewalTests(unittest.TestCase):
         renewed = next_manager.renew(PROGRESS, "1", session_id="chat-a", lease_seconds=600)[0]
         self.assertEqual(renewed.data["claim_id"], original.data["claim_id"])
         self.assertEqual(renewed.data["base_commit"], "git-head")
-        self.assertEqual(renewed.data["expires_at"], "2026-10-21T12:20:00Z")
+        self.assertEqual(renewed.data["expires_at"], "2026-10-21T12:15:00Z")
         self.assertNotEqual(renewed.version, original.version)
         event_paths = self.repository.storage.list(".workflow/claim-events")
         self.assertEqual(len(event_paths), 2)
+
+    def test_renew_cannot_extend_beyond_fifteen_minutes_from_first_claim(self):
+        first = self.manager("2026-10-21T12:00:00+00:00")
+        first.acquire(
+            PROGRESS, "1", role="translator", session_id="chat-a",
+            base_revision="rev", base_commit=None,
+            workflow_revision="workflow", lease_seconds=900,
+        )
+        with self.assertRaises(ClaimConflict):
+            self.manager("2026-10-21T12:05:00+00:00").renew(
+                PROGRESS, "1", session_id="chat-a", lease_seconds=600
+            )
 
     def test_non_owner_and_expired_claim_cannot_renew(self):
         manager = self.manager("2026-10-21T12:00:00+00:00")
@@ -68,6 +80,10 @@ class ClaimRenewalTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "lease_seconds"):
             self.manager("2026-10-21T12:00:00+00:00").renew(
                 PROGRESS, "1", session_id="chat-a", lease_seconds=0
+            )
+        with self.assertRaisesRegex(Exception, "lease_seconds"):
+            self.manager("2026-10-21T12:00:00+00:00").renew(
+                PROGRESS, "1", session_id="chat-a", lease_seconds=901
             )
 
 

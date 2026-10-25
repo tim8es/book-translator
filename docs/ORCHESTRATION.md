@@ -176,6 +176,8 @@ chapters. Do not reserve an entire range for the duration of a lengthy session.
 
 ## Durable claims
 
+Every chapter claim is limited to **15 minutes total from acquisition** (900 seconds), including renewals. New claims default to 900 seconds; longer durations are rejected. For preexisting longer leases, `cleanup-claims` treats the effective expiry as the earlier of the stored expiry and `claimed_at + 900 seconds`. Expired claim files still require auditable cleanup before another session can acquire the unit.
+
 A worker may not start literary work without owning a durable claim for the exact unit and role:
 
 ```bash
@@ -194,7 +196,7 @@ Long-running sessions should renew a live claim before the lease expires:
 
 ```bash
 python scripts/book.py renew-claim <book-slug> <chapter> \
-  --session-id <session-id> --lease-seconds 3600
+  --session-id <session-id> --lease-seconds 900
 ```
 
 Renewal preserves the original claim identity, recorded workflow revision, and
