@@ -132,12 +132,16 @@ def update_source_command(args: argparse.Namespace, root: Path) -> int:
         source_format = book.detect_format(source)
         chapters, _ = book.extract_chapters(source, source_format)
         if source_format == "epub":
-            from .source_coverage import audit_epub
-            audit_epub(
-                source, chapters,
-                extract_document=book.split_html_document,
-                decode_text=book.decode_text,
-            )
+            from .epub_preserve import has_raster_xhtml, audit as preserved_audit
+            if has_raster_xhtml(source):
+                preserved_audit(source, chapters)
+            else:
+                from .source_coverage import audit_epub
+                audit_epub(
+                    source, chapters,
+                    extract_document=book.split_html_document,
+                    decode_text=book.decode_text,
+                )
     except Exception as exc:
         raise SourceUpdateCliError(f"cannot extract candidate source edition: {exc}") from exc
 
@@ -147,6 +151,13 @@ def update_source_command(args: argparse.Namespace, root: Path) -> int:
         metadata = repository.read("metadata.json", SchemaKind.METADATA).data
     except (StorageError, RepositoryError, SchemaError) as exc:
         raise SourceUpdateCliError(f"cannot read current metadata: {exc}") from exc
+
+    if source_format == "epub":
+        from .epub_preserve import MODE as PRESERVE_MODE, has_raster_xhtml
+        if (metadata.get("layout_mode") == PRESERVE_MODE) != has_raster_xhtml(source):
+            raise SourceUpdateCliError(
+                "EPUB source edition changes layout extraction mode; explicit workflow upgrade/re-extraction is required"
+            )
 
     current_source = metadata.get("source")
     inherited_private = (

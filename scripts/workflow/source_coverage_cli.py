@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub
+from .epub_preserve import audit as preserved_audit, MODE as PRESERVE_MODE, PreservedEpubError
 from .filesystem import FilesystemStorage
 from .storage import StorageAlreadyExists, StorageError, StorageVersionConflict
 
@@ -58,11 +59,10 @@ def coverage_command(args: argparse.Namespace, root: Path) -> int:
             raise CoverageCliError(f"cannot read extracted unit {rel}: {exc}") from exc
         chapters.append(SimpleNamespace(title=item.get("title"), content=content))
     try:
-        report = audit_epub(
-            source, chapters, extract_document=book.split_html_document,
-            decode_text=book.decode_text,
-        )
-    except (SourceCoverageError, ValueError, OSError, UnicodeError) as exc:
+        report = (preserved_audit(source, chapters) if metadata.get("layout_mode") == PRESERVE_MODE
+                  else audit_epub(source, chapters, extract_document=book.split_html_document,
+                                  decode_text=book.decode_text))
+    except (SourceCoverageError, PreservedEpubError, ValueError, OSError, UnicodeError) as exc:
         raise CoverageCliError(f"source coverage blocked: {exc}") from exc
 
     if args.replace_stale and not args.record:

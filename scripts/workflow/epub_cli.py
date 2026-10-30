@@ -21,6 +21,8 @@ from .epub_output import (
     validate_epub_bytes,
     validate_output_manifest,
 )
+from .epub_preserve import (build as build_preserved_epub, validate as validate_preserved_epub,
+                             MODE as PRESERVE_MODE, PreservedEpubError)
 from .filesystem import FilesystemStorage
 from .repository import RepositoryError, WorkflowStateRepository
 from .reviews import ReviewError, ReviewLedgerManager
@@ -277,6 +279,15 @@ def _cover_payload(context):
     return {"name": PurePosixPath(path).name, "media_type": media_type, "content": content}
 
 
+def _validate_selected(content: bytes, context) -> None:
+    metadata = context["metadata"].data
+    if metadata.get("layout_mode") == PRESERVE_MODE:
+        source = context["book_dir"] / "source" / metadata["source_file"]
+        validate_preserved_epub(content, source=source, expected_docs=len(__import__("workflow.epub_preserve", fromlist=["analyze"]).analyze(source)[0]))
+    else:
+        validate_epub_bytes(content, expected_unit_count=len(context["progress"].data["chapters"]))
+
+
 def _stored_output_status(context, *, requested_artifact_path: str | None = None) -> dict[str, Any]:
     storage = context["storage"]
     manifest, manifest_error = _read_manifest(storage)
@@ -293,8 +304,8 @@ def _stored_output_status(context, *, requested_artifact_path: str | None = None
     except StorageError as exc:
         return {"state": "invalid", "reason": str(exc)}
     try:
-        validate_epub_bytes(stored_artifact.content, expected_unit_count=len(context["progress"].data["chapters"]))
-    except EpubOutputError as exc:
+        _validate_selected(stored_artifact.content, context)
+    except (EpubOutputError, PreservedEpubError) as exc:
         return {"state": "invalid", "reason": str(exc), "artifact_path": manifest["artifact_path"]}
     status = resolve_output_status(
         manifest,
@@ -323,27 +334,28 @@ def epub_build_command(args: argparse.Namespace, root: Path) -> int:
 
     metadata = context["metadata"].data
     try:
-        artifact_bytes = build_epub_bytes(
-            book_slug=args.slug,
-            title=metadata["title"],
-            author=metadata.get("author"),
-            language=metadata["target_language"],
-            units=_unit_payloads(context),
-            fingerprint=context["fingerprint"],
-            cover=_cover_payload(context),
-        )
-        validate_epub_bytes(
-            artifact_bytes,
-            expected_unit_count=len(context["progress"].data["chapters"]),
-        )
-    except EpubOutputError as exc:
+        if metadata.get("layout_mode") == PRESERVE_MODE:
+            artifact_bytes = build_preserved_epub(
+                context["book_dir"] / "source" / metadata["source_file"],
+                _unit_payloads(context), expected_source_sha256=metadata["source"]["sha256"],
+                language=metadata["target_language"],
+            )
+        else:
+            artifact_bytes = build_epub_bytes(
+                book_slug=args.slug, title=metadata["title"],
+                author=metadata.get("author"), language=metadata["target_language"],
+                units=_unit_payloads(context), fingerprint=context["fingerprint"],
+                cover=_cover_payload(context),
+            )
+        _validate_selected(artifact_bytes, context)
+    except (EpubOutputError, PreservedEpubError) as exc:
         raise EpubCliError(str(exc)) from exc
 
     artifact_disposition = _write_if_changed(context["storage"], artifact_path, artifact_bytes)
     try:
         persisted = context["storage"].read(artifact_path)
-        validate_epub_bytes(persisted.content, expected_unit_count=len(context["progress"].data["chapters"]))
-    except (StorageError, EpubOutputError) as exc:
+        _validate_selected(persisted.content, context)
+    except (StorageError, EpubOutputError, PreservedEpubError) as exc:
         raise EpubCliError(f"persisted EPUB failed validation: {exc}") from exc
     if hashlib.sha256(persisted.content).hexdigest() != hashlib.sha256(artifact_bytes).hexdigest():
         raise EpubCliError("persisted EPUB bytes changed after atomic write")
