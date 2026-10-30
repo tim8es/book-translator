@@ -39,9 +39,21 @@ LOCAL_HREF_RE = re.compile(
 )
 
 
+def canonical_external_href(href: str) -> str | None:
+    """Keep external URLs Markdown-safe without changing their destination.
+
+    Percent-encode only literal parentheses, which terminate bare Markdown
+    link destinations. Preserve existing percent escapes and reject all other
+    unsupported URL syntax rather than silently normalizing the source.
+    """
+    candidate = href.replace("(", "%28").replace(")", "%29")
+    return candidate if SAFE_HREF_RE.fullmatch(candidate) else None
+
+
 def _canonical_href(href: str, document_path: str) -> str:
-    if SAFE_HREF_RE.fullmatch(href):
-        return href
+    external = canonical_external_href(href)
+    if external is not None:
+        return external
     local = LOCAL_HREF_RE.fullmatch(href)
     if (local is None or
             (local.group("file") and local.group("file") != posixpath.basename(document_path))):
