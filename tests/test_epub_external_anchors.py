@@ -99,7 +99,7 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
             )
 
     def test_nonexistent_or_duplicate_fragment_blocks_independent_coverage(self):
-        for extra in ('', '<p id="page_49">Repeated.</p>'):
+        for extra in ('', '<p id="page_49">One.</p><p id="page_49">Repeated.</p>'):
             with self.subTest(extra=extra):
                 fixture(self.path, '<html><body><p><a href="#page_49">jump</a>.</p>'
                         + extra + '</body></html>')
