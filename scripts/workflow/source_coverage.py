@@ -99,7 +99,7 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
                                if element.attrib.get("id") == canonical[1:]]
                     if len(targets) != 1:
                         raise SourceCoverageError(f"{path}: missing or duplicate local fragment {canonical!r}")
-                    if _name(targets[0].tag) not in BLOCKS - {"body"}:
+                    if _name(targets[0].tag) not in {"p", "div", "li", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}:
                         raise SourceCoverageError(
                             f"{path}: unsupported local fragment target element {_name(targets[0].tag)}"
                         )
