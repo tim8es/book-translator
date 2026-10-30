@@ -62,6 +62,52 @@ class CoverageAuditTests(unittest.TestCase):
         self.assertEqual(report["documents"][0]["text_blocks"], 3)
         self.assertEqual(report["documents"][0]["state"], "verified")
 
+    def test_external_links_with_literal_parentheses_are_preserved_and_certified(self):
+        # Regression for AO3 tag URLs in the Policy Change EPUB frontmatter.
+        # The original EPUB must remain byte-identical; only derived Markdown
+        # link destinations may encode literal parentheses as %28 and %29.
+        urls = [
+            "https://archiveofourown.org/tags/Heated%20Rivalry%20(TV)",
+            "https://archiveofourown.org/tags/Shane%20Hollander*s*Original%20Male%20Character(s)",
+            "https://archiveofourown.org/tags/Montreal%20Voyageurs%20%7C%20Montreal%20Metros%20Team%20Ensemble%20(Game%20Changers)",
+            "https://archiveofourown.org/tags/Original%20Male%20Character(s)",
+        ]
+        hrefs = [urls[0], urls[1], urls[1], urls[2], urls[3], urls[3], urls[2], urls[2]]
+        html = "<html><body><h1>AO3 tags</h1>" + "".join(
+            f'<p><a href="{href}">Tag {i}</a>.</p>'
+            for i, href in enumerate(hrefs, 1)
+        ) + "</body></html>"
+        epub(self.path, html)
+        original_bytes = self.path.read_bytes()
+        chapters, _ = book.read_epub(self.path)
+        report = certify(self.path)
+        self.assertEqual(report["state"], "verified")
+        self.assertEqual(self.path.read_bytes(), original_bytes)
+        self.assertEqual(len(chapters), 1)
+        generated = chapters[0].content
+        self.assertEqual(generated.count("](https://archiveofourown.org/tags/"), 8)
+        for url in urls:
+            encoded = url.replace("(", "%28").replace(")", "%29")
+            self.assertIn("](" + encoded + ")", generated)
+            self.assertNotIn("](" + url + ")", generated)
+
+    def test_external_link_canonicalization_keeps_rejections_and_escapes(self):
+        from workflow.source_coverage import canonical_external_href
+        self.assertEqual(
+            canonical_external_href("https://example.org/a%28b%29"),
+            "https://example.org/a%28b%29",
+        )
+        self.assertEqual(
+            canonical_external_href("https://example.org/a(b)"),
+            "https://example.org/a%28b%29",
+        )
+        self.assertIsNone(canonical_external_href("javascript:alert(1)"))
+        self.assertIsNone(canonical_external_href("https://example.org/a b"))
+        self.assertIsNone(canonical_external_href("https://example.org/[bad]"))
+        epub(self.path, '<html><body><p><a href="https://example.org/[bad]">Bad</a>.</p></body></html>')
+        with self.assertRaises((book.BookError, SourceCoverageError)):
+            certify(self.path)
+
     def test_missing_paragraph_is_detected_independently(self):
         epub(self.path, "<html><body><h1>One</h1><p>Keep.</p><p>Missing.</p></body></html>")
         chapters, _ = book.read_epub(self.path)
