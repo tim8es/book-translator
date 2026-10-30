@@ -1,7 +1,7 @@
 # Source-layout EPUB extraction (image-rich XHTML)
 
 This document specifies the opt-in-by-source `original_xhtml_v1` mode introduced
-for EPUB archives with XHTML `<img>` or SVG `<image>` elements. It is a bounded,
+for EPUB archives with XHTML `<img>` elements. SVG-only covers continue through the existing EPUB coverage path. It is a bounded,
 fail-closed compatibility path, not a general HTML-to-EPUB converter.
 
 ## Purpose and provenance

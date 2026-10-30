@@ -238,7 +238,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
 
 def has_raster_xhtml(source: Path) -> bool:
     with zipfile.ZipFile(source) as zf:
-        return any(name.endswith(".xhtml") and re.search(rb"<(?:img|image)\s", zf.read(name), re.I) for name in zf.namelist())
+        return any(name.endswith(".xhtml") and re.search(rb"<img\s", zf.read(name), re.I) for name in zf.namelist())
 
 
 def _escaped_source(text: str) -> str:
