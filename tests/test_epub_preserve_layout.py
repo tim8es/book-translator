@@ -101,6 +101,27 @@ class PreserveTests(unittest.TestCase):
             self.assertEqual(p[0].tail,'днажды.')
             self.assertEqual(ET.fromstring(new.read('OPS/package.opf')).find('.//{*}language').text,'ru')
 
+    def test_styled_quoted_and_italic_initials_survive_roundtrip(self):
+        with zipfile.ZipFile(self.source) as z:
+            assets = {name: z.read(name) for name in z.namelist()}
+        body = assets['OPS/chapter.xhtml'].decode('utf-8')
+        body = body.replace('<span class="initial">O</span>nce',
+                            '<span class="initial">“O</span>nce')
+        assets['OPS/chapter.xhtml'] = body.encode('utf-8')
+        assets['OPS/book.css'] += b'\n.initial {font-style:italic;}'
+        with zipfile.ZipFile(self.source, 'w') as z:
+            for path, payload in assets.items():
+                z.writestr(path, payload,
+                           compress_type=zipfile.ZIP_STORED if path=='mimetype' else zipfile.ZIP_DEFLATED)
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        output = ep.build(self.source, [{'markdown': c.content} for c in chapters],
+                          expected_source_sha256=report['source_sha256'],language='ru')
+        with zipfile.ZipFile(io.BytesIO(output)) as z:
+            p = ET.fromstring(z.read('OPS/chapter.xhtml')).find('.//{*}p')
+            self.assertEqual(p[0].text, '“O')
+            self.assertEqual(p[0].get('class'), 'initial')
+
     def test_missing_or_duplicate_markers_are_blocked(self):
         sample='<!-- bt-block:000001 -->\nFirst\n\n<!-- bt-block:000002 -->\nSecond\n'
         for invalid in (sample.replace('000002','000001'),sample.replace('000001','000003'),sample.replace('Second',''),'Unmapped\n'+sample):

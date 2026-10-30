@@ -50,6 +50,24 @@ def _path(opf: str, href: str) -> str:
     return result
 
 
+def _source_style_classes(zf: zipfile.ZipFile) -> tuple[set[str], set[str]]:
+    """Discover semantic emphasis and large initials from original CSS."""
+    italic: set[str] = set()
+    large: set[str] = set()
+    for asset in zf.namelist():
+        if not asset.endswith(".css"):
+            continue
+        css = zf.read(asset).decode("utf-8-sig")
+        for match in re.finditer(r"\.([a-zA-Z0-9_-]+)\s*\{([^{}]+)\}", css):
+            name, body = match.groups()
+            if re.search(r"font-style\s*:\s*italic(?:\s*;|\s*$)", body, re.I):
+                italic.add(name)
+            size = re.search(r"font-size\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(em|%)", body, re.I)
+            if size and (float(size.group(1)) >= (1.3 if size.group(2).lower() == "em" else 130)):
+                large.add(name)
+    return italic, large
+
+
 @dataclass
 class Document:
     path: str
@@ -164,13 +182,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
         media_by_path = {item[0]: item[1] for item in manifest.values()}
         if len(media_by_path) != len(manifest):
             raise PreservedEpubError("Manifest contains aliases to duplicate resources")
-        italic_classes: set[str] = set()
-        for asset, media, _ in manifest.values():
-            if media == "text/css":
-                css = zf.read(asset).decode("utf-8-sig")
-                for match in re.finditer(r"\.([a-zA-Z0-9_-]+)\s*\{([^{}]+)\}", css):
-                    if re.search(r"font-style\s*:\s*italic(?:\s*;|\s*$)", match.group(2), re.I):
-                        italic_classes.add(match.group(1))
+        italic_classes, drop_classes = _source_style_classes(zf)
         documents = []
         titles = {}
         for id_ in spine:
@@ -218,7 +230,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             img_titles = [n.get("alt", "").strip() for n in body.iter() if _local(n.tag) == "img" and n.get("alt", "").strip()]
             doc_title = img_titles[0] if img_titles else titles.get(path, Path(path).stem)
             documents.append(Document(path, "text" if blocks else "artwork", [text for _, text in blocks], imgs, _hash(raw), doc_title,
-                                      [_inline_source(node, italic_classes) for node, _ in blocks]))
+                                      [_inline_source(node, italic_classes, drop_classes) for node, _ in blocks]))
         # Check all XHTML in manifest including off-spine, fail closed on substantive text.
         for path, media, props in manifest.values():
             if media != "application/xhtml+xml" or path in spine_paths:
@@ -245,13 +257,19 @@ def _escaped_source(text: str) -> str:
     return "".join("\\" + ch if ch in "\\*`[]" else ch for ch in text)
 
 
-def _inline_source(node: ET.Element, italic_classes: set[str]) -> str:
+def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set[str]) -> str:
     """Represent source italic spans as explicit Markdown emphasis."""
     out = _escaped_source(node.text or "")
     for child in node:
         name = _local(child.tag)
-        content = _inline_source(child, italic_classes)
-        italic = name in {"em", "i"} or bool(set(child.get("class", "").split()) & italic_classes)
+        content = _inline_source(child, italic_classes, drop_classes)
+        initial = "".join(child.itertext())
+        drop_initial = (name == "span" and _local(node.tag) in _PROSE
+                        and bool(set(child.get("class", "").split()) & drop_classes)
+                        and list(node) and list(node)[0] is child
+                        and (len(initial) == 1 and initial.isalpha()
+                             or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha()))
+        italic = not drop_initial and (name in {"em", "i"} or bool(set(child.get("class", "").split()) & italic_classes))
         if italic and content.strip():
             content = "*" + content + "*"
         out += content + _escaped_source(child.tail or "")
@@ -352,6 +370,7 @@ def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_sourc
     if len(textual) != len(chapters):
         raise PreservedEpubError("Translation count differs from source XHTML documents")
     originals = zipfile.ZipFile(source)
+    _, drop_classes = _source_style_classes(originals)
     replacements: dict[str, bytes] = {}
     try:
         for doc, chapter in zip(textual, chapters):
@@ -366,9 +385,13 @@ def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_sourc
                 # Preserve block tag/class/id and image siblings. Inline content cannot
                 # be automatically aligned; reject links unless label survives.
                 source_children = list(node)
-                drop_cap = (source_children[0] if source_children and _local(source_children[0].tag) == "span"
-                            and len("".join(source_children[0].itertext())) == 1
-                            and not list(source_children[0]) else None)
+                initial = ("".join(source_children[0].itertext()) if source_children
+                           and _local(source_children[0].tag) == "span" else "")
+                drop_cap = (source_children[0] if initial and not list(source_children[0])
+                            and bool(set(source_children[0].get("class", "").split()) & drop_classes)
+                            and (len(initial) == 1 and initial.isalpha()
+                                 or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha())
+                            else None)
                 links = [n for n in node.iter() if _local(n.tag) == "a"]
                 if len(links) > 1:
                     raise PreservedEpubError(f"Multiple inline links require manual alignment: {doc.path}")
@@ -386,15 +409,17 @@ def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_sourc
                     new_link = ET.SubElement(node, link.tag, link.attrib)
                     new_link.text = label
                     new_link.tail = _plain_markdown(translated[at + len(label):])
-                elif drop_cap is not None and translated and translated[0].isalpha():
-                    # Keep the original drop-cap styling, replacing the English
-                    # initial with the first letter of the translated paragraph.
+                elif drop_cap is not None and translated:
+                    # Preserve either a single styled initial or an opening quote
+                    # plus a styled initial, including italic/bold decorated initials.
+                    prefix_len = 2 if len(initial) == 2 and translated.startswith(initial[0]) and len(translated) > 1 and translated[1].isalpha() else 1
+                    if not translated[prefix_len - 1].isalpha():
+                        raise PreservedEpubError(f"Invalid translated drop-cap initial: {doc.path}")
                     node.text = None
                     first = ET.SubElement(node, drop_cap.tag, drop_cap.attrib)
-                    first.text = translated[0]
-                    # Append emphasis after the preserved drop cap.
+                    first.text = translated[:prefix_len]
                     wrapper = ET.Element("{http://www.w3.org/1999/xhtml}span")
-                    _render_inline(wrapper, translated[1:])
+                    _render_inline(wrapper, translated[prefix_len:])
                     first.tail = wrapper.text
                     node.extend(list(wrapper))
                 else:
