@@ -107,6 +107,24 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
                 with self.assertRaisesRegex(SourceCoverageError, "missing or duplicate local fragment"):
                     self.audit(chapters)
 
+    def test_missing_generated_target_marker_blocks_audit(self):
+        fixture(self.path, '<html><body><p><a href="#page_49">jump</a></p>'
+                '<p id="page_49">Target.</p></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        def lost_marker(text, fallback):
+            return [book.Chapter(chapters[0].title, chapters[0].content.replace(
+                "<!-- bt-anchor:page_49 -->", ""
+            ))]
+        with self.assertRaisesRegex(SourceCoverageError, "lost its in-unit target"):
+            self.audit(chapters, extractor=lost_marker)
+
+    def test_inline_only_fragment_target_is_not_silently_lost(self):
+        fixture(self.path, '<html><body><p><a href="#word">jump</a></p>'
+                '<p>Here <span id="word">word</span> stays.</p></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        with self.assertRaisesRegex(SourceCoverageError, "unsupported local fragment target element"):
+            self.audit(chapters)
+
     def test_same_document_local_anchor_keeps_original_word_order(self):
         fixture(self.path, '<html><body><h2 id="part">Part</h2>'
                 '<p>Go <a href="#part">back</a> now.</p></body></html>')
