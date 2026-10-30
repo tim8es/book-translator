@@ -79,12 +79,6 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
         raise SourceCoverageError(f"{path}: XHTML must have exactly one body")
     parts: list[str] = []
     count = 0
-    anchor_ids: dict[str, int] = {}
-    for element in root.iter():
-        identifier = element.attrib.get("id")
-        if identifier:
-            anchor_ids[identifier] = anchor_ids.get(identifier, 0) + 1
-
     def visit(node: ET.Element) -> None:
         nonlocal count
         tag = _name(node.tag)
@@ -100,8 +94,15 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
             href = node.attrib.get("href", "")
             if href:
                 canonical = _canonical_href(href, path)
-                if canonical.startswith("#") and anchor_ids.get(canonical[1:]) != 1:
-                    raise SourceCoverageError(f"{path}: missing or duplicate local fragment {canonical!r}")
+                if canonical.startswith("#"):
+                    targets = [element for element in root.iter()
+                               if element.attrib.get("id") == canonical[1:]]
+                    if len(targets) != 1:
+                        raise SourceCoverageError(f"{path}: missing or duplicate local fragment {canonical!r}")
+                    if _name(targets[0].tag) not in BLOCKS - {"body"}:
+                        raise SourceCoverageError(
+                            f"{path}: unsupported local fragment target element {_name(targets[0].tag)}"
+                        )
         for key, value in node.attrib.items():
             attr = _name(key)
             folded = str(value).lower()
@@ -386,6 +387,17 @@ def audit_epub(
             ]
             if original_links != markdown_links:
                 raise SourceCoverageError(f"{path}: link text or destination lost or changed")
+            # A source link must land inside its exact generated unit. Otherwise
+            # a split XHTML document could silently create a broken output link.
+            for chapter in generated:
+                for link in LINK_RE.finditer(chapter.content):
+                    href = link.group(2)
+                    if href.startswith("#"):
+                        marker = f"<!-- bt-anchor:{href[1:]} -->"
+                        if chapter.content.count(marker) != 1:
+                            raise SourceCoverageError(
+                                f"{path}: local fragment link lost its in-unit target {href!r}"
+                            )
             if reference != extracted:
                 first = next((i for i, pair in enumerate(zip(reference, extracted))
                               if pair[0] != pair[1]), min(len(reference), len(extracted)))
