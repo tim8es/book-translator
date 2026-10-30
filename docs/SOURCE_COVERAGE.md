@@ -8,7 +8,11 @@ listed in the EPUB manifest, including documents omitted from the spine.
 Undeclared XHTML members in the ZIP also block certification.
 
 The supported subset comprises text blocks, headings, lists without numbering,
-inline bold/emphasis/code, and unambiguous external links. Literal Markdown
+inline bold/emphasis/code, unambiguous external links, and same-document XHTML
+fragment links whose unique target ID is present in the original document.
+These links are normalized to `#fragment` in extracted Markdown, and the target
+location is marked by a `<!-- bt-anchor:fragment -->` line. Translators must
+preserve the link destination and the target marker exactly. Literal Markdown
 punctuation in XHTML text is escaped and independently audited against the
 original, so source prose such as `d*bcon` is not truncated.
 
@@ -17,8 +21,8 @@ not sent to the translator as prose. The audit requires one nonempty link per
 list entry, rejects duplicate targets and missing spine documents/fragment IDs,
 and verifies prose *outside* the navigation remains in extracted units. EPUB
 output regenerates an ordered navigation document from accepted translated
-units. This does **not** implement arbitrary internal cross-references in prose;
-relative links outside an approved TOC remain blocked.
+units. Relative links between different XHTML documents remain blocked until
+source-unit remapping is implemented; same-document fragments are supported.
 
 A cover consisting of a single SVG `<image>` wrapper pointing to a manifest-listed
 JPEG/PNG/GIF asset is independently checked. Its raster bytes are preserved
@@ -29,7 +33,7 @@ text and other complex visual material still block certification.
 Decorative `aria-hidden="true"` spans are included in text coverage (they
 remain visible prose), not skipped. Footnotes, tables, unrelated images,
 pagebreaks, complex semantic elements, malformed XHTML, off-spine prose
-and non-TOC relative links remain **blocked**, not silently skipped.
+and non-TOC cross-document relative links remain **blocked**, not silently skipped.
 The audit does not claim pixel-level layout fidelity or universal EPUB support.
 
 ## New books

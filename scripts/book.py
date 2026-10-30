@@ -70,9 +70,11 @@ class BlockHTMLParser(HTMLParser):
     UNSUPPORTED_SEMANTICS = {"img", "table", "figure", "figcaption", "aside",
                              "sup", "sub", "math", "ruby", "audio", "video"}
 
-    def __init__(self, *, skip_navigation: bool = True) -> None:
+    def __init__(self, *, skip_navigation: bool = True, document_path: str | None = None) -> None:
         super().__init__(convert_charrefs=True)
         self._skip_tags = self.SKIP_TAGS | ({"nav"} if skip_navigation else set())
+        self._document_name = Path(document_path).name if document_path else None
+        self._local_targets: set[str] = set()
         self.blocks: list[tuple[str, str]] = []
         self._tag: str | None = None
         self._parts: list[str] = []
@@ -91,7 +93,15 @@ class BlockHTMLParser(HTMLParser):
         if tag == "a":
             href = dict(attrs).get("href") or ""
             if href and not re.fullmatch(r"(?:https?://|mailto:)[^\s()\[\]]+", href):
-                raise BookError("Unsupported anchor destination; only safe external/mail links are supported")
+                local = re.fullmatch(
+                    r"(?:(?P<file>[A-Za-z0-9_.-]+\.(?:xhtml|html|htm)))?#"
+                    r"(?P<fragment>[A-Za-z_][A-Za-z0-9_.:-]*)", href
+                )
+                if (not local or not self._document_name or
+                        (local.group("file") and local.group("file") != self._document_name)):
+                    raise BookError("Unsupported anchor destination; only same-document EPUB fragments or safe external links are supported")
+                href = "#" + local.group("fragment")
+                self._local_targets.add(local.group("fragment"))
             if href:
                 self._parts.append("[")
             self._inline_stack.append(("a", href))
@@ -103,6 +113,9 @@ class BlockHTMLParser(HTMLParser):
             return
         if tag in self.HEADING_TAGS or tag in self.BLOCK_TAGS:
             self._flush()
+            anchor_id = dict(attrs).get("id") or ""
+            if anchor_id and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]*", anchor_id):
+                self.blocks.append(("anchor", f"<!-- bt-anchor:{anchor_id} -->"))
             self._tag = tag
         elif tag == "br":
             self._parts.append("\n")
@@ -198,11 +211,17 @@ def detect_format(path: Path) -> str:
     raise BookError(f"Unsupported source format: {suffix or '<no extension>'}")
 
 
-def html_blocks(text: str, *, skip_navigation: bool = True) -> list[tuple[str, str]]:
-    parser = BlockHTMLParser(skip_navigation=skip_navigation)
+def html_blocks(
+    text: str, *, skip_navigation: bool = True, document_path: str | None = None
+) -> list[tuple[str, str]]:
+    parser = BlockHTMLParser(skip_navigation=skip_navigation, document_path=document_path)
     parser.feed(text)
     parser.close()
-    return parser.blocks
+    # Only anchors needed by local links become explicit, non-prose markers.
+    return [
+        (tag, value) for tag, value in parser.blocks
+        if tag != "anchor" or value[len("<!-- bt-anchor:"):-len(" -->")] in parser._local_targets
+    ]
 
 
 def blocks_to_markdown(blocks: Iterable[tuple[str, str]]) -> str:
@@ -218,9 +237,10 @@ def blocks_to_markdown(blocks: Iterable[tuple[str, str]]) -> str:
 
 
 def split_html_document(
-    text: str, fallback_title: str, *, skip_navigation: bool = True
+    text: str, fallback_title: str, *, skip_navigation: bool = True,
+    document_path: str | None = None,
 ) -> list[Chapter]:
-    blocks = html_blocks(text, skip_navigation=skip_navigation)
+    blocks = html_blocks(text, skip_navigation=skip_navigation, document_path=document_path)
     if not blocks:
         raise BookError(f"No readable text found in {fallback_title}.")
 
@@ -372,7 +392,7 @@ def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
             text = decode_text(raw, epub_path)
             fallback = Path(epub_path).stem.replace("_", " ").replace("-", " ").strip() or idref
             try:
-                chapters.extend(split_html_document(text, fallback))
+                chapters.extend(split_html_document(text, fallback, document_path=epub_path))
             except BookError as exc:
                 raise BookError(f"Cannot extract EPUB spine document {epub_path}: {exc}") from exc
 

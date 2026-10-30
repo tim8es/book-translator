@@ -38,6 +38,8 @@ For every section, check:
 18. Are there misleading literal calques or false friends?
 19. Does the passage follow established glossary and style decisions?
 20. Is meaningful formatting preserved?
+21. If EPUB source has `<!-- bt-anchor:... -->` markers or `](#fragment)`
+    links, are marker locations and link destinations preserved verbatim?
 
 Also check for omissions or corruption of:
 

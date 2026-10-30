@@ -354,12 +354,13 @@ def resolve_output_status(
 
 
 _INLINE_MARKUP = re.compile(
-    r"(?<!\\)\[[^\[\]\n]+\]\((?:https?://|mailto:)[^\s()\[\]]+\)|"
+    r"(?<!\\)\[[^\[\]\n]+\]\((?:(?:https?://|mailto:)[^\s()\[\]]+|#[A-Za-z_][A-Za-z0-9_.:-]*)\)|"
     r"(?<!\\)`[^`\n]+(?<!\\)`|"
     r"(?<!\\)\*\*.+?(?<!\\)\*\*(?!\*)|"
     r"(?<!\\)\*[^*\n]+?(?<!\\)\*"
 )
-_SAFE_LINK = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+)\)\Z")
+_SAFE_LINK = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+|#[A-Za-z_][A-Za-z0-9_.:-]*)\)\Z")
+_LOCAL_ANCHOR = re.compile(r"<!-- bt-anchor:([A-Za-z_][A-Za-z0-9_.:-]*) -->\Z")
 
 
 def _escaped_plain(text: str) -> str:
@@ -414,6 +415,11 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
     while index < len(lines):
         line = lines[index]
         if not line.strip():
+            index += 1
+            continue
+        local_anchor = _LOCAL_ANCHOR.fullmatch(line.strip())
+        if local_anchor:
+            body.append(f'<span id="{local_anchor.group(1)}"></span>')
             index += 1
             continue
         if line.strip().startswith("```"):
@@ -503,6 +509,11 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
         + "\n".join(body)
         + "\n</body>\n</html>\n"
     )
+    # Neither translations nor previews may emit dangling local links.
+    ids = re.findall(r'<span id="([A-Za-z_][A-Za-z0-9_.:-]*)"></span>', document)
+    for fragment in re.findall(r'<a href="#([A-Za-z_][A-Za-z0-9_.:-]*)">', document):
+        if ids.count(fragment) != 1:
+            raise EpubOutputError(f"missing or duplicate local anchor target #{fragment}")
     return document.encode("utf-8")
 
 
