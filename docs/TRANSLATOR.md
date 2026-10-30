@@ -61,6 +61,9 @@ During the draft:
 
 - translate all source content;
 - preserve meaningful paragraphing and formatting;
+- keep `<!-- bt-anchor:... -->` marker lines and `](#fragment)` link destinations
+  intact and in the correct positions when present in extracted EPUB Markdown;
+  translate only the visible linked label, never the anchor identifiers;
 - do not skip difficult passages;
 - do not replace uncertainty with guesswork;
 - do not summarize;
