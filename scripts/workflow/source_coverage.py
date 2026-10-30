@@ -7,6 +7,7 @@ Only the supported textual subset may be certified; unsupported semantics block.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import posixpath
 import re
@@ -30,8 +31,22 @@ UNSUPPORTED = {"img", "table", "figure", "figcaption", "aside", "sup",
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # The same deliberately narrow, unambiguous subset is used by the extractor
 # and EPUB renderer. Relative EPUB targets require source-to-output remapping.
-LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+)\)")
+LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+|#[A-Za-z_][A-Za-z0-9_.:-]*)\)")
 SAFE_HREF_RE = re.compile(r"(?:https?://|mailto:)[^\s()\[\]]+\Z")
+LOCAL_HREF_RE = re.compile(
+    r"(?:(?P<file>[A-Za-z0-9_.-]+\.(?:xhtml|html|htm)))?#"
+    r"(?P<fragment>[A-Za-z_][A-Za-z0-9_.:-]*)\Z"
+)
+
+
+def _canonical_href(href: str, document_path: str) -> str:
+    if SAFE_HREF_RE.fullmatch(href):
+        return href
+    local = LOCAL_HREF_RE.fullmatch(href)
+    if (local is None or
+            (local.group("file") and local.group("file") != posixpath.basename(document_path))):
+        raise SourceCoverageError(f"{document_path}: unsupported anchor destination {href!r}")
+    return "#" + local.group("fragment")
 ALLOWED_BODY = BLOCKS | {"a", "br", "ul", "span", "em", "i", "strong", "b", "code"}
 
 
@@ -64,6 +79,11 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
         raise SourceCoverageError(f"{path}: XHTML must have exactly one body")
     parts: list[str] = []
     count = 0
+    anchor_ids: dict[str, int] = {}
+    for element in root.iter():
+        identifier = element.attrib.get("id")
+        if identifier:
+            anchor_ids[identifier] = anchor_ids.get(identifier, 0) + 1
 
     def visit(node: ET.Element) -> None:
         nonlocal count
@@ -78,8 +98,10 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
             raise SourceCoverageError(f"{path}: unsupported semantic element <{tag}>")
         if tag == "a":
             href = node.attrib.get("href", "")
-            if href and not SAFE_HREF_RE.fullmatch(href):
-                raise SourceCoverageError(f"{path}: unsupported anchor destination {href!r}")
+            if href:
+                canonical = _canonical_href(href, path)
+                if canonical.startswith("#") and anchor_ids.get(canonical[1:]) != 1:
+                    raise SourceCoverageError(f"{path}: missing or duplicate local fragment {canonical!r}")
         for key, value in node.attrib.items():
             attr = _name(key)
             folded = str(value).lower()
@@ -132,6 +154,7 @@ def _from_markdown(chapters: Sequence[Any]) -> list[str]:
         text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", "", chapter.content)
         text = re.sub(r"(?m)^[ \t]*-[ \t]+", "", text)
         text = LINK_RE.sub(lambda match: match.group(1), text)
+        text = re.sub(r"(?m)^<!-- bt-anchor:[A-Za-z_][A-Za-z0-9_.:-]* -->\s*\n?", "", text)
         parts.append(_prose_from_markdown(text))
     return _tokens(" ".join(parts))
 
@@ -341,14 +364,17 @@ def audit_epub(
             )
             text = decode_text(raw, path)
             fallback = Path(path).stem.replace("_", " ").replace("-", " ").strip() or item_id
-            generated = list(extract_document(text, fallback))
+            if "document_path" in inspect.signature(extract_document).parameters:
+                generated = list(extract_document(text, fallback, document_path=path))
+            else:
+                generated = list(extract_document(text, fallback))
             extracted = _from_markdown(generated)
             toc_ids = {
                 id(node) for nav in xml_root.iter() if _name(nav.tag) == "nav"
                 for node in nav.iter()
             }
             original_links = [
-                (node.attrib["href"], _tokens("".join(node.itertext())))
+                (_canonical_href(node.attrib["href"], path), _tokens("".join(node.itertext())))
                 for node in xml_root.iter()
                 if id(node) not in toc_ids and _name(node.tag) == "a"
                 and node.attrib.get("href")
