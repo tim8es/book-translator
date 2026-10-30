@@ -39,7 +39,7 @@ from workflow.review_cli import ReviewCliError, register_review_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
-from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub
+from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub, canonical_external_href
 
 
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -92,7 +92,10 @@ class BlockHTMLParser(HTMLParser):
             raise BookError(f"Unsupported semantic HTML element <{tag}>; extraction would lose structure")
         if tag == "a":
             href = dict(attrs).get("href") or ""
-            if href and not re.fullmatch(r"(?:https?://|mailto:)[^\s()\[\]]+", href):
+            external = canonical_external_href(href) if href else None
+            if external is not None:
+                href = external
+            elif href:
                 local = re.fullmatch(
                     r"(?:(?P<file>[A-Za-z0-9_.-]+\.(?:xhtml|html|htm)))?#"
                     r"(?P<fragment>[A-Za-z_][A-Za-z0-9_.:-]*)", href

@@ -11,7 +11,11 @@ The supported subset comprises text blocks, headings, lists without numbering,
 inline bold/emphasis/code, unambiguous external links, and same-document XHTML
 fragment links whose unique target ID is present in the original document.
 These links are normalized to `#fragment` in extracted Markdown, and the target
-location is marked by a `<!-- bt-anchor:fragment -->` line. Translators must
+location is marked by a `<!-- bt-anchor:fragment -->` line.
+External HTTP(S)/mailto links with literal parentheses remain supported: the
+extractor percent-encodes `(` and `)` as `%28` and `%29` only in the derived
+Markdown destination. The original EPUB is never rewritten. Unsupported URL
+schemes, whitespace, brackets and cross-document relative links remain blocked. Translators must
 preserve the link destination and the target marker exactly. Literal Markdown
 punctuation in XHTML text is escaped and independently audited against the
 original, so source prose such as `d*bcon` is not truncated.
