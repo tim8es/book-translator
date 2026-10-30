@@ -224,6 +224,20 @@ GitHub API storage is available when the environment can address a concrete repo
 
 Read capability requires GitHub Contents metadata plus tree and blob reads. Mutable coordination additionally requires Contents write capability on the selected branch. A permission failure is a capability failure; do not substitute a different repository or branch silently.
 
+### Binary source handoff across isolated Chat environments
+
+Some Chat clients expose an attached EPUB to a local Python/filesystem container while authenticated GitHub operations run through a separate connector. If the local container cannot resolve or reach `github.com`, `git clone`/`git push` will fail even though GitHub API reads/writes work. This is a transport-boundary limitation, not proof that the source cannot be admitted.
+
+Before asking the user to upload the source manually, test available authorized file handoff options:
+
+1. Verify the exact local attachment's byte length and SHA-256; inspect destination-repository visibility and do not silently publish a copyrighted or private source to a public repository.
+2. Prefer ordinary Git when functional. Otherwise, if a user-controlled file provider is connected and permits local-file upload plus authenticated raw read, use it as a **temporary binary relay**, not as canonical book state. For example: upload the attachment to a temporary, non-shared Google Drive file, then read its base64 payload **inside the same connector-orchestration call** that invokes GitHub `create_blob(encoding="base64")`. Do not expose base64 to chat, model output, logs, or repository text shards.
+3. Check returned Git blob SHA against `git hash-object <original-file>` (Git blob SHA-1, distinct from the source SHA-256). Add that blob at the intended source path by creating a tree and commit based on a freshly read repository HEAD. Move the branch with a non-forcing expected-HEAD compare-and-swap. Re-read GitHub Contents metadata to confirm exact blob SHA and byte count. Never overwrite an existing source without the applicable source-edition protocol.
+4. Execute or observe the pinned workflow's official extraction and source-coverage checks. Verify the resulting `metadata.json`, `progress.json`, `source-coverage.json` and source revision; an uploaded source or successful transport alone is **not** translation admission.
+5. After the original is durably verified at the intended destination, delete the temporary relay copy where authorized. Leave the user's existing source or Library copy untouched.
+
+The relay is optional; do not make Google Drive or any third-party provider a mandatory workflow dependency. If no authorized binary transfer path exists, report the **specific missing bridge** and preserve local draft work rather than asserting that all GitHub operations are unavailable. Never fabricate a successful GitHub write or skip the original-bound EPUB completeness gate.
+
 Credentials are runtime transport secrets and are never persisted in book metadata, progress, claims, review ledgers, generated reports, or installation provenance. Do not log or echo authorization tokens in failure text.
 
 GitHub Actions are not required for GitHub API storage execution. They may remain a development CI harness, but runtime orchestration must work directly through the GitHub API backend.
