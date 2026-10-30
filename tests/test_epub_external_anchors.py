@@ -133,8 +133,24 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
         xhtml = render_markdown_xhtml("Part", chapters[0].content, language="ru")
         self.assertIn(b'id="part"', xhtml)
 
+    def test_literal_parentheses_survive_extract_audit_and_epub_output(self):
+        href = "https://archiveofourown.org/tags/Heated%20Rivalry%20(TV)"
+        expected = "https://archiveofourown.org/tags/Heated%20Rivalry%20%28TV%29"
+        fixture(self.path, '<html><body><p>Read '
+                f'<a href="{href}"><em>this</em> tag</a>.</p></body></html>')
+        original = self.path.read_bytes()
+        chapters, _ = book.read_epub(self.path)
+        self.assertEqual(self.audit(chapters)["state"], "verified")
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertIn("[*this* tag](" + expected + ")", chapters[0].content)
+        xhtml = render_markdown_xhtml("Tags", chapters[0].content, language="ru")
+        root = ET.fromstring(xhtml)
+        anchors = root.findall(".//{http://www.w3.org/1999/xhtml}a")
+        self.assertEqual([a.attrib["href"] for a in anchors], [expected])
+        self.assertEqual("".join(anchors[0].itertext()), "this tag")
+
     def test_relative_unsafe_and_complex_links_fail_closed(self):
-        for href in ("chapter2.xhtml#part", "javascript:alert(1)", "https://example.org/a(b)"):
+        for href in ("chapter2.xhtml#part", "javascript:alert(1)", "https://example.org/a[b]"):
             with self.subTest(href=href):
                 fixture(self.path, f'<html><body><p><a href="{href}">link</a></p></body></html>')
                 with self.assertRaises(book.BookError):
