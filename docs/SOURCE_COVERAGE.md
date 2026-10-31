@@ -94,3 +94,15 @@ A navigation XHTML is excluded only when its body has no prose outside the
 navigation elements. Duplicate ZIP entry names also block certification.
 The `corpus.py verify` command checks EPUB coverage alongside its existing
 cryptographic source-corpus integrity checks.
+
+## Image-rich EPUB / source layout preservation
+
+EPUBs containing XHTML image elements use the bounded `original_xhtml_v1`
+path. The original archive is retained for deterministic source-template
+assembly; readable prose blocks are independently checked against exact XHTML
+text and have immutable `bt-block` markers. Nonprose images and a verified
+legacy TOC are inventoried and retained rather than silently dropped.
+The `epub-preserved-xhtml-v1` validator is bound to source SHA-256 and to
+extracted paragraph hashes, and the corpus preflight enforces this specific
+mode. See [EPUB layout preservation](EPUB_LAYOUT_PRESERVATION.md) for supported
+semantics and exclusions. This mode does not translate text drawn in images.

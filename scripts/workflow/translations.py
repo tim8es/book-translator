@@ -319,6 +319,19 @@ class TranslationAcceptanceManager:
                 current_chapter.get("translation_path"),
                 kind="translation",
             )
+            if metadata.get("layout_mode") == "original_xhtml_v1":
+                from .epub_preserve import PreservedEpubError, parse_blocks, _MARKER
+                try:
+                    raw_source = source.decode("utf-8")
+                    count = len(_MARKER.findall(raw_source))
+                    if not count:
+                        raise PreservedEpubError("source paragraph markers missing")
+                    parse_blocks(raw_source, expected=count, allow_source_escapes=True)
+                    parse_blocks(translation.decode("utf-8"), expected=count)
+                except (UnicodeDecodeError, PreservedEpubError) as exc:
+                    raise TranslationAcceptanceError(
+                        f"chapter {chapter_number}: preserved EPUB paragraph alignment failed: {exc}"
+                    ) from exc
             source_sha256 = _sha256(source)
             translation_sha256 = _sha256(translation)
             evidence = {

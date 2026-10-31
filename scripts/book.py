@@ -40,6 +40,8 @@ from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
 from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub, canonical_external_href
+from workflow.epub_preserve import (has_raster_xhtml, extract as preserve_extract,
+    audit as preserve_audit, PreservedEpubError, MODE as PRESERVE_MODE)
 
 
 ALLOWED_STATUSES = {"pending", "extracted", "translated", "reviewed"}
@@ -327,6 +329,16 @@ def split_txt(text: str, fallback_title: str) -> list[Chapter]:
 
 
 def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
+    if has_raster_xhtml(source):
+        try:
+            with zipfile.ZipFile(source) as zf:
+                opf = ET.fromstring(zf.read(next(n.get("full-path") for n in ET.fromstring(zf.read("META-INF/container.xml")).iter() if n.tag.endswith("rootfile"))))
+                def lookup(name):
+                    return next((n.text.strip() for n in opf.iter() if n.tag.endswith(name) and n.text and n.text.strip()), None)
+                identity = {"title": lookup("title"), "author": lookup("creator"), "source_language": lookup("language")}
+            return preserve_extract(source, Chapter), identity
+        except PreservedEpubError as exc:
+            raise BookError(f"EPUB source-preserving extraction blocked: {exc}") from exc
     with zipfile.ZipFile(source) as zf:
         try:
             container = ET.fromstring(zf.read("META-INF/container.xml"))
@@ -547,15 +559,16 @@ def extract_command(args: argparse.Namespace) -> int:
         shutil.copy2(source, stored_source)
 
     chapters, detected = extract_chapters(stored_source, source_format)
+    preserve_layout = source_format == "epub" and has_raster_xhtml(stored_source)
     coverage = None
     if source_format == "epub":
         try:
-            coverage = audit_epub(
-                stored_source, chapters,
-                extract_document=split_html_document,
-                decode_text=decode_text,
+            coverage = (
+                preserve_audit(stored_source, chapters) if preserve_layout else
+                audit_epub(stored_source, chapters,
+                           extract_document=split_html_document, decode_text=decode_text)
             )
-        except SourceCoverageError as exc:
+        except (SourceCoverageError, PreservedEpubError) as exc:
             raise BookError(f"EPUB source coverage blocked: {exc}") from exc
     cover_path = None
     if coverage is not None:
@@ -616,6 +629,7 @@ def extract_command(args: argparse.Namespace) -> int:
         "source_language": args.source_language or detected.get("source_language") or "unknown",
         "target_language": args.target_language,
         "source_format": source_format,
+        **({"layout_mode": PRESERVE_MODE} if preserve_layout else {}),
         **({"cover_path": cover_path} if cover_path is not None else {}),
         "source_file": source.name,
         "chapter_count": len(chapter_records),

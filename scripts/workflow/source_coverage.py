@@ -492,8 +492,10 @@ def coverage_integrity_errors(
     if not isinstance(report, dict):
         return ["Invalid source-coverage.json object"]
     errors: list[str] = []
+    from .epub_preserve import VALIDATOR as PRESERVE_VALIDATOR, MODE as PRESERVE_MODE
+    expected_validator = PRESERVE_VALIDATOR if metadata.get("layout_mode") == PRESERVE_MODE else VALIDATOR
     if (report.get("schema_version"), report.get("validator"), report.get("state")) != (
-        1, VALIDATOR, "verified"
+        1, expected_validator, "verified"
     ):
         errors.append("Invalid EPUB source-coverage validator/version/state")
     source = metadata.get("source")
@@ -522,16 +524,37 @@ def coverage_integrity_errors(
                 continue
             paths.add(path)
             state = doc.get("state")
+            if expected_validator == PRESERVE_VALIDATOR:
+                images = doc.get("images")
+                if not isinstance(images, list):
+                    errors.append(f"Missing preserved image inventory for {path}")
+                else:
+                    for asset in images:
+                        if (not isinstance(asset, Mapping)
+                                or not isinstance(asset.get("path"), str)
+                                or not asset["path"] or asset["path"].startswith("/")
+                                or ".." in Path(asset["path"]).parts
+                                or not isinstance(asset.get("sha256"), str)
+                                or not SHA_RE.fullmatch(asset["sha256"])
+                                or asset.get("media_type") not in {"image/jpeg", "image/png", "image/gif"}):
+                            errors.append(f"Invalid preserved image identity for {path}")
             if state == "verified":
                 covered_count += 1
+                if (expected_validator == PRESERVE_VALIDATOR and (
+                        type(doc.get("text_tokens")) is not int or doc["text_tokens"] < 1
+                        or type(doc.get("text_blocks")) is not int or doc["text_blocks"] < 1)):
+                    errors.append(f"Invalid preserved paragraph inventory for {path}")
                 if (not isinstance(doc.get("xhtml_sha256"), str)
                         or not SHA_RE.fullmatch(doc["xhtml_sha256"])
-                        or not isinstance(doc.get("reference_sha256"), str)
-                        or not SHA_RE.fullmatch(doc["reference_sha256"])
+                        or (expected_validator != PRESERVE_VALIDATOR and (
+                            not isinstance(doc.get("reference_sha256"), str) or not SHA_RE.fullmatch(doc["reference_sha256"])))
                         or type(doc.get("text_tokens")) is not int or doc["text_tokens"] < 1
                         or type(doc.get("text_blocks")) is not int or doc["text_blocks"] < 0
                         or type(doc.get("chapter_count")) is not int or doc["chapter_count"] < 1):
                     errors.append(f"Invalid coverage inventory for {path}")
+            elif state in {"preserved_artwork", "preserved_toc"} and expected_validator == PRESERVE_VALIDATOR:
+                if not isinstance(doc.get("xhtml_sha256"), str) or not SHA_RE.fullmatch(doc["xhtml_sha256"]):
+                    errors.append(f"Invalid preserved XHTML SHA-256 for {path}")
             elif state not in {"excluded_navigation", "excluded_empty"}:
                 errors.append(f"Unsupported EPUB coverage state for {path}")
         if covered_count == 0:

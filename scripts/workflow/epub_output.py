@@ -228,7 +228,7 @@ def build_input_snapshot(
         "workflow_revision": workflow_revision,
         "units": units,
         "cover": cover,
-        "build_config": {"version": 1},
+        "build_config": {"version": 1, "layout_mode": metadata.get("layout_mode")},
     }
 
 
