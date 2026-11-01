@@ -948,6 +948,11 @@ class SourceRevisionManager:
             "revision_id": revision_id,
             "parent_revision_id": parent_revision,
             "created_at": created_at,
+            "base_revisions": {
+                "metadata": metadata_doc.version,
+                "progress": progress_doc.version,
+                "source_manifest": manifest_doc.version,
+            },
             "metadata": target_metadata,
             "progress": candidate_progress,
             "source_manifest": target_manifest,
@@ -1139,6 +1144,15 @@ class SourceRevisionManager:
                 raise SourceRevisionConflict(
                     "active source revision changed after this candidate was staged"
                 )
+
+            if self._promotion_marker() is None:
+                base = snapshot.get("base_revisions")
+                current = {"metadata": metadata_doc.version, "progress": progress_doc.version,
+                           "source_manifest": manifest_doc.version}
+                if not isinstance(base, Mapping) or dict(base) != current:
+                    raise SourceRevisionConflict(
+                        "book state changed since the source update was staged; discard and stage it again"
+                    )
 
             target_metadata = snapshot.get("metadata")
             target_progress = snapshot.get("progress")

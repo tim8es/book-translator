@@ -173,6 +173,11 @@ Do not silently switch an existing book to a newer workflow revision.
 
 After the user explicitly upgrades a book to a workflow revision that includes this contract, initialize `source-revisions.json` from the validated current corpus once. The source-update command can perform this bootstrap when the upgraded workspace has a valid source manifest and no active claims.
 
+Staged updates are bound to the metadata, progress, and source manifest versions
+observed during staging. If any changed before promotion, discard the candidate
+and stage it again. Older staged candidates without these base versions also
+require restaging; promotion recovery already in progress remains recoverable.
+
 A legacy repository is not an operational fallback after migration. Required source, translation, glossary, style, review, and output state must live in the book's authoritative private workspace.
 
 ## 12. Orchestrator decision rule
