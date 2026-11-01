@@ -22,7 +22,7 @@ VALIDATOR = "epub-preserved-xhtml-v1"
 MODE = "original_xhtml_v1"
 _MARKER = re.compile(r"(?m)^<!-- bt-block:(\d{6}) -->\s*$")
 _PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre"}
-_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "br", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre"}
+_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre"}
 
 class PreservedEpubError(ValueError):
     pass

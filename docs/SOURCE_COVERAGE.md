@@ -9,6 +9,7 @@ Undeclared XHTML members in the ZIP also block certification.
 
 The supported subset comprises text blocks, headings, lists without numbering,
 description-list terms and definitions as separate text blocks,
+horizontal scene breaks, represented by `<!-- bt-scene-break -->` markers,
 inline bold/emphasis/code, unambiguous external links, and same-document XHTML
 fragment links whose unique target ID is present in the original document.
 These links are normalized to `#fragment` in extracted Markdown, and the target
