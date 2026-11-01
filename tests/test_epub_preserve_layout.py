@@ -63,6 +63,23 @@ class PreserveTests(unittest.TestCase):
     def extracted(self):
         return ep.extract(self.source, Chapter)
 
+    def test_description_list_survives_layout_preserving_roundtrip(self):
+        with zipfile.ZipFile(self.source) as archive:
+            assets = {name: archive.read(name) for name in archive.namelist()}
+        assets['OPS/intro.xhtml'] = assets['OPS/intro.xhtml'].replace(
+            b'</body>', b'<dl><dt>Author</dt><dd>Example writer</dd></dl></body>')
+        with zipfile.ZipFile(self.source, 'w') as archive:
+            for name, value in assets.items():
+                archive.writestr(name, value, compress_type=zipfile.ZIP_STORED if name == 'mimetype' else zipfile.ZIP_DEFLATED)
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        output = ep.build(self.source, [{'markdown': chapter.content} for chapter in chapters],
+                          expected_source_sha256=report['source_sha256'], language='ru')
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            document = ET.fromstring(archive.read('OPS/intro.xhtml'))
+            self.assertEqual(document.find('.//{*}dt').text, 'Author')
+            self.assertEqual(document.find('.//{*}dd').text, 'Example writer')
+
     def test_inventory_order_images_and_toc(self):
         docs,_ = ep.analyze(self.source)
         self.assertEqual([d.kind for d in docs], ['artwork','toc','text','text','artwork'])

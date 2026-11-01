@@ -52,6 +52,45 @@ class CoverageAuditTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_description_list_keeps_terms_and_definitions_in_order(self):
+        epub(self.path, '<html><body><h1>Details</h1><dl>'
+             '<dt>Author</dt><dd><a href="https://example.org/a">A Writer</a></dd>'
+             '<dt>Tags</dt><dd>First, <em>second</em>.</dd>'
+             '</dl><p>Afterward.</p></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        report = certify(self.path)
+        self.assertEqual(report['state'], 'verified')
+        text = chapters[0].content
+        positions = [text.index(word) for word in ('Author', 'A Writer', 'Tags', 'First', 'second', 'Afterward')]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('](https://example.org/a)', text)
+
+    def test_description_list_missing_definition_fails_coverage(self):
+        epub(self.path, '<html><body><dl><dt>Term</dt><dd>Definition</dd></dl></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        def lossy(_text, _title):
+            return [book.Chapter('Example', 'Term\n')]
+        with self.assertRaisesRegex(SourceCoverageError, 'token'):
+            audit_epub(self.path, chapters, extract_document=lossy, decode_text=book.decode_text)
+
+    def test_same_document_endnote_link_is_preserved(self):
+        epub(self.path, '<html><body><p>Chapter.</p>'
+             '<div class="endnote-link">See the end for <a href="#endnotes2">notes</a>.</div>'
+             '<div id="endnotes2"><p>Notes content.</p></div></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        self.assertEqual(certify(self.path)['state'], 'verified')
+        text = chapters[0].content
+        self.assertIn('See the end for [notes](#endnotes2).', text)
+        self.assertIn('<!-- bt-anchor:endnotes2 -->', text)
+        self.assertIn('Notes content.', text)
+
+    def test_endnote_link_class_does_not_allow_unsupported_markup(self):
+        epub(self.path, '<html><body><div class="endnote-link">'
+             '<a href="#note">Notes</a><span>Extra</span></div>'
+             '<div id="note"><p>Note.</p></div></body></html>')
+        with self.assertRaisesRegex(SourceCoverageError, 'annotation'):
+            certify(self.path)
+
     def test_complete_xhtml_with_head_and_inline_emphasis(self):
         epub(self.path, '<html><head><title>Metadata</title></head>'
              '<body><h1>Chapter</h1><p>First <em>important</em> sentence.</p>'

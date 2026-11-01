@@ -8,6 +8,7 @@ listed in the EPUB manifest, including documents omitted from the spine.
 Undeclared XHTML members in the ZIP also block certification.
 
 The supported subset comprises text blocks, headings, lists without numbering,
+description-list terms and definitions as separate text blocks,
 inline bold/emphasis/code, unambiguous external links, and same-document XHTML
 fragment links whose unique target ID is present in the original document.
 These links are normalized to `#fragment` in extracted Markdown, and the target
@@ -19,6 +20,8 @@ schemes, whitespace, brackets and cross-document relative links remain blocked. 
 preserve the link destination and the target marker exactly. Literal Markdown
 punctuation in XHTML text is escaped and independently audited against the
 original, so source prose such as `d*bcon` is not truncated.
+Simple endnote-link wrappers are supported when they contain a single
+same-document link to a verified target; other note markup remains blocked.
 
 For EPUBs with an in-spine `<nav epub:type="toc">`, its navigation links are
 not sent to the translator as prose. The audit requires one nonempty link per
