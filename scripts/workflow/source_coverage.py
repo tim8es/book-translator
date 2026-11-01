@@ -22,7 +22,7 @@ from xml.etree import ElementTree as ET
 COVERAGE_PATH = "source-coverage.json"
 VALIDATOR = "epub-xhtml-text-v1"
 TEXT_MEDIA = {"application/xhtml+xml", "text/html"}
-BLOCKS = {"body", "section", "article", "div", "p", "li", "blockquote",
+BLOCKS = {"body", "section", "article", "div", "dl", "dt", "dd", "p", "li", "blockquote",
           "pre", "h1", "h2", "h3", "h4", "h5", "h6", "header", "footer"}
 UNSUPPORTED = {"img", "table", "figure", "figcaption", "aside", "sup",
                "sub", "math", "ruby", "audio", "video", "svg", "script",
@@ -120,7 +120,12 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
             folded = str(value).lower()
             if attr in {"hidden", "src"} or (attr == "href" and tag != "a"):
                 raise SourceCoverageError(f"{path}: unsupported attribute {attr}")
-            if attr in {"type", "role", "class"} and any(
+            simple_endnote_link = (
+                tag == "div" and attr == "class" and folded.strip() == "endnote-link"
+                and len(node) == 1 and _name(node[0].tag) == "a"
+                and node[0].attrib.get("href", "").startswith("#")
+            )
+            if not simple_endnote_link and attr in {"type", "role", "class"} and any(
                 term in folded for term in ("footnote", "endnote", "noteref", "pagebreak")
             ):
                 raise SourceCoverageError(f"{path}: unsupported annotation {attr}={value!r}")
@@ -133,7 +138,7 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
                 raise SourceCoverageError(f"{path}: unsupported aria-hidden value")
         if tag in BLOCKS or tag == "br":
             parts.append(" ")
-        if tag in {"p", "li", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}:
+        if tag in {"p", "li", "dt", "dd", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}:
             count += 1
         if node.text:
             parts.append(node.text)
