@@ -417,6 +417,10 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
         if not line.strip():
             index += 1
             continue
+        if line.strip() == "<!-- bt-scene-break -->":
+            body.append("<hr/>")
+            index += 1
+            continue
         local_anchor = _LOCAL_ANCHOR.fullmatch(line.strip())
         if local_anchor:
             body.append(f'<span id="{local_anchor.group(1)}"></span>')
@@ -484,6 +488,7 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
             candidate = lines[index]
             if (
                 candidate.strip().startswith("```")
+                or candidate.strip() == "<!-- bt-scene-break -->"
                 or _HEADING_RE.match(candidate)
                 or candidate.startswith("- ")
                 or candidate.startswith("* ")

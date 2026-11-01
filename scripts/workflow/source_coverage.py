@@ -26,7 +26,7 @@ BLOCKS = {"body", "section", "article", "div", "dl", "dt", "dd", "p", "li", "blo
           "pre", "h1", "h2", "h3", "h4", "h5", "h6", "header", "footer"}
 UNSUPPORTED = {"img", "table", "figure", "figcaption", "aside", "sup",
                "sub", "math", "ruby", "audio", "video", "svg", "script",
-               "style", "nav", "ol", "hr", "iframe", "object", "canvas",
+               "style", "nav", "ol", "iframe", "object", "canvas",
                "form", "input", "button"}
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # The same deliberately narrow, unambiguous subset is used by the extractor
@@ -59,7 +59,7 @@ def _canonical_href(href: str, document_path: str) -> str:
             (local.group("file") and local.group("file") != posixpath.basename(document_path))):
         raise SourceCoverageError(f"{document_path}: unsupported anchor destination {href!r}")
     return "#" + local.group("fragment")
-ALLOWED_BODY = BLOCKS | {"a", "br", "ul", "span", "em", "i", "strong", "b", "code"}
+ALLOWED_BODY = BLOCKS | {"a", "br", "hr", "ul", "span", "em", "i", "strong", "b", "code"}
 
 
 class SourceCoverageError(ValueError):
@@ -102,6 +102,10 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
             return
         if tag in UNSUPPORTED or tag not in ALLOWED_BODY:
             raise SourceCoverageError(f"{path}: unsupported semantic element <{tag}>")
+        if tag == "hr":
+            if len(node) or (node.text or "").strip():
+                raise SourceCoverageError(f"{path}: non-empty scene break")
+            parts.append(" \uf8ff ")
         if tag == "a":
             href = node.attrib.get("href", "")
             if href:
@@ -170,6 +174,7 @@ def _from_markdown(chapters: Sequence[Any]) -> list[str]:
     parts: list[str] = []
     for chapter in chapters:
         text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", "", chapter.content)
+        text = text.replace("<!-- bt-scene-break -->", " \uf8ff ")
         text = re.sub(r"(?m)^[ \t]*-[ \t]+", "", text)
         text = LINK_RE.sub(lambda match: match.group(1), text)
         text = re.sub(r"(?m)^<!-- bt-anchor:[A-Za-z_][A-Za-z0-9_.:-]* -->\s*\n?", "", text)

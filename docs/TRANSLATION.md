@@ -21,6 +21,7 @@ Preserve, as closely as the target language allows:
 - differences between character voices;
 - significant repetition;
 - meaningful formatting and paragraph structure.
+- Keep each `<!-- bt-scene-break -->` marker in its original position between scenes.
 
 Natural target-language prose matters, but naturalness never grants permission to change what the author is doing.
 

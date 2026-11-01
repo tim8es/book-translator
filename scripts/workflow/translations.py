@@ -24,6 +24,14 @@ class TranslationAcceptanceError(RuntimeError):
     """A Translator result cannot be accepted safely."""
 
 
+def validate_scene_breaks(source: bytes, translation: bytes) -> None:
+    marker = b"<!-- bt-scene-break -->"
+    source_count = sum(line.strip() == marker for line in source.splitlines())
+    translated_count = sum(line.strip() == marker for line in translation.splitlines())
+    if source_count != translated_count:
+        raise TranslationAcceptanceError("translation scene break markers do not match source")
+
+
 class TranslationAcceptanceConflict(TranslationAcceptanceError):
     """Durable state changed before Translator acceptance completed."""
 
@@ -212,6 +220,7 @@ class TranslationAcceptanceManager:
             )
         source = self._artifact(chapter.get("source_path"), kind="source")
         translation = self._artifact(chapter.get("translation_path"), kind="translation")
+        validate_scene_breaks(source, translation)
         source_sha256 = _sha256(source)
         translation_sha256 = _sha256(translation)
         if evidence.get("source_sha256") != source_sha256:
@@ -319,6 +328,7 @@ class TranslationAcceptanceManager:
                 current_chapter.get("translation_path"),
                 kind="translation",
             )
+            validate_scene_breaks(source, translation)
             if metadata.get("layout_mode") == "original_xhtml_v1":
                 from .epub_preserve import PreservedEpubError, parse_blocks, _MARKER
                 try:

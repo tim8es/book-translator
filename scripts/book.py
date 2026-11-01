@@ -92,6 +92,10 @@ class BlockHTMLParser(HTMLParser):
             return
         if tag in self.UNSUPPORTED_SEMANTICS:
             raise BookError(f"Unsupported semantic HTML element <{tag}>; extraction would lose structure")
+        if tag == "hr":
+            self._flush()
+            self.blocks.append(("hr", "<!-- bt-scene-break -->"))
+            return
         if tag == "a":
             href = dict(attrs).get("href") or ""
             external = canonical_external_href(href) if href else None

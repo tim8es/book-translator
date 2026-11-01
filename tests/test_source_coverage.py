@@ -73,6 +73,34 @@ class CoverageAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceCoverageError, 'token'):
             audit_epub(self.path, chapters, extract_document=lossy, decode_text=book.decode_text)
 
+    def test_scene_break_is_audited_and_rendered_in_place(self):
+        from workflow.epub_output import render_markdown_xhtml
+        epub(self.path, '<html><body><p>Before.</p><hr/><p>After.</p></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        self.assertEqual(certify(self.path)['state'], 'verified')
+        text = chapters[0].content
+        self.assertLess(text.index('Before.'), text.index('<!-- bt-scene-break -->'))
+        self.assertLess(text.index('<!-- bt-scene-break -->'), text.index('After.'))
+        output = render_markdown_xhtml('Example', text, language='en').decode('utf8')
+        self.assertIn('<hr', output)
+        self.assertLess(output.index('Before.'), output.index('<hr'))
+        self.assertLess(output.index('<hr'), output.index('After.'))
+
+    def test_scene_break_cannot_be_silently_omitted(self):
+        epub(self.path, '<html><body><p>Before.</p><hr/><p>After.</p></body></html>')
+        chapters, _ = book.read_epub(self.path)
+        def lossy(_text, _title):
+            return [book.Chapter('Example', 'Before.\n\nAfter.\n')]
+        with self.assertRaisesRegex(SourceCoverageError, 'token'):
+            audit_epub(self.path, chapters, extract_document=lossy, decode_text=book.decode_text)
+
+    def test_translated_scene_breaks_must_match_source(self):
+        from workflow.translations import TranslationAcceptanceError, validate_scene_breaks
+        source = b'Before.\n\n<!-- bt-scene-break -->\n\nAfter.\n'
+        validate_scene_breaks(source, 'До.\n\n<!-- bt-scene-break -->\n\nПосле.\n'.encode())
+        with self.assertRaisesRegex(TranslationAcceptanceError, 'scene break'):
+            validate_scene_breaks(source, 'До.\n\nПосле.\n'.encode())
+
     def test_same_document_endnote_link_is_preserved(self):
         epub(self.path, '<html><body><p>Chapter.</p>'
              '<div class="endnote-link">See the end for <a href="#endnotes2">notes</a>.</div>'
