@@ -196,6 +196,28 @@ class SourceRevisionWorkflowTests(unittest.TestCase):
         self.assertEqual(states[1], "pass")
         self.assertEqual(states[3], "pass")
 
+    def test_stale_staged_revision_cannot_discard_later_translation(self):
+        book = self.initialize()
+        updated = self.make_source("book-v2.md", [("One", "Alpha."), ("Two", "Beta."), ("Three", "Gamma.")])
+        staged = json.loads(self.run_cli("update-source", "sample", str(updated), "--stage-only", "--json").stdout)
+        self.translate_and_review(1)
+        before = (book / "progress.json").read_bytes()
+        result = self.run_cli("promote-source-update", "sample", staged["revision_id"], "--json", expect=1)
+        self.assertIn("changed since", result.stderr)
+        self.assertEqual((book / "progress.json").read_bytes(), before)
+
+    def test_legacy_candidate_without_base_state_cannot_be_promoted(self):
+        book = self.initialize()
+        updated = self.make_source("book-v2.md", [("One", "Alpha."), ("Two", "Beta."), ("Three", "Gamma.")])
+        staged = json.loads(self.run_cli("update-source", "sample", str(updated), "--stage-only", "--json").stdout)
+        snapshot = book / "source-revisions" / staged["revision_id"] / "revision.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload.pop("base_revisions")
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        before = (book / "progress.json").read_bytes()
+        self.run_cli("promote-source-update", "sample", staged["revision_id"], expect=1)
+        self.assertEqual((book / "progress.json").read_bytes(), before)
+
     def test_changed_unit_keeps_identity_but_invalidates_translation_and_review(self):
         book = self.initialize()
         self.translate_and_review(1)
