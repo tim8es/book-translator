@@ -154,6 +154,111 @@ class PreserveTests(unittest.TestCase):
         with zipfile.ZipFile(self.source) as original, zipfile.ZipFile(io.BytesIO(output)) as result:
             self.assertEqual(original.read('OPS/end.xhtml'), result.read('OPS/end.xhtml'))
 
+    def make_epub3_navigation(self, *, in_spine=None, off_spine=None) -> None:
+        """Add a canonical in-spine TOC and an off-spine OPF nav resource."""
+        wrapper = '<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc">'
+        if in_spine is None:
+            in_spine = (wrapper + '<h1>Contents</h1><ol>'
+                        '<li><a href="chapter.xhtml">Chapter 1</a></li>'
+                        '</ol></nav>')
+        if off_spine is None:
+            off_spine = (wrapper + '<h1>Contents</h1><ol>'
+                         '<li><a href="intro.xhtml">Intro</a></li>'
+                         '<li><a href="chapter.xhtml">Chapter 1</a></li>'
+                         '</ol></nav>')
+        with zipfile.ZipFile(self.source) as original:
+            files = [(info, original.read(info.filename)) for info in original.infolist()]
+        with zipfile.ZipFile(self.source, 'w') as z:
+            for info, raw in files:
+                if info.filename == 'OPS/toc.xhtml':
+                    begin, _, tail = raw.partition(b'<body>')
+                    self.assertIn(b'</body>', tail)
+                    raw = (begin + b'<body>' + in_spine.encode('utf-8')
+                           + b'</body></html>')
+                elif info.filename == 'OPS/package.opf':
+                    self.assertIn(b'</manifest>', raw)
+                    raw = raw.replace(
+                        b'</manifest>', b'<item id="nav-doc" href="nav.xhtml" '
+                        b'media-type="application/xhtml+xml" properties="nav"/>'
+                        b'</manifest>')
+                z.writestr(info, raw)
+            z.writestr(
+                'OPS/nav.xhtml',
+                ('<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+                 '<title>Contents</title></head><body>' + off_spine +
+                 '</body></html>').encode('utf-8'),
+            )
+
+    def test_epub3_nav_in_spine_and_off_spine_preserved_no_prose_lost(self):
+        self.make_epub3_navigation()
+        docs, identity = ep.analyze(self.source)
+        self.assertEqual([doc.kind for doc in docs], ['artwork', 'toc', 'text', 'text', 'artwork'])
+        chapters = self.extracted()
+        self.assertEqual(len(chapters), 2)
+        self.assertIn('Once upon a time.', chapters[1].content)
+        report = ep.audit(self.source, chapters)
+        self.assertEqual(report['chapter_count'], 2)
+        self.assertEqual(report['documents'][1]['state'], 'preserved_toc')
+        translated = [
+            {'markdown': chapters[0].content.replace('*Hello* world.', '*Привет* мир.')},
+            {'markdown': chapters[1].content.replace('Next paragraph.', 'Следующий абзац.')},
+        ]
+        output = ep.build(
+            self.source, translated,
+            expected_source_sha256=identity['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(self.source) as original, zipfile.ZipFile(io.BytesIO(output)) as result:
+            self.assertEqual(original.namelist(), result.namelist())
+            for path in ('OPS/toc.xhtml', 'OPS/nav.xhtml', 'OPS/front.jpg',
+                         'OPS/flower.jpg', 'OPS/book.css'):
+                self.assertEqual(original.read(path), result.read(path))
+            intro = ET.fromstring(result.read('OPS/intro.xhtml'))
+            chapter = ET.fromstring(result.read('OPS/chapter.xhtml'))
+            self.assertIn('Привет', ''.join(intro.itertext()))
+            self.assertIn('Следующий абзац.', ''.join(chapter.itertext()))
+
+    def test_epub3_navigation_rejects_broken_or_unsafe_toc(self):
+        wrapper = '<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc">'
+        valid_link = '<ol><li><a href="chapter.xhtml">Chapter 1</a></li></ol>'
+        cases = [
+            (wrapper + valid_link + '</nav><p>Unmapped body prose.</p>', 'outside the TOC'),
+            (wrapper + '<p>Unmapped navigation prose.</p>' + valid_link + '</nav>', 'unsupported TOC element'),
+            ('<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="landmarks">'
+             + valid_link + '</nav>', 'only explicit EPUB 3'),
+            (wrapper + '<ol><li><a href="https://example.org">External</a></li></ol></nav>',
+             'TOC reference outside'),
+            (wrapper + '<ol><li><a href="chapter.xhtml#missing-id">Lost</a></li></ol></nav>',
+             'broken TOC fragment'),
+            (wrapper + '<ol><li><a href="missing.xhtml">Lost</a></li></ol></nav>',
+             'TOC reference outside'),
+            (wrapper + '<ol><li><a onclick="run()" href="chapter.xhtml">Unsafe</a></li></ol></nav>',
+             'executable/hidden'),
+            (wrapper + '<ol><li><a href="chapter.xhtml">Valid</a>extra prose</li></ol></nav>',
+             'unmapped TOC tail'),
+        ]
+        for snippet, message in cases:
+            with self.subTest(message=message, snippet=snippet):
+                fixture(self.source)
+                self.make_epub3_navigation(in_spine=snippet)
+                with self.assertRaisesRegex(ep.PreservedEpubError, message):
+                    ep.analyze(self.source)
+
+    def test_off_spine_navigation_must_be_verified_not_just_marked_nav(self):
+        for raw, message in [
+            ('<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc">'
+             '<ol><li><a href="intro.xhtml">Intro</a></li></ol></nav>'
+             '<p>Not navigation.</p>', 'outside the TOC'),
+            ('<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc">'
+             '<ol><li><a href="intro.xhtml">Intro</a></li></ol></nav>'
+             '<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="landmarks"/>',
+             'multiple EPUB navigation'),
+        ]:
+            with self.subTest(message=message):
+                fixture(self.source)
+                self.make_epub3_navigation(off_spine=raw)
+                with self.assertRaisesRegex(ep.PreservedEpubError, message):
+                    ep.analyze(self.source)
+
     def test_description_list_survives_layout_preserving_roundtrip(self):
         with zipfile.ZipFile(self.source) as archive:
             assets = {name: archive.read(name) for name in archive.namelist()}
