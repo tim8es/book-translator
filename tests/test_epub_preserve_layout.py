@@ -63,6 +63,97 @@ class PreserveTests(unittest.TestCase):
     def extracted(self):
         return ep.extract(self.source, Chapter)
 
+    def replace_xhtml(self, member: str, old: bytes, new: bytes) -> None:
+        """Modify only a synthetic fixture member; preserve other ZIP resources."""
+        with zipfile.ZipFile(self.source) as z:
+            archive = [(i, z.read(i.filename)) for i in z.infolist()]
+        with zipfile.ZipFile(self.source, 'w') as z:
+            for info, data in archive:
+                if info.filename == member:
+                    self.assertIn(old, data)
+                    data = data.replace(old, new)
+                z.writestr(info, data)
+
+    def test_nested_section_wrappers_preserve_layout_and_all_prose(self):
+        # Two semantic section containers are NOT prose blocks themselves:
+        # their heading and both paragraphs must be translated independently.
+        self.replace_xhtml(
+            'OPS/chapter.xhtml',
+            b'<div><img ',
+            b'<section id="chapter-main" class="story" epub:type="chapter" '
+            b'xmlns:epub="http://www.idpf.org/2007/ops">'
+            b'<h2>Chapter Heading</h2><div><img ')
+        self.replace_xhtml(
+            'OPS/chapter.xhtml',
+            b'<p class="next">Next paragraph.</p>',
+            b'<section id="inner"><p class="next">Next paragraph.</p>'
+            b'</section></section>')
+        original_sha = ep.analyze(self.source)[1]['source_sha256']
+        chapters = self.extracted()
+        self.assertEqual(len(chapters), 2)
+        text = chapters[1].content
+        self.assertEqual(text.count('<!-- bt-block:'), 3)
+        self.assertIn('Chapter Heading', text)
+        self.assertIn('Once upon a time.', text)
+        self.assertIn('Next paragraph.', text)
+        report = ep.audit(self.source, chapters)
+        self.assertEqual(report['documents'][3]['text_blocks'], 3)
+        translated = text.replace('Chapter Heading', 'Заголовок главы')
+        translated = translated.replace('Once upon a time.', 'Однажды.')
+        translated = translated.replace('Next paragraph.', 'Следующий абзац.')
+        output = ep.build(
+            self.source,
+            [{'markdown': chapters[0].content}, {'markdown': translated}],
+            expected_source_sha256=report['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(io.BytesIO(output)) as out, zipfile.ZipFile(self.source) as original:
+            root = ET.fromstring(out.read('OPS/chapter.xhtml'))
+            outer = root.find('.//{*}section')
+            self.assertIsNotNone(outer)
+            self.assertEqual(outer.get('id'), 'chapter-main')
+            self.assertEqual(outer.get('class'), 'story')
+            self.assertEqual(
+                outer.get('{http://www.idpf.org/2007/ops}type'), 'chapter')
+            self.assertEqual(outer.find('{*}h2').text, 'Заголовок главы')
+            self.assertEqual(outer.find('.//{*}section').get('id'), 'inner')
+            self.assertEqual(outer.find('.//{*}section/{*}p').text, 'Следующий абзац.')
+            self.assertEqual(outer.find('.//{*}p')[0].get('class'), 'initial')
+            self.assertIn('Однажды.', ''.join(outer.itertext()))
+            self.assertIsNotNone(outer.find('.//{*}img'))
+            self.assertEqual(out.read('OPS/flower.jpg'), original.read('OPS/flower.jpg'))
+            self.assertEqual(out.read('OPS/book.css'), original.read('OPS/book.css'))
+        self.assertEqual(ep.analyze(self.source)[1]['source_sha256'], original_sha)
+
+    def test_section_cannot_hide_unmapped_text_or_attributes(self):
+        for section in (
+            '<section>Lost prose<p>Visible block.</p></section>',
+            '<section><p>Visible block.</p>Lost tail</section>',
+            '<section hidden="hidden"><p>Hidden.</p></section>',
+            '<section><script>alert(1)</script><p>Visible.</p></section>',
+        ):
+            with self.subTest(section=section):
+                fixture(self.source)
+                self.replace_xhtml(
+                    'OPS/chapter.xhtml', b'</body>',
+                    section.encode('utf-8') + b'</body>')
+                with self.assertRaises(ep.PreservedEpubError):
+                    ep.analyze(self.source)
+
+    def test_image_only_section_is_preserved_without_translation(self):
+        self.replace_xhtml(
+            'OPS/end.xhtml',
+            b'<img src="flower.jpg" alt=""/>',
+            b'<section class="end-art"><img src="flower.jpg" alt=""/></section>')
+        docs, _ = ep.analyze(self.source)
+        self.assertEqual(docs[-1].kind, 'artwork')
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        output = ep.build(
+            self.source, [{'markdown': chapter.content} for chapter in chapters],
+            expected_source_sha256=report['source_sha256'], language='ru')
+        with zipfile.ZipFile(self.source) as original, zipfile.ZipFile(io.BytesIO(output)) as result:
+            self.assertEqual(original.read('OPS/end.xhtml'), result.read('OPS/end.xhtml'))
+
     def test_description_list_survives_layout_preserving_roundtrip(self):
         with zipfile.ZipFile(self.source) as archive:
             assets = {name: archive.read(name) for name in archive.namelist()}

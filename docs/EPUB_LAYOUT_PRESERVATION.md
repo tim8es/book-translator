@@ -40,6 +40,12 @@ fails closed. The output OPF and translated XHTML declare the target language.
 
 ## Bounds and limitations
 
+- Standard XHTML `<section>` wrappers are preserved at their original
+  nesting level, with `id`, `class`, and namespace-qualified attributes intact.
+  Only their supported child paragraph/heading blocks are translated. Text
+  directly in a section or in unmapped tails remains a hard error, as do hidden
+  content, executable elements and unsupported nested structures. Independent
+  source coverage continues to verify the original text and reading order.
 - The source-preserving mode currently supports a simple, unambiguous structure
   with paragraph/heading blocks, inline text, raster art, a single-image SVG
   wrapper, and a simple legacy hyperlink TOC. Complex EPUB 3 navigation,
