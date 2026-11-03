@@ -108,6 +108,23 @@ def _open(epub: Path):
         raise
 
 
+def _leaf_div_text(node: ET.Element) -> bool:
+    """Treat a simple prose-only div as a paragraph without flattening layout.
+
+    A div wrapping block children or artwork is not a translation unit. The
+    original div tag and its class/id remain in the source XHTML; only direct
+    prose (with safe unstyled emphasis) is replaced by the same block mapper.
+    """
+    if _local(node.tag) != "div" or not "".join(node.itertext()).strip():
+        return False
+    for child in node.iter():
+        if child is node:
+            continue
+        if _local(child.tag) not in {"span", "em", "i"} or child.attrib:
+            return False
+    return True
+
+
 def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
     bodies = [node for node in root.iter() if _local(node.tag) == "body"]
     if len(bodies) != 1:
@@ -128,7 +145,7 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             raise PreservedEpubError("Unsupported cross-document hyperlink in prose")
     output = []
     for node in body.iter():
-        if _local(node.tag) in _PROSE:
+        if _local(node.tag) in _PROSE or _leaf_div_text(node):
             if any(_local(child.tag) in {"img", "image", "svg"} for child in node.iter() if child is not node):
                 raise PreservedEpubError("Inline artwork inside a prose block needs explicit mapping")
             if any(_local(child.tag) in _PROSE for child in node.iter() if child is not node):
