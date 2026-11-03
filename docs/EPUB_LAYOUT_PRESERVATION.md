@@ -50,6 +50,12 @@ fails closed. The output OPF and translated XHTML declare the target language.
   independently validated navigation-localization workflow. Unmapped text,
   malformed links, executable elements, hidden markup and non-TOC navigation
   fail closed instead of being silently discarded.
+- Standalone prose-only `<div>` elements are translated as their own
+  source-bound text blocks while preserving the original `div` tag, class and
+  ID. Only plain text and unstyled inline `<span>`, `<em>` or `<i>` markup are
+  admitted. A `div` containing child block elements, images, hard line breaks,
+  interactive links or styled/identified inline elements is not flattened or
+  presumed safe; its unmapped prose remains blocking.
 - Standard XHTML `<section>` wrappers are preserved at their original
   nesting level, with `id`, `class`, and namespace-qualified attributes intact.
   Only their supported child paragraph/heading blocks are translated. Text
