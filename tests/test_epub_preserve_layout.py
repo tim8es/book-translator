@@ -259,6 +259,52 @@ class PreserveTests(unittest.TestCase):
                 with self.assertRaisesRegex(ep.PreservedEpubError, message):
                     ep.analyze(self.source)
 
+    def test_leaf_div_prose_is_independently_translated_without_rewriting_wrapper(self):
+        self.replace_xhtml(
+            'OPS/chapter.xhtml', b'</body>',
+            b'<div id="dedication" class="epigraph">Remember the sea.</div>'
+            b'<div id="poetry">Quiet <em>stars</em>.</div></body>')
+        chapters = self.extracted()
+        text = chapters[1].content
+        self.assertEqual(text.count('<!-- bt-block:'), 4)
+        self.assertIn('Remember the sea.', text)
+        self.assertIn('Quiet *stars*.', text)
+        report = ep.audit(self.source, chapters)
+        self.assertEqual(report['documents'][3]['text_blocks'], 4)
+        translated = text.replace('Remember the sea.', 'Помни море.')
+        translated = translated.replace('Quiet *stars*.', 'Тихие *звёзды*.')
+        output = ep.build(
+            self.source,
+            [{'markdown': chapters[0].content}, {'markdown': translated}],
+            expected_source_sha256=report['source_sha256'], language='ru')
+        with zipfile.ZipFile(io.BytesIO(output)) as result:
+            chapter = ET.fromstring(result.read('OPS/chapter.xhtml'))
+            dedication = next(x for x in chapter.iter() if x.get('id') == 'dedication')
+            poetry = next(x for x in chapter.iter() if x.get('id') == 'poetry')
+            self.assertEqual(dedication.tag.rsplit('}', 1)[-1], 'div')
+            self.assertEqual(dedication.get('class'), 'epigraph')
+            self.assertEqual(dedication.text, 'Помни море.')
+            self.assertEqual(poetry.text, 'Тихие ')
+            self.assertEqual(poetry.find('{*}em').text, 'звёзды')
+            self.assertIsNotNone(chapter.find('.//{*}img'))
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+
+    def test_mixed_div_with_nested_blocks_art_or_unmapped_inline_is_blocked(self):
+        unsafe = [
+            '<div>Unmapped text<p>Mapped paragraph.</p></div>',
+            '<div>Unmapped text<img src="flower.jpg" alt=""/></div>',
+            '<div>Unmapped <span id="anchor">fragment</span></div>',
+            '<div>Unmapped first<br/>second line.</div>',
+        ]
+        for sample in unsafe:
+            with self.subTest(sample=sample):
+                fixture(self.source)
+                self.replace_xhtml(
+                    'OPS/chapter.xhtml', b'</body>',
+                    sample.encode('utf-8') + b'</body>')
+                with self.assertRaisesRegex(ep.PreservedEpubError, 'Unmapped'):
+                    ep.analyze(self.source)
+
     def test_description_list_survives_layout_preserving_roundtrip(self):
         with zipfile.ZipFile(self.source) as archive:
             assets = {name: archive.read(name) for name in archive.namelist()}
