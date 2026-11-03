@@ -174,6 +174,81 @@ def _legacy_toc(root: ET.Element, path: str, spine_paths: set[str]) -> bool:
     return True
 
 
+def _epub3_toc(root: ET.Element, path: str, archive: zipfile.ZipFile,
+               spine_paths: set[str]) -> bool:
+    """Recognize ONLY an exclusive, structurally verified EPUB 3 toc nav.
+
+    Navigation is preserved byte-for-byte as package content, never sent as a
+    literary prose unit. Unlike a generic nav allowlist, this does not swallow
+    ordinary chapter prose or arbitrary links. Metadata property "nav" alone
+    never exempts a document from validation.
+    """
+    navs = [node for node in root.iter() if _local(node.tag) == "nav"]
+    if not navs:
+        return False
+    if len(navs) != 1:
+        raise PreservedEpubError(f"{path}: multiple EPUB navigation regions need manual mapping")
+    nav = navs[0]
+    if nav.get("{http://www.idpf.org/2007/ops}type") != "toc":
+        raise PreservedEpubError(f"{path}: only explicit EPUB 3 epub:type=toc navigation is supported")
+    bodies = [node for node in root.iter() if _local(node.tag) == "body"]
+    if len(bodies) != 1:
+        raise PreservedEpubError(f"{path}: navigation XHTML must have exactly one body")
+    body = bodies[0]
+    if ((body.text or "").strip() or len(body) != 1 or body[0] is not nav or
+            (nav.tail or "").strip()):
+        raise PreservedEpubError(f"{path}: navigation includes text or structures outside the TOC")
+    labels = {"a", "h1", "h2", "h3", "h4", "h5", "h6"}
+    permitted = {"nav", "ol", "ul", "li", "a", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "span", "em", "i", "strong", "b"}
+    links = []
+    def walk(node: ET.Element, within_label: bool = False) -> None:
+        tag = _local(node.tag)
+        if tag not in permitted:
+            raise PreservedEpubError(f"{path}: unsupported TOC element <{tag}>")
+        for key, value in node.attrib.items():
+            attr = _local(key)
+            if attr.startswith("on") or attr in {"hidden", "srcset"}:
+                raise PreservedEpubError(f"{path}: executable/hidden TOC attribute {attr}")
+            if attr == "style" and re.search(
+                    r"display\s*:\s*none|visibility\s*:\s*hidden", value, re.I):
+                raise PreservedEpubError(f"{path}: hidden TOC text is unsupported")
+        if tag == "a":
+            links.append(node)
+        label = within_label or tag in labels
+        if (node.text or "").strip() and not label:
+            raise PreservedEpubError(f"{path}: unmapped prose inside TOC <{tag}>")
+        for child in node:
+            walk(child, label)
+            if (child.tail or "").strip() and not label:
+                raise PreservedEpubError(f"{path}: unmapped TOC tail text in <{tag}>")
+    walk(nav)
+    entries = [n for n in nav.iter() if _local(n.tag) == "li"]
+    if not entries or not links or len(entries) != len(links):
+        raise PreservedEpubError(f"{path}: malformed or ambiguous TOC list")
+    for entry in entries:
+        if len([n for n in entry if _local(n.tag) == "a"]) != 1:
+            raise PreservedEpubError(f"{path}: each TOC entry must have one direct link")
+    for link in links:
+        href = link.get("href", "")
+        if not href or href.startswith("#") or "?" in href or not "".join(link.itertext()).strip():
+            raise PreservedEpubError(f"{path}: TOC link must contain a label and safe document target")
+        target = _path(path, href)
+        if target not in spine_paths:
+            raise PreservedEpubError(f"{path}: TOC reference outside EPUB spine")
+        if "#" in href:
+            fragment = unquote(href.split("#", 1)[1])
+            if not fragment:
+                raise PreservedEpubError(f"{path}: empty TOC fragment")
+            try:
+                target_xml = ET.fromstring(archive.read(target))
+            except (KeyError, ET.ParseError) as exc:
+                raise PreservedEpubError(f"{path}: invalid TOC target") from exc
+            if not any(node.get("id") == fragment for node in target_xml.iter()):
+                raise PreservedEpubError(f"{path}: broken TOC fragment")
+    return True
+
+
 def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
     """Inventory source independently of Markdown or translation renderers."""
     zf, opf, package, manifest, spine = _open(source)
@@ -190,7 +265,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             if media != "application/xhtml+xml":
                 continue
             root = ET.fromstring(zf.read(path))
-            if _legacy_toc(root, path, spine_paths):
+            if _epub3_toc(root, path, zf, spine_paths) or _legacy_toc(root, path, spine_paths):
                 for node in root.iter():
                     if _local(node.tag) == "a" and node.get("href"):
                         title = "".join(node.itertext()).strip()
@@ -205,9 +280,10 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             body = next((node for node in root.iter() if _local(node.tag) == "body"), None)
             if body is None:
                 raise PreservedEpubError(f"{path}: no body")
-            if "nav" in props.split() and not _legacy_toc(root, path, spine_paths):
-                raise PreservedEpubError(f"{path}: navigation with substantive or complex content requires mapping")
-            if _legacy_toc(root, path, spine_paths):
+            epub3_toc = _epub3_toc(root, path, zf, spine_paths)
+            if "nav" in props.split() and not epub3_toc:
+                raise PreservedEpubError(f"{path}: navigation requires verified epub:type=toc")
+            if epub3_toc or _legacy_toc(root, path, spine_paths):
                 documents.append(Document(path, "toc", [], [], _hash(raw), "Contents"))
                 continue
             imgs = []
@@ -236,7 +312,15 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             if media != "application/xhtml+xml" or path in spine_paths:
                 continue
             root = ET.fromstring(zf.read(path))
-            if "".join(root.find(".//{*}body").itertext()).strip():
+            verified_toc = _epub3_toc(root, path, zf, spine_paths)
+            if "nav" in props.split() and not verified_toc:
+                raise PreservedEpubError(f"{path}: off-spine nav requires verified epub:type=toc")
+            if verified_toc:
+                continue  # Keep original EPUB 3 nav resource byte-for-byte.
+            body = root.find(".//{*}body")
+            if body is None:
+                raise PreservedEpubError(f"{path}: off-spine XHTML has no body")
+            if "".join(body.itertext()).strip():
                 raise PreservedEpubError(f"Uncovered off-spine XHTML text: {path}")
         if any(name.lower().endswith((".xhtml", ".html")) and name not in media_by_path for name in zf.namelist()):
             raise PreservedEpubError("Undeclared XHTML outside EPUB manifest")
