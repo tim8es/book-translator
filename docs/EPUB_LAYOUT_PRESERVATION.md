@@ -40,6 +40,16 @@ fails closed. The output OPF and translated XHTML declare the target language.
 
 ## Bounds and limitations
 
+- EPUB 3 navigation (`<nav epub:type="toc">`) is supported only when the
+  entire document body consists of one verified TOC containing labelled,
+  relative links to existing EPUB spine resources (including valid fragments).
+  The TOC may be in the reading-order spine even without an OPF `nav` property,
+  or an off-spine manifest item with the `nav` property. Both are retained
+  byte-for-byte, not treated as literary chapters. Navigation labels remain
+  original-language; translating/regenerating them requires a separate,
+  independently validated navigation-localization workflow. Unmapped text,
+  malformed links, executable elements, hidden markup and non-TOC navigation
+  fail closed instead of being silently discarded.
 - Standard XHTML `<section>` wrappers are preserved at their original
   nesting level, with `id`, `class`, and namespace-qualified attributes intact.
   Only their supported child paragraph/heading blocks are translated. Text
