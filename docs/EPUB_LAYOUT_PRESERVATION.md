@@ -73,6 +73,7 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   wrapper, and a simple legacy hyperlink TOC. Complex EPUB 3 navigation,
   footnotes, tables, scripting, hidden prose, relative links in body prose,
   and artwork nested inside prose elements remain blocked.
+- Publisher-credit and social-profile paragraphs containing exactly one external linked icon and its label are treated as protected non-literary XHTML. The original link, icon, and label are retained untranslated; EPUB validation compares the entire source and output subtrees. Independent prose outside the linked icon is not exempt and still blocks extraction if mixed with artwork.
 - Artwork can contain **English text baked into pixels** (e.g., a chapter-name
   illustration). The pixels are not translated by this mode, and titles in
   image-only source documents remain original-language. A separate image/text

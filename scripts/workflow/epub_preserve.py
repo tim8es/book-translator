@@ -174,12 +174,30 @@ def _leaf_div_text(node: ET.Element) -> bool:
     return True
 
 
+def _preserved_linked_icon(node: ET.Element) -> bool:
+    """Leave an image-and-brand-label credit/link unchanged, never silently drop it."""
+    if (_local(node.tag) != "p" or len(node) != 1
+            or _local(node[0].tag) != "a"
+            or (node.text or "").strip() or (node[0].tail or "").strip()):
+        return False
+    anchor = node[0]
+    if not anchor.get("href", "").startswith(("https://", "http://")):
+        return False
+    if len([child for child in anchor.iter() if _local(child.tag) == "img"]) != 1:
+        return False
+    if any(_local(child.tag) not in {"a", "span", "img", "em", "i", "b", "strong"}
+           for child in anchor.iter()):
+        return False
+    return bool("".join(anchor.itertext()).strip())
+
+
 def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
     bodies = [node for node in root.iter() if _local(node.tag) == "body"]
     if len(bodies) != 1:
         raise PreservedEpubError("XHTML must have exactly one body")
     body = bodies[0]
     parents = {child: parent for parent in body.iter() for child in parent}
+    preserved = {id(node) for node in body.iter() if _preserved_linked_icon(node)}
     for node in body.iter():
         name = _local(node.tag)
         if name not in _ALLOWED:
@@ -201,6 +219,8 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             raise PreservedEpubError("Unsupported cross-document hyperlink in prose")
     output = []
     for node in body.iter():
+        if id(node) in preserved:
+            continue
         if _local(node.tag) in _PROSE or _leaf_div_text(node):
             if any(_local(child.tag) in {"img", "image", "svg"} for child in node.iter() if child is not node):
                 raise PreservedEpubError("Inline artwork inside a prose block needs explicit mapping")
@@ -212,7 +232,7 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
     # No text outside a mapped block may silently disappear; e.g. standalone div prose.
     mapped = {id(node) for node, _ in output}
     def walk(node, inside=False):
-        if id(node) in mapped:
+        if id(node) in mapped or id(node) in preserved:
             return
         if (node.text or "").strip() and _local(node.tag) not in {"style", "script"}:
             raise PreservedEpubError(f"Unmapped prose in <{_local(node.tag)}>")
@@ -645,4 +665,14 @@ def validate(content: bytes, *, source: Path, expected_docs: int) -> dict[str, A
         for d in docs:
             if d.kind != "text" and new.read(d.path) != old.read(d.path):
                 raise PreservedEpubError(f"Artwork/TOC XHTML changed: {d.path}")
+            if d.kind == "text":
+                # Decorative linked-icon credits were excluded from translation;
+                # verify their entire XHTML subtree survived, not just its text.
+                def protected_labels(archive):
+                    root = ET.fromstring(archive.read(d.path))
+                    return [(index, ET.tostring(node, encoding="utf-8"))
+                            for index, node in enumerate(root.iter())
+                            if _preserved_linked_icon(node)]
+                if protected_labels(old) != protected_labels(new):
+                    raise PreservedEpubError(f"Protected linked-icon label changed: {d.path}")
     return {"unit_count": sum(d.kind == "text" for d in docs), "source_documents": len(docs), "preserved_assets": True}
