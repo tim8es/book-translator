@@ -24,7 +24,7 @@ SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
 SESSION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 OPERATIONS = {"claim", "renew-claim", "release", "accept-translation",
               "review-record", "accept-review", "cleanup-claims"}
-# shortcut: covers the two automated writers; move to CLI if direct calls become automated.
+# shortcut: guards ChatOps requests; move to CLI if direct calls become an automated writer.
 MAX_REVIEW_RECORDS_PER_UNIT = 4
 REQUESTS = Path(".chat-ops/requests")
 RESULTS = Path(".chat-ops/results")
