@@ -24,6 +24,8 @@ SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
 SESSION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 OPERATIONS = {"claim", "renew-claim", "release", "accept-translation",
               "review-record", "accept-review", "cleanup-claims"}
+# shortcut: covers the two automated writers; move to CLI if direct calls become automated.
+MAX_REVIEW_RECORDS_PER_UNIT = 4
 REQUESTS = Path(".chat-ops/requests")
 RESULTS = Path(".chat-ops/results")
 
@@ -214,6 +216,33 @@ def chapter_and_claim(book: Path, request: dict, *, role: str) -> dict:
     return chapter
 
 
+def review_limit_result(book: Path, chapter_number: int) -> dict | None:
+    progress = strict_json(book / "progress.json")
+    chapters = progress.get("chapters")
+    require(isinstance(chapters, list), "invalid chapter progress")
+    matches = [chapter for chapter in chapters
+               if isinstance(chapter, dict) and chapter.get("number") == chapter_number]
+    require(len(matches) == 1, "chapter does not map to one progress unit")
+    unit_id = matches[0].get("unit_id")
+    require(isinstance(unit_id, str) and unit_id, "chapter unit id is invalid")
+    ledger_path = book / "review-ledger.json"
+    if not ledger_path.is_file():
+        return None
+    records = strict_json(ledger_path).get("records")
+    require(isinstance(records, list) and all(isinstance(r, dict) for r in records),
+            "invalid review ledger records")
+    count = sum(record.get("unit_id") == unit_id for record in records)
+    if count < MAX_REVIEW_RECORDS_PER_UNIT:
+        return None
+    return {
+        "action": "deferred",
+        "unit_id": unit_id,
+        "accepted_reviews": count,
+        "review_limit": MAX_REVIEW_RECORDS_PER_UNIT,
+        "next_step": "do not claim this unit again; accept its current PASS if present, otherwise continue with the next chapter",
+    }
+
+
 def execute(root: Path, engine: Path, request: dict) -> dict:
     book, _ = expected_book(root, request)
     pinned_engine(root, engine, request["workflow_revision"])
@@ -225,6 +254,9 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
     cli(root, "book.py", "validate", slug)
     cli(root, "corpus.py", "verify", slug)
     if op == "claim":
+        deferred = review_limit_result(book, request["chapter"])
+        if deferred:
+            return deferred
         args = [slug, chapter, "--role", request["role"], "--session-id",
                 session, "--json"]
         if "base_commit" in request:
@@ -255,6 +287,11 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
                    "--session-id", session, "--json")
     if op == "review-record":
         unit = chapter_and_claim(book, request, role="reviewer")
+        deferred = review_limit_result(book, request["chapter"])
+        if deferred:
+            cli(root, "book.py", "release", slug, chapter,
+                "--session-id", session, "--json")
+            return {**deferred, "claim_released": True}
         translation = book / unit["translation_path"]
         require(translation.is_file() and sha256(translation.read_bytes()) ==
                 request["translation_sha256"], "translation artifact changed")
