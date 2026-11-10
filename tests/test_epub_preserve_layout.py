@@ -617,6 +617,38 @@ class PreserveTests(unittest.TestCase):
         self.assertEqual([d.title for d in docs if d.kind=='text'], ['Intro','Chapter 1'])
         self.assertEqual(len([img for d in docs for img in d.images]), 3)
 
+    def test_inline_emphasis_whitespace_keeps_exact_source_word_boundaries(self):
+        # Covers XHTML like <i>felt </i>different; old recursive strip()
+        # silently merged the adjacent words and failed independent coverage.
+        self.replace_xhtml(
+            'OPS/chapter.xhtml',
+            b'<p class="next">Next paragraph.</p>',
+            b'<p class="next">It <i>felt </i>different and stayed'
+            b'<i> quite</i> clear with <span class="italic">warm </span>light'
+            b' near <span>the </span>shore.</p>')
+        chapters = self.extracted()
+        text = chapters[1].content
+        self.assertIn('It *felt* different', text)
+        self.assertIn('stayed *quite* clear', text)
+        self.assertIn('with *warm* light', text)
+        self.assertIn('near the shore.', text)
+        coverage = ep.audit(self.source, chapters)
+        self.assertEqual(coverage['documents'][3]['text_blocks'], 2)
+        translated = text.replace('It *felt* different', 'Это *казалось* другим')
+        translated = translated.replace('near the shore.', 'возле берега.')
+        output = ep.build(
+            self.source,
+            [{'markdown': chapters[0].content}, {'markdown': translated}],
+            expected_source_sha256=coverage['source_sha256'], language='ru')
+        self.assertEqual(
+            ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(io.BytesIO(output)) as result:
+            chapter = ET.fromstring(result.read('OPS/chapter.xhtml'))
+            paragraph = chapter.find('.//{*}p[@class="next"]')
+            self.assertIn('Это', ''.join(paragraph.itertext()))
+            self.assertIn('казалось', ''.join(paragraph.itertext()))
+            self.assertIsNotNone(paragraph.find('.//{*}em'))
+
     def test_italics_and_drop_cap_extract(self):
         chapters=self.extracted()
         self.assertEqual(chapters[0].content,'<!-- bt-block:000001 -->\n*Hello* world.\n')

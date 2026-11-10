@@ -485,7 +485,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             img_titles = [n.get("alt", "").strip() for n in body.iter() if _local(n.tag) == "img" and n.get("alt", "").strip()]
             doc_title = img_titles[0] if img_titles else titles.get(path, Path(path).stem)
             documents.append(Document(path, "text" if blocks else "artwork", [text for _, text in blocks], imgs, _hash(raw), doc_title,
-                                      [_inline_source(node, italic_classes, drop_classes) for node, _ in blocks]))
+                                      [_inline_source(node, italic_classes, drop_classes).strip() for node, _ in blocks]))
         # Check all XHTML in manifest including off-spine, fail closed on substantive text.
         for path, media, props in manifest.values():
             if media != "application/xhtml+xml" or path in spine_paths:
@@ -538,9 +538,13 @@ def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set
                              or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha()))
         italic = not drop_initial and (name in {"em", "i"} or bool(set(child.get("class", "").split()) & italic_classes))
         if italic and content.strip():
-            content = "*" + content + "*"
+            # Keep boundary whitespace outside Markdown emphasis: an inline
+            # <i>word </i>next must not become *word*next during extraction.
+            leading = content[:len(content) - len(content.lstrip())]
+            trailing = content[len(content.rstrip()):]
+            content = leading + "*" + content.strip() + "*" + trailing
         out += content + _escaped_source(child.tail or "")
-    return out.strip()
+    return out
 
 
 def _plain_markdown(text: str) -> str:

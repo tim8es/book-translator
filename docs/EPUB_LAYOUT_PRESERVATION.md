@@ -38,7 +38,9 @@ The replacement engine copies the original archive members in order, preserving
 original artwork, raster assets, stylesheets, source page structure, image
 positions, paragraph classes and first-letter drop-cap classes. Existing simple
 italic spans become explicit Markdown `*emphasis*` for the translator, and are
-reconstructed as XHTML `<em>` after translation. Link targets are preserved
+reconstructed as XHTML `<em>` after translation. Inline whitespace at emphasis
+and span boundaries stays outside Markdown markers to avoid joining source
+words. Independent source coverage verifies those word boundaries. Link targets are preserved
 only if each original inline link label survives verbatim in its original order;
 otherwise assembly fails closed. Safe `<wbr>` word-break hints inside linked
 labels are preserved with the original link subtree, including when a prose
