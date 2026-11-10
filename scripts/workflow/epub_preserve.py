@@ -342,6 +342,84 @@ def _epub3_toc(root: ET.Element, path: str, archive: zipfile.ZipFile,
     return True
 
 
+def _vellum_toc(root: ET.Element, path: str, archive: zipfile.ZipFile,
+                spine_paths: set[str]) -> bool:
+    """Certify linked TOC groups and a sole external-attribution footer."""
+    body = next((n for n in root.iter() if _local(n.tag) == "body"), None)
+    if body is None:
+        raise PreservedEpubError(f"{path}: missing body")
+    epub_type = "{http://www.idpf.org/2007/ops}type"
+    regions = [n for n in body.iter()
+               if n.get("role") == "doc-toc" or n.get(epub_type) == "toc"]
+    if not regions:
+        return False
+    if len(regions) != 1:
+        raise PreservedEpubError(f"{path}: ambiguous TOC")
+    toc = regions[0]
+    if (_local(toc.tag) != "div" or toc.get("role") != "doc-toc"
+            or toc.get(epub_type) != "toc" or not list(body)
+            or body[0] is not toc or len(body) > 2
+            or (body.text or "").strip() or (toc.tail or "").strip()):
+        raise PreservedEpubError(f"{path}: invalid Vellum TOC wrapper")
+    allowed = {"div", "p", "a", "span", "em", "i", "b", "strong",
+               "h1", "h2", "h3", "h4", "h5", "h6"}
+    targets: set[str] = set()
+    def safe(node):
+        for attr, value in node.attrib.items():
+            key = _local(attr)
+            if (key.lower().startswith("on") or key in {"hidden", "srcset"}
+                    or (key == "style" and re.search(
+                        r"display\s*:\s*none|visibility\s*:\s*hidden", value, re.I))):
+                raise PreservedEpubError(f"{path}: unsafe TOC attribute")
+    def visit(node, labeled=False):
+        tag = _local(node.tag)
+        if tag not in allowed:
+            raise PreservedEpubError(f"{path}: unsupported TOC element <{tag}>")
+        safe(node)
+        labeled = labeled or tag in {"a", "h1", "h2", "h3", "h4", "h5", "h6"}
+        if (node.text or "").strip() and not labeled:
+            raise PreservedEpubError(f"{path}: uncovered TOC prose")
+        if tag == "a":
+            href = node.get("href", "")
+            if (not href or href.startswith(("#", "http://", "https://", "mailto:"))
+                    or "?" in href or not "".join(node.itertext()).strip()):
+                raise PreservedEpubError(f"{path}: invalid TOC link")
+            target = _path(path, href)
+            if target not in spine_paths or href in targets:
+                raise PreservedEpubError(f"{path}: invalid or duplicate TOC target")
+            if "#" in href:
+                frag = unquote(href.split("#", 1)[1])
+                if not frag or sum(n.get("id") == frag
+                                   for n in ET.fromstring(archive.read(target)).iter()) != 1:
+                    raise PreservedEpubError(f"{path}: invalid TOC fragment")
+            targets.add(href)
+        for child in node:
+            visit(child, labeled)
+            if (child.tail or "").strip() and not labeled:
+                raise PreservedEpubError(f"{path}: uncovered TOC tail")
+    visit(toc)
+    if len(targets) < 2:
+        raise PreservedEpubError(f"{path}: too few TOC entries")
+    if len(body) == 2:
+        footer = body[1]
+        if (_local(footer.tag) != "div" or len(footer) != 1
+                or (footer.text or "").strip() or (footer.tail or "").strip()):
+            raise PreservedEpubError(f"{path}: unsupported TOC footer")
+        p = footer[0]
+        if (_local(p.tag) != "p" or len(p) != 1 or (p.text or "").strip()
+                or (p.tail or "").strip()):
+            raise PreservedEpubError(f"{path}: unexpected TOC footer prose")
+        link = p[0]
+        if (_local(link.tag) != "a" or not link.get("href", "").startswith(("http://", "https://"))
+                or not "".join(link.itertext()).strip() or (link.tail or "").strip()
+                or any(_local(n.tag) not in {"a", "span", "em", "i", "b", "strong"}
+                       for n in link.iter())):
+            raise PreservedEpubError(f"{path}: unverified TOC footer")
+        for n in footer.iter():
+            safe(n)
+    return True
+
+
 def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
     """Inventory source independently of Markdown or translation renderers."""
     zf, opf, package, manifest, spine = _open(source)
