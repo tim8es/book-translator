@@ -353,7 +353,7 @@ def has_raster_xhtml(source: Path) -> bool:
     with zipfile.ZipFile(source) as zf:
         return any(
             name.lower().endswith((".xhtml", ".html"))
-            and re.search(rb"<img(?:\\s|/?>)", zf.read(name), re.I)
+            and re.search(rb"<img(?:\s|/?>)", zf.read(name), re.I)
             for name in zf.namelist()
         )
 
