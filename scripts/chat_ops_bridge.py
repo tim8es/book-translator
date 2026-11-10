@@ -306,10 +306,12 @@ def process(root: Path, engine: Path, request_id: str) -> str:
             request = validate(strict_json(request_path), request_id)
             book_slug = request["book_slug"]
             outcome = execute(root, engine, request)
-            # Admission and acceptance may have written several files; verify
-            # the resulting complete book before staging a single commit.
-            cli(root, "book.py", "validate", book_slug)
-            cli(root, "corpus.py", "verify", book_slug)
+            # Literary mutations must pass canonical corpus preflight. An
+            # operator's book-scoped Auto control changes no literary state
+            # and must not depend on a temporary (un-pinned) engine checkout.
+            if request["operation"] not in {"pause-auto", "resume-auto"}:
+                cli(root, "book.py", "validate", book_slug)
+                cli(root, "corpus.py", "verify", book_slug)
             status = "ok"
             error = None
         except (RequestError, OSError, subprocess.CalledProcessError, KeyError,
