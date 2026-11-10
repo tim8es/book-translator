@@ -291,6 +291,62 @@ class PreserveTests(unittest.TestCase):
         with self.assertRaisesRegex(ep.PreservedEpubError, 'Inline artwork inside a prose block'):
             ep.analyze(self.source)
 
+    def install_vellum_toc(self):
+        original = ('<h1>Contents</h1><p><a href="intro.xhtml">Intro</a></p>'
+                    '<p><a href="chapter.xhtml">Chapter 1</a></p>')
+        markup = ('<div role="doc-toc" xmlns:epub="http://www.idpf.org/2007/ops" '
+                  'epub:type="toc"><div><h1>Contents</h1></div>'
+                  '<div><p><a href="intro.xhtml#intro-start"><span>Intro</span></a></p>'
+                  '<p><a href="chapter.xhtml">Chapter 1</a></p></div></div>'
+                  '<div style="text-align:center"><p>'
+                  '<a href="https://example.org/credit"><i>Publisher credit</i></a>'
+                  '</p></div>')
+        self.replace_xhtml('OPS/toc.xhtml', original.encode(), markup.encode())
+        self.replace_xhtml('OPS/intro.xhtml', b'<p class="intro">',
+                           b'<p id="intro-start" class="intro">')
+
+    def test_vellum_toc_and_attribution_preserved_without_untranslated_literary_prose(self):
+        self.install_vellum_toc()
+        docs, identity = ep.analyze(self.source)
+        self.assertEqual([d.kind for d in docs], ['artwork', 'toc', 'text', 'text', 'artwork'])
+        chapters = self.extracted()
+        self.assertEqual(len(chapters), 2)
+        self.assertIn('Hello', chapters[0].content)
+        coverage = ep.audit(self.source, chapters)
+        self.assertEqual(coverage['documents'][1]['state'], 'preserved_toc')
+        translated = chapters[0].content.replace('*Hello* world.', '*Привет* мир.')
+        output = ep.build(self.source, [{'markdown': translated},
+                                        {'markdown': chapters[1].content}],
+                          expected_source_sha256=identity['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(self.source) as before, zipfile.ZipFile(io.BytesIO(output)) as after:
+            self.assertEqual(before.read('OPS/toc.xhtml'), after.read('OPS/toc.xhtml'))
+            self.assertIn(b'Publisher credit', after.read('OPS/toc.xhtml'))
+            self.assertIn('Привет', ''.join(ET.fromstring(after.read('OPS/intro.xhtml')).itertext()))
+
+    def test_vellum_toc_invalid_links_and_uncovered_footer_prose_fail_closed(self):
+        for old, new, failure in [
+            (b'intro.xhtml#intro-start', b'intro.xhtml#missing', 'invalid TOC fragment'),
+            (b'chapter.xhtml', b'missing.xhtml', 'invalid or duplicate TOC target'),
+            (b'chapter.xhtml', b'intro.xhtml#intro-start', 'invalid or duplicate TOC target'),
+            (b'chapter.xhtml', b'https://example.org/chapter', 'invalid TOC link'),
+            (b'<i>Publisher credit</i></a>',
+             b'<i>Publisher credit</i></a>Unexpected prose', 'unverified TOC footer'),
+        ]:
+            with self.subTest(failure=failure):
+                fixture(self.source)
+                self.install_vellum_toc()
+                self.replace_xhtml('OPS/toc.xhtml', old, new)
+                with self.assertRaisesRegex(ep.PreservedEpubError, failure):
+                    ep.analyze(self.source)
+
+    def test_vellum_toc_mixed_literary_prose_is_not_swallowed(self):
+        self.install_vellum_toc()
+        self.replace_xhtml('OPS/toc.xhtml', b'</body>',
+                           b'<p>Chapter prose outside the verified table of contents.</p></body>')
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'unsupported TOC wrapper'):
+            ep.analyze(self.source)
+
     def test_nested_section_wrappers_preserve_layout_and_all_prose(self):
         # Two semantic section containers are NOT prose blocks themselves:
         # their heading and both paragraphs must be translated independently.
