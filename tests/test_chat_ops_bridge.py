@@ -247,5 +247,62 @@ class RequestTests(unittest.TestCase):
                 "resolved_revision"], global_pin)
 
 
+class ReviewLimitTests(unittest.TestCase):
+    @staticmethod
+    def seed_book(book: Path, review_count: int) -> None:
+        book.mkdir(parents=True)
+        (book / "progress.json").write_text(json.dumps({
+            "chapters": [{"number": 4, "unit_id": "chapter-000004",
+                          "status": "translated"}]
+        }), encoding="utf-8")
+        records = [{"unit_id": "chapter-000004",
+                    "outcome": "CORRECTIONS_REQUIRED"}
+                   for _ in range(review_count)]
+        records.append({"unit_id": "chapter-000005",
+                        "outcome": "CORRECTIONS_REQUIRED"})
+        (book / "review-ledger.json").write_text(
+            json.dumps({"records": records}), encoding="utf-8")
+
+    def test_claim_after_four_reviews_is_deferred_for_both_roles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            book = Path(temp) / "book"
+            self.seed_book(book, 4)
+            for role in ("translator", "reviewer"):
+                request = sample("claim")
+                request["role"] = role
+                with self.subTest(role=role):
+                    with patch.object(bridge, "expected_book", return_value=(book, {})), \
+                            patch.object(bridge, "pinned_engine"), \
+                            patch.object(bridge, "cli") as canonical:
+                        result = bridge.execute(Path(temp), Path(temp) / "engine", request)
+                    self.assertEqual(result["action"], "deferred")
+                    self.assertEqual(result["accepted_reviews"], 4)
+                    self.assertIn("next chapter", result["next_step"])
+                    self.assertFalse(any(call.args[1:3] == ("book.py", "claim")
+                                         for call in canonical.call_args_list))
+
+    def test_fifth_review_releases_current_claim_and_defers_unit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            book = Path(temp) / "book"
+            self.seed_book(book, 4)
+            request = sample("review-record")
+            request["outcome"] = "CORRECTIONS_REQUIRED"
+            with patch.object(bridge, "expected_book", return_value=(book, {})), \
+                    patch.object(bridge, "pinned_engine"), \
+                    patch.object(bridge, "chapter_and_claim",
+                                 return_value={"unit_id": "chapter-000004"}), \
+                    patch.object(bridge, "cli") as canonical:
+                result = bridge.execute(Path(temp), Path(temp) / "engine", request)
+            self.assertEqual(result["action"], "deferred")
+            self.assertTrue(result["claim_released"])
+            self.assertTrue(any(call.args[1:3] == ("book.py", "release")
+                                for call in canonical.call_args_list))
+
+    def test_review_below_limit_can_continue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            book = Path(temp) / "book"
+            self.seed_book(book, 3)
+            self.assertIsNone(bridge.review_limit_result(book, 4))
+
 if __name__ == "__main__":
     unittest.main()
