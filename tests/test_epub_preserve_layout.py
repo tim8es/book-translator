@@ -617,6 +617,40 @@ class PreserveTests(unittest.TestCase):
         self.assertEqual([d.title for d in docs if d.kind=='text'], ['Intro','Chapter 1'])
         self.assertEqual(len([img for d in docs for img in d.images]), 3)
 
+    def test_literal_asterisks_inside_italic_are_not_confused_with_emphasis_markers(self):
+        # Literal *grins* inside XHTML italics must survive escaping, source
+        # coverage, and translation projection without extra Markdown stars.
+        self.replace_xhtml(
+            'OPS/chapter.xhtml',
+            b'<p class="next">Next paragraph.</p>',
+            b'<p class="next"><i>Maybe later. *grins*</i> '
+            b'and literal *smiles* outside italics.</p>')
+        chapters = self.extracted()
+        markdown = chapters[1].content
+        self.assertIn(r'*Maybe later. \*grins\**', markdown)
+        self.assertIn(r'literal \*smiles\* outside', markdown)
+        report = ep.audit(self.source, chapters)
+        self.assertEqual(report['documents'][3]['text_blocks'], 2)
+        output = ep.build(
+            self.source, [{'markdown': x.content} for x in chapters],
+            expected_source_sha256=report['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            chapter = ET.fromstring(archive.read('OPS/chapter.xhtml'))
+            paragraph = chapter.find('.//{*}p[@class="next"]')
+            self.assertEqual(''.join(paragraph.itertext()),
+                             'Maybe later. *grins* and literal *smiles* outside italics.')
+            self.assertEqual(paragraph.find('{*}em').text, 'Maybe later. *grins*')
+
+    def test_escaped_literals_and_bold_delimiters_roundtrip(self):
+        from workflow.epub_preserve import _plain_markdown
+        self.assertEqual(_plain_markdown(r'*aside \*literal\**'),
+                         'aside *literal*')
+        self.assertEqual(_plain_markdown(r'**bold \*literal\***'),
+                         'bold *literal*')
+        self.assertEqual(_plain_markdown(r'plain \*literal\*'),
+                         'plain *literal*')
+
     def test_inline_emphasis_whitespace_keeps_exact_source_word_boundaries(self):
         # Covers XHTML like <i>felt </i>different; old recursive strip()
         # silently merged the adjacent words and failed independent coverage.
