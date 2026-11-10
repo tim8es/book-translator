@@ -369,7 +369,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
                 asset = _path(path, href)
                 media_type = media_by_path.get(asset)
                 if media_type not in {"image/jpeg", "image/png", "image/gif", "image/svg+xml"}:
-                    raise PreservedEpubError(f"Undeclared or unsupported image asset: {asset}")
+                    raise PreservedEpubError(f"Undeclared or unsupported raster asset: {asset}")
                 data = zf.read(asset)
                 if not data:
                     raise PreservedEpubError(f"Empty image: {asset}")
