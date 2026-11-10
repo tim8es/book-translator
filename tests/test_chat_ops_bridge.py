@@ -46,6 +46,38 @@ class RequestTests(unittest.TestCase):
             with self.subTest(op=op):
                 self.assertEqual(bridge.validate(sample(op), RID)["operation"], op)
 
+    def test_scoped_pending_isolated_by_book_and_invalid_envelopes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / bridge.REQUESTS
+            directory.mkdir(parents=True)
+            for i, slug in enumerate(("book-one", "book-two", "../bad"), start=1):
+                payload = sample()
+                payload["book_slug"] = slug
+                (directory / f"{i:032x}.json").write_text(
+                    json.dumps(payload), encoding="utf-8")
+            self.assertEqual(bridge.pending(root, "book-one"), [f"{1:032x}"])
+            self.assertEqual(bridge.pending(root, "book-two"), [f"{2:032x}"])
+            self.assertEqual(bridge.pending(root, "__invalid__"), [f"{3:032x}"])
+            (root / bridge.RESULTS).mkdir()
+            (root / bridge.RESULTS / f"{1:032x}.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(bridge.pending(root, "book-one"), [])
+
+    def test_auto_mode_switch_does_not_edit_chapter_or_claims(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            book = root / "books" / "test-book"
+            book.mkdir(parents=True)
+            (book / "metadata.json").write_text(
+                json.dumps({"workflow": {"resolved_revision": REV}}), encoding="utf-8")
+            for operation, mode in (("pause-auto", "chatops"), ("resume-auto", "auto")):
+                result = bridge.execute(root, root, sample(operation))
+                self.assertEqual(result, {"auto_mode": mode})
+                control = json.loads((book / ".workflow/auto-control.json").read_text())
+                self.assertEqual(control["mode"], mode)
+            self.assertFalse((book / "progress.json").exists())
+            self.assertFalse((book / ".workflow" / "claims").exists())
+
     def test_unknown_operation_fails(self):
         obj = sample()
         obj["operation"] = "shell"
