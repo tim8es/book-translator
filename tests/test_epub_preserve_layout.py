@@ -74,6 +74,59 @@ class PreserveTests(unittest.TestCase):
                     data = data.replace(old, new)
                 z.writestr(info, data)
 
+
+    def rename_chapter_to_html(self) -> None:
+        """Keep the EPUB manifest and TOC consistent with an .html spine member."""
+        with zipfile.ZipFile(self.source) as original:
+            members = [(info, original.read(info.filename)) for info in original.infolist()]
+        with zipfile.ZipFile(self.source, 'w') as rewritten:
+            for info, data in members:
+                if info.filename == 'OPS/chapter.xhtml':
+                    info.filename = 'OPS/chapter.html'
+                elif info.filename in {'OPS/package.opf', 'OPS/toc.xhtml'}:
+                    self.assertIn(b'chapter.xhtml', data)
+                    data = data.replace(b'chapter.xhtml', b'chapter.html')
+                rewritten.writestr(info, data)
+
+    def test_html_spine_image_selects_preserved_layout_and_keeps_artwork(self):
+        # The .html resource is declared as XHTML in OPF, as in real EPUBs.
+        # Before the fix, read_epub used the lossy fallback and rejected <img>.
+        from book import read_epub
+        self.rename_chapter_to_html()
+        self.assertTrue(ep.has_raster_xhtml(self.source))
+        chapters, identity = read_epub(self.source)
+        self.assertEqual(len(chapters), 2)
+        self.assertEqual(identity['title'], 'Example')
+        self.assertIn('<!-- bt-block:000001 -->', chapters[1].content)
+        self.assertIn('Once upon a time.', chapters[1].content)
+        coverage = ep.audit(self.source, chapters)
+        self.assertEqual(coverage['chapter_count'], 2)
+        self.assertEqual(coverage['documents'][3]['path'], 'OPS/chapter.html')
+        translated = chapters[1].content.replace('Once upon a time.', 'Однажды.')
+        translated = translated.replace('Next paragraph.', 'Следующий абзац.')
+        output = ep.build(
+            self.source,
+            [{'markdown': chapters[0].content}, {'markdown': translated}],
+            expected_source_sha256=coverage['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(self.source) as source, zipfile.ZipFile(io.BytesIO(output)) as result:
+            self.assertEqual(source.namelist(), result.namelist())
+            for asset in ('OPS/front.jpg', 'OPS/flower.jpg', 'OPS/book.css', 'OPS/cover.xhtml', 'OPS/toc.xhtml'):
+                self.assertEqual(source.read(asset), result.read(asset))
+            chapter = ET.fromstring(result.read('OPS/chapter.html'))
+            self.assertIsNotNone(chapter.find('.//{*}img'))
+            self.assertIn('Однажды.', ''.join(chapter.itertext()))
+            self.assertIn('Следующий абзац.', ''.join(chapter.itertext()))
+
+    def test_html_spine_missing_image_fails_closed(self):
+        # Detection must not accidentally route a bad image into plain HTML extraction.
+        from book import read_epub, BookError
+        fixture(self.source, missing_image=True)
+        self.rename_chapter_to_html()
+        self.assertTrue(ep.has_raster_xhtml(self.source))
+        with self.assertRaisesRegex(BookError, 'Undeclared or unsupported raster'):
+            read_epub(self.source)
+
     def test_nested_section_wrappers_preserve_layout_and_all_prose(self):
         # Two semantic section containers are NOT prose blocks themselves:
         # their heading and both paragraphs must be translated independently.
