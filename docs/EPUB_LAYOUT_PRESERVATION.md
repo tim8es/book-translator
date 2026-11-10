@@ -18,6 +18,9 @@ assets are also supported when an independent XML inspection proves they consist
 only of static, text-free vector shapes and local gradient references. SVG
 scripts, embedded text, foreign content, remote resources and external references
 remain blocking. Approved SVG bytes are hash-bound and copied unchanged.
+The EPUB source-coverage preflight accepts `image/svg+xml` inventory entries only
+in this preserved-XHTML mode, with the same path and SHA-256 identity checks as
+raster assets; unsupported resource MIME types remain blocked.
 
 Each translated prose block is anchored to its original paragraph or heading:
 
