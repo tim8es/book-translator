@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 import zipfile
@@ -169,6 +170,51 @@ class PreserveTests(unittest.TestCase):
             xhtml = ET.fromstring(after.read('OPS/chapter.html'))
             self.assertEqual(xhtml.find('.//{*}img').get('src'), 'vector.svg')
             self.assertIn('Следующий абзац.', ''.join(xhtml.itertext()))
+
+    def test_source_coverage_integrity_accepts_certified_svg_and_rejects_spoofed_assets(self):
+        # The source-preserving auditor already verifies and hashes inert SVGs,
+        # so schema-level preflight must accept their certified MIME identity.
+        from workflow.source_coverage import coverage_integrity_errors
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" '
+               'width="10" height="10"><path d="M0 0h10v10H0z"/></svg>')
+        self.install_vector_fixture(svg)
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        self.assertEqual(report['documents'][3]['images'][0]['media_type'],
+                         'image/svg+xml')
+        root = Path(self.temp.name) / 'book'
+        root.mkdir()
+        progress = {'chapters': []}
+        for i, chapter in enumerate(chapters, 1):
+            rel = f'extracted/chapter-{i:06d}.md'
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(chapter.content, encoding='utf-8')
+            progress['chapters'].append({'number': i, 'source_path': rel})
+        metadata = {
+            'source_format': 'epub',
+            'layout_mode': ep.MODE,
+            'source': {'sha256': report['source_sha256'],
+                       'size_bytes': report['source_size_bytes']},
+        }
+        coverage_file = root / 'source-coverage.json'
+        coverage_file.write_text(json.dumps(report), encoding='utf-8')
+        self.assertEqual(coverage_integrity_errors(root, metadata, progress), [])
+
+        # Never broaden the whitelist to non-image/active resources or allow
+        # syntactically invalid digests in a saved image inventory.
+        vector = report['documents'][3]['images'][0]
+        original = dict(vector)
+        for patch in ({'media_type': 'application/xhtml+xml'},
+                      {'media_type': 'image/svg+xml', 'sha256': 'not-a-sha'}):
+            with self.subTest(patch=patch):
+                vector.update(patch)
+                coverage_file.write_text(json.dumps(report), encoding='utf-8')
+                self.assertIn(
+                    'Invalid preserved image identity for OPS/chapter.xhtml',
+                    coverage_integrity_errors(root, metadata, progress))
+                vector.clear()
+                vector.update(original)
 
     def test_svg_with_script_visible_text_external_reference_or_bad_gradient_is_rejected(self):
         cases = [
