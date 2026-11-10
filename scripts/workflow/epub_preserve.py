@@ -547,21 +547,30 @@ def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set
     return out
 
 
-def _plain_markdown(text: str) -> str:
-    # Decode escaped literal Markdown characters and omit generated emphasis.
-    text = re.sub(r"(?<!\\)\*\*([^*\n]+)\*\*", r"\1", text)
-    text = re.sub(r"(?<!\\)\*([^*\n]+)\*", r"\1", text)
+_INLINE_MARKUP = re.compile(
+    r"(?<!\\)(\*\*((?:\\.|[^*\\\n])+)\*\*|\*((?:\\.|[^*\\\n])+)\*)"
+)
+
+
+def _unescape_source_markdown(text: str) -> str:
     return re.sub(r"\\([\\*`\[\]])", r"\1", text)
+
+
+def _plain_markdown(text: str) -> str:
+    # Remove generated emphasis while allowing escaped literal stars *inside*
+    # an italic run: *text \*aside\** must reconstruct text *aside* exactly.
+    plain = _INLINE_MARKUP.sub(lambda match: match.group(2) or match.group(3), text)
+    return _unescape_source_markdown(plain)
 
 
 def _render_inline(node: ET.Element, content: str) -> None:
     """Render the supported inline emphasis without parsing arbitrary HTML."""
-    markup = re.compile(r"(?<!\\)(\*\*([^*\n]+)\*\*|\*([^*\n]+)\*)")
+    markup = _INLINE_MARKUP
     pos = 0
     prev = None
     def append(text: str):
         nonlocal prev
-        text = re.sub(r"\\([\\*`\[\]])", r"\1", text)
+        text = _unescape_source_markdown(text)
         if prev is None:
             node.text = (node.text or "") + text
         else:
@@ -570,7 +579,8 @@ def _render_inline(node: ET.Element, content: str) -> None:
         append(content[pos:match.start()])
         tag = "strong" if match.group(2) is not None else "em"
         child = ET.SubElement(node, "{http://www.w3.org/1999/xhtml}" + tag)
-        child.text = match.group(2) if match.group(2) is not None else match.group(3)
+        content_text = match.group(2) if match.group(2) is not None else match.group(3)
+        child.text = _unescape_source_markdown(content_text)
         prev = child
         pos = match.end()
     append(content[pos:])
