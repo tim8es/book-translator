@@ -125,6 +125,36 @@ class RequestTests(unittest.TestCase):
             with self.assertRaises(bridge.RequestError):
                 bridge.strict_json(p)
 
+    def test_mode_handoff_process_does_not_require_unpinned_corpus_preflight(self):
+        """The transport commit must succeed even if global engine differs."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bare, work = root / "remote.git", root / "work"
+            run("init", "--bare", str(bare))
+            run("clone", str(bare), str(work))
+            run("-C", str(work), "checkout", "-b", "main")
+            run("-C", str(work), "config", "user.name", "Unit Test")
+            run("-C", str(work), "config", "user.email", "test@example.invalid")
+            request_path = work / bridge.REQUESTS / (RID + ".json")
+            request_path.parent.mkdir(parents=True)
+            request_path.write_text(json.dumps(sample("resume-auto")), encoding="utf-8")
+            book = work / "books" / "test-book"
+            book.mkdir(parents=True)
+            (book / "metadata.json").write_text(json.dumps({
+                "workflow": {"resolved_revision": REV}
+            }), encoding="utf-8")
+            run("-C", str(work), "add", "-A")
+            run("-C", str(work), "commit", "-m", "seed book and request")
+            run("-C", str(work), "push", "-u", "origin", "main")
+            with patch.object(bridge, "cli", side_effect=AssertionError(
+                    "No unpinned literary CLI may run for a control-only request")):
+                self.assertEqual(bridge.process(work, root / "engine", RID), "ok")
+            control = json.loads((book / ".workflow" / "auto-control.json").read_text())
+            self.assertEqual(control["mode"], "auto")
+            receipt = json.loads((work / bridge.RESULTS / (RID + ".json")).read_text())
+            self.assertEqual(receipt["status"], "ok")
+            self.assertEqual(bridge.process(work, root / "engine", RID), "already-recorded")
+
     def test_publish_failed_receipt_without_book_edits(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
