@@ -436,12 +436,17 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             if media != "application/xhtml+xml":
                 continue
             root = ET.fromstring(zf.read(path))
-            if _epub3_toc(root, path, zf, spine_paths) or _legacy_toc(root, path, spine_paths):
+            if (_epub3_toc(root, path, zf, spine_paths)
+                    or _vellum_toc(root, path, zf, spine_paths)
+                    or _legacy_toc(root, path, spine_paths)):
                 for node in root.iter():
                     if _local(node.tag) == "a" and node.get("href"):
+                        href = node.get("href")
+                        if href.startswith(("https://", "http://", "mailto:")):
+                            continue  # Protected metadata footer, not a navigation target.
                         title = "".join(node.itertext()).strip()
                         if title:
-                            titles[_path(path, node.get("href"))] = title
+                            titles[_path(path, href)] = title
         for id_ in spine:
             path, media, props = manifest[id_]
             if media != "application/xhtml+xml":
@@ -454,7 +459,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
             epub3_toc = _epub3_toc(root, path, zf, spine_paths)
             if "nav" in props.split() and not epub3_toc:
                 raise PreservedEpubError(f"{path}: navigation requires verified epub:type=toc")
-            if epub3_toc or _legacy_toc(root, path, spine_paths):
+            if epub3_toc or _vellum_toc(root, path, zf, spine_paths) or _legacy_toc(root, path, spine_paths):
                 documents.append(Document(path, "toc", [], [], _hash(raw), "Contents"))
                 continue
             imgs = []
