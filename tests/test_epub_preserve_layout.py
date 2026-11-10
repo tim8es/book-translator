@@ -344,7 +344,7 @@ class PreserveTests(unittest.TestCase):
         self.install_vellum_toc()
         self.replace_xhtml('OPS/toc.xhtml', b'</body>',
                            b'<p>Chapter prose outside the verified table of contents.</p></body>')
-        with self.assertRaisesRegex(ep.PreservedEpubError, 'unsupported TOC wrapper'):
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'invalid Vellum TOC wrapper'):
             ep.analyze(self.source)
 
     def test_nested_section_wrappers_preserve_layout_and_all_prose(self):
