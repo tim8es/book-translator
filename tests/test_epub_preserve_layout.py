@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 import zipfile
@@ -169,6 +170,45 @@ class PreserveTests(unittest.TestCase):
             xhtml = ET.fromstring(after.read('OPS/chapter.html'))
             self.assertEqual(xhtml.find('.//{*}img').get('src'), 'vector.svg')
             self.assertIn('Следующий абзац.', ''.join(xhtml.itertext()))
+
+    def test_certified_static_svg_passes_shared_source_coverage_gate(self):
+        # The preserving extractor verifies inert SVGs, but the separate
+        # durable coverage preflight must also recognize their MIME identity.
+        from workflow.source_coverage import coverage_integrity_errors
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">'
+               '<path d="M0 0h4v4H0z"/></svg>')
+        self.install_vector_fixture(svg)
+        self.rename_chapter_to_html()
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        book_dir = Path(self.temp.name) / 'sealed-book'
+        extracted = book_dir / 'extracted'
+        extracted.mkdir(parents=True)
+        progress = {'chapters': []}
+        for number, chapter in enumerate(chapters, 1):
+            rel = f'extracted/chapter-{number:06d}.md'
+            (book_dir / rel).write_text(chapter.content, encoding='utf-8')
+            progress['chapters'].append({'number': number, 'source_path': rel})
+        metadata = {
+            'source_format': 'epub',
+            'layout_mode': ep.MODE,
+            'source': {'sha256': report['source_sha256'],
+                       'size_bytes': self.source.stat().st_size},
+        }
+        coverage = book_dir / 'source-coverage.json'
+        coverage.write_text(json.dumps(report), encoding='utf-8')
+        self.assertEqual(coverage_integrity_errors(book_dir, metadata, progress), [])
+
+        vector = report['documents'][3]['images'][0]
+        vector['media_type'] = 'text/html'
+        coverage.write_text(json.dumps(report), encoding='utf-8')
+        self.assertIn('Invalid preserved image identity for OPS/chapter.html',
+                      coverage_integrity_errors(book_dir, metadata, progress))
+        vector['media_type'] = 'image/svg+xml'
+        vector['sha256'] = 'not-a-hash'
+        coverage.write_text(json.dumps(report), encoding='utf-8')
+        self.assertIn('Invalid preserved image identity for OPS/chapter.html',
+                      coverage_integrity_errors(book_dir, metadata, progress))
 
     def test_svg_with_script_visible_text_external_reference_or_bad_gradient_is_rejected(self):
         cases = [

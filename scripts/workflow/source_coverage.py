@@ -546,7 +546,7 @@ def coverage_integrity_errors(
                                 or ".." in Path(asset["path"]).parts
                                 or not isinstance(asset.get("sha256"), str)
                                 or not SHA_RE.fullmatch(asset["sha256"])
-                                or asset.get("media_type") not in {"image/jpeg", "image/png", "image/gif"}):
+                                or asset.get("media_type") not in {"image/jpeg", "image/png", "image/gif", "image/svg+xml"}):
                             errors.append(f"Invalid preserved image identity for {path}")
             if state == "verified":
                 covered_count += 1

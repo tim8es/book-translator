@@ -17,7 +17,7 @@ verified against the EPUB manifest, recorded with SHA-256 in
 assets are also supported when an independent XML inspection proves they consist
 only of static, text-free vector shapes and local gradient references. SVG
 scripts, embedded text, foreign content, remote resources and external references
-remain blocking. Approved SVG bytes are hash-bound and copied unchanged.
+remain blocking. Approved SVG bytes are hash-bound and copied unchanged. The independent\nsource-coverage preflight accepts the `image/svg+xml` image identity only in\n`original_xhtml_v1` mode after source-preserving validation; malformed paths,\nmissing hashes and other media types remain blocked.
 
 Each translated prose block is anchored to its original paragraph or heading:
 
