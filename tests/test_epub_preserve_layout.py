@@ -231,6 +231,66 @@ class PreserveTests(unittest.TestCase):
         with self.assertRaisesRegex(ep.PreservedEpubError, 'Unmapped word-break'):
             ep.analyze(self.source)
 
+    def install_linked_icon_credit(self, *, unlinked_text=False) -> None:
+        intro = b'<p class="intro"><span class="italic">Hello</span> world.</p>'
+        if unlinked_text:
+            icon = (b'<p>Unlinked original prose '
+                    b'<a href="https://example.org"><img src="flower.jpg"/>'
+                    b'Publisher</a></p>')
+        else:
+            icon = (b'<p class="publisher-credit"><a href="https://example.org">'
+                    b'<span class="image-frame"><img src="flower.jpg" alt="Publisher icon"/></span>'
+                    b' <span>Created with Vellum</span></a></p>'
+                    b'<p>Original readable prose.</p>')
+        self.replace_xhtml('OPS/intro.xhtml', intro, icon)
+
+    def test_linked_icon_brand_credit_is_preserved_and_never_sent_as_prose(self):
+        self.install_linked_icon_credit()
+        chapters = self.extracted()
+        self.assertEqual(chapters[0].content,
+                         '<!-- bt-block:000001 -->\nOriginal readable prose.\n')
+        self.assertNotIn('Created with Vellum', chapters[0].content)
+        coverage = ep.audit(self.source, chapters)
+        self.assertEqual(coverage['chapter_count'], 2)
+        translated = chapters[0].content.replace(
+            'Original readable prose.', 'Переведённый литературный текст.')
+        result = ep.build(
+            self.source, [{'markdown': translated}, {'markdown': chapters[1].content}],
+            expected_source_sha256=coverage['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(result, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(io.BytesIO(result)) as z:
+            root = ET.fromstring(z.read('OPS/intro.xhtml'))
+            credit, paragraph = root.findall('.//{*}p')
+            self.assertEqual(credit.get('class'), 'publisher-credit')
+            self.assertEqual(credit.find('.//{*}a').get('href'), 'https://example.org')
+            self.assertEqual(credit.find('.//{*}img').get('src'), 'flower.jpg')
+            self.assertIn('Created with Vellum', ''.join(credit.itertext()))
+            self.assertEqual(''.join(paragraph.itertext()), 'Переведённый литературный текст.')
+
+    def test_linked_icon_credit_cannot_be_mutated_in_epub_build(self):
+        self.install_linked_icon_credit()
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        result = ep.build(
+            self.source, [{'markdown': c.content} for c in chapters],
+            expected_source_sha256=coverage['source_sha256'], language='ru')
+        tampered = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(result)) as z:
+            members = [(i, z.read(i.filename)) for i in z.infolist()]
+        with zipfile.ZipFile(tampered, 'w') as z:
+            for info, data in members:
+                if info.filename == 'OPS/intro.xhtml':
+                    self.assertIn(b'Created with Vellum', data)
+                    data = data.replace(b'Created with Vellum', b'Changed publisher credit')
+                z.writestr(info, data)
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'Protected linked-icon label changed'):
+            ep.validate(tampered.getvalue(), source=self.source, expected_docs=5)
+
+    def test_inline_image_with_independent_prose_remains_blocked(self):
+        self.install_linked_icon_credit(unlinked_text=True)
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'Inline artwork inside a prose block'):
+            ep.analyze(self.source)
+
     def test_nested_section_wrappers_preserve_layout_and_all_prose(self):
         # Two semantic section containers are NOT prose blocks themselves:
         # their heading and both paragraphs must be translated independently.
