@@ -56,6 +56,7 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   independently validated navigation-localization workflow. Unmapped text,
   malformed links, executable elements, hidden markup and non-TOC navigation
   fail closed instead of being silently discarded.
+- A Vellum-generated table of contents inside a uniquely identified `<div role="doc-toc" epub:type="toc">` is preserved as original XHTML only after auditing all internal spine links and fragment targets. A sole external publisher-attribution footer may remain unchanged when it contains no other prose. Unmapped text, missing targets, duplicate links, unsafe HTML, or extra footer content block extraction. The navigation document is not silently translated as a chapter.
 - Standalone prose-only `<div>` elements are translated as their own
   source-bound text blocks while preserving the original `div` tag, class and
   ID. Only plain text and unstyled inline `<span>`, `<em>` or `<i>` markup are
