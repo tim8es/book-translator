@@ -23,7 +23,8 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
 SESSION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 OPERATIONS = {"claim", "renew-claim", "release", "accept-translation",
-              "review-record", "accept-review", "cleanup-claims"}
+              "review-record", "accept-review", "cleanup-claims",
+              "pause-auto", "resume-auto"}
 REQUESTS = Path(".chat-ops/requests")
 RESULTS = Path(".chat-ops/results")
 
@@ -85,6 +86,8 @@ def validate(raw: dict, file_id: str) -> dict:
                           "translation_sha256", "claim_sha256"},
         "accept-review": set(),
         "cleanup-claims": set(),
+        "pause-auto": set(),
+        "resume-auto": set(),
     }[op]
     require(set(raw) == common | extras if op in {"accept-translation", "review-record"}
             else set(raw).issuperset(common) and set(raw).issubset(common | extras),
@@ -216,6 +219,17 @@ def chapter_and_claim(book: Path, request: dict, *, role: str) -> dict:
 
 def execute(root: Path, engine: Path, request: dict) -> dict:
     book, _ = expected_book(root, request)
+    if request["operation"] in {"pause-auto", "resume-auto"}:
+        # Only change scheduling preference; never mutate chapter claims or evidence.
+        mode = "chatops" if request["operation"] == "pause-auto" else "auto"
+        control = book / ".workflow" / "auto-control.json"
+        control.parent.mkdir(parents=True, exist_ok=True)
+        control.write_text(json.dumps({
+            "schema_version": 1, "mode": mode,
+            "updated_by": request["session_id"],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return {"auto_mode": mode}
     pinned_engine(root, engine, request["workflow_revision"])
     slug = request["book_slug"]
     chapter = str(request["chapter"])
@@ -351,12 +365,25 @@ def process(root: Path, engine: Path, request_id: str) -> str:
     raise RuntimeError("unable to publish request after 3 fresh-state attempts")
 
 
-def pending(root: Path) -> list[str]:
+def request_group(path: Path) -> str:
+    """Route malformed envelopes to an isolated failure-receipt lane."""
+    try:
+        data = strict_json(path)
+        slug = data.get("book_slug")
+        if isinstance(slug, str) and SLUG.fullmatch(slug):
+            return slug
+    except (RequestError, OSError):
+        pass
+    return "__invalid__"
+
+
+def pending(root: Path, book_slug: str | None = None) -> list[str]:
     path = root / REQUESTS
     if not path.is_dir():
         return []
     return sorted(p.stem for p in path.glob("*.json") if HEX32.fullmatch(p.stem)
-                  and not (root / RESULTS / p.name).exists())
+                  and not (root / RESULTS / p.name).exists()
+                  and (book_slug is None or request_group(p) == book_slug))
 
 
 def main() -> int:
@@ -364,12 +391,15 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--max-requests", type=int, default=100)
+    parser.add_argument("--book-slug", help="Only process pending requests for this book")
     args = parser.parse_args()
     root = args.root.resolve()
     engine = args.engine.resolve()
     require(args.max_requests in range(1, 501), "invalid max requests")
+    require(args.book_slug is None or args.book_slug == "__invalid__" or
+            SLUG.fullmatch(args.book_slug) is not None, "invalid book scope")
     reset(root)
-    ids = pending(root)[:args.max_requests]
+    ids = pending(root, args.book_slug)[:args.max_requests]
     print("Pending Chat requests:", len(ids))
     for request_id in ids:
         outcome = process(root, engine, request_id)
