@@ -13,7 +13,11 @@ items and a verified simple legacy XHTML TOC are retained as package resources
 but are not sent to a literary translator as text-only units. There can therefore
 be fewer translation units than spine entries. Every referenced raster asset is
 verified against the EPUB manifest, recorded with SHA-256 in
-`source-coverage.json`, and preserved byte-for-byte.
+`source-coverage.json`, and preserved byte-for-byte. Manifest-declared SVG image
+assets are also supported when an independent XML inspection proves they consist
+only of static, text-free vector shapes and local gradient references. SVG
+scripts, embedded text, foreign content, remote resources and external references
+remain blocking. Approved SVG bytes are hash-bound and copied unchanged.
 
 Each translated prose block is anchored to its original paragraph or heading:
 
@@ -35,8 +39,10 @@ original artwork, raster assets, stylesheets, source page structure, image
 positions, paragraph classes and first-letter drop-cap classes. Existing simple
 italic spans become explicit Markdown `*emphasis*` for the translator, and are
 reconstructed as XHTML `<em>` after translation. Link targets are preserved
-only if the original inline link label survives verbatim; otherwise assembly
-fails closed. The output OPF and translated XHTML declare the target language.
+only if each original inline link label survives verbatim in its original order;
+otherwise assembly fails closed. Safe `<wbr>` word-break hints inside linked
+labels are preserved with the original link subtree, including when a prose
+block has multiple independent links. Word-breaks outside links remain blocked. The output OPF and translated XHTML declare the target language.
 
 ## Bounds and limitations
 

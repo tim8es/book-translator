@@ -127,6 +127,110 @@ class PreserveTests(unittest.TestCase):
         with self.assertRaisesRegex(BookError, 'Undeclared or unsupported raster'):
             read_epub(self.source)
 
+    def install_vector_fixture(self, svg: str) -> None:
+        """Add a declared SVG in place of a decorative raster image."""
+        with zipfile.ZipFile(self.source) as original:
+            files = [(info, original.read(info.filename)) for info in original.infolist()]
+        with zipfile.ZipFile(self.source, 'w') as archive:
+            for info, data in files:
+                if info.filename == 'OPS/package.opf':
+                    data = data.replace(
+                        b'</manifest>',
+                        b'<item id="vector" href="vector.svg" media-type="image/svg+xml"/></manifest>')
+                elif info.filename == 'OPS/chapter.xhtml':
+                    data = data.replace(b'<img src="flower.jpg"', b'<img src="vector.svg"')
+                archive.writestr(info, data)
+            archive.writestr('OPS/vector.svg', svg.encode('utf-8'))
+
+    def test_static_svg_in_html_spine_is_sha_bound_and_preserved_unchanged(self):
+        from book import read_epub
+        svg = ('<?xml version="1.0"?>'
+               '<svg xmlns="http://www.w3.org/2000/svg" width="78" height="78">'
+               '<defs><linearGradient id="color"><stop offset="0%" stop-color="#fff"/>'
+               '</linearGradient></defs>'
+               '<g fill="url(#color)"><path d="M0 0h10v10H0z"/></g></svg>')
+        self.install_vector_fixture(svg)
+        self.rename_chapter_to_html()
+        chapters, identity = read_epub(self.source)
+        report = ep.audit(self.source, chapters)
+        vector = report['documents'][3]['images'][0]
+        self.assertEqual(vector['path'], 'OPS/vector.svg')
+        self.assertEqual(vector['media_type'], 'image/svg+xml')
+        text = chapters[1].content.replace('Next paragraph.', 'Следующий абзац.')
+        output = ep.build(
+            self.source, [{'markdown': chapters[0].content}, {'markdown': text}],
+            expected_source_sha256=report['source_sha256'], language='ru')
+        self.assertEqual(ep.validate(output, source=self.source, expected_docs=5)['unit_count'], 2)
+        with zipfile.ZipFile(self.source) as before, zipfile.ZipFile(io.BytesIO(output)) as after:
+            self.assertEqual(before.namelist(), after.namelist())
+            self.assertEqual(before.read('OPS/vector.svg'), after.read('OPS/vector.svg'))
+            self.assertEqual(before.read('OPS/flower.jpg'), after.read('OPS/flower.jpg'))
+            self.assertEqual(before.read('OPS/book.css'), after.read('OPS/book.css'))
+            xhtml = ET.fromstring(after.read('OPS/chapter.html'))
+            self.assertEqual(xhtml.find('.//{*}img').get('src'), 'vector.svg')
+            self.assertIn('Следующий абзац.', ''.join(xhtml.itertext()))
+
+    def test_svg_with_script_visible_text_external_reference_or_bad_gradient_is_rejected(self):
+        cases = [
+            '<script>alert(1)</script>',
+            '<text>Do not hide these words</text>',
+            '<image href="https://example.org/photo.png"/>',
+            '<rect fill="url(https://example.org/a.svg)" width="1" height="1"/>',
+            '<rect fill="url(#missing)" width="1" height="1"/>',
+            '<foreignObject><p xmlns="http://www.w3.org/1999/xhtml">Words</p></foreignObject>',
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                fixture(self.source)
+                svg = '<svg xmlns="http://www.w3.org/2000/svg">' + payload + '</svg>'
+                self.install_vector_fixture(svg)
+                with self.assertRaisesRegex(ep.PreservedEpubError, 'Unsafe SVG'):
+                    ep.analyze(self.source)
+
+    def test_url_word_break_and_multiple_links_preserve_original_link_subtrees(self):
+        self.replace_xhtml(
+            'OPS/intro.xhtml',
+            b'<p class="intro"><span class="italic">Hello</span> world.</p>',
+            b'<p>Visit <a href="https://first.example">first.<wbr class="break"/>example</a>'
+            b' and <a href="https://second.example">second.example</a> today.</p>')
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        self.assertIn('first.example', chapters[0].content)
+        self.assertIn('second.example', chapters[0].content)
+        translated = chapters[0].content.replace('Visit ', 'Посетите ').replace(' today.', ' сегодня.')
+        result = ep.build(
+            self.source, [{'markdown': translated}, {'markdown': chapters[1].content}],
+            expected_source_sha256=report['source_sha256'], language='ru')
+        with zipfile.ZipFile(io.BytesIO(result)) as archive:
+            p = ET.fromstring(archive.read('OPS/intro.xhtml')).find('.//{*}p')
+            links = p.findall('{*}a')
+            self.assertEqual(len(links), 2)
+            self.assertEqual([a.get('href') for a in links],
+                             ['https://first.example', 'https://second.example'])
+            self.assertEqual(links[0].find('{*}wbr').get('class'), 'break')
+            self.assertIn('Посетите', ''.join(p.itertext()))
+            self.assertIn('сегодня.', ''.join(p.itertext()))
+
+    def test_reordered_or_ambiguous_link_labels_fail_closed(self):
+        self.replace_xhtml(
+            'OPS/intro.xhtml',
+            b'<p class="intro"><span class="italic">Hello</span> world.</p>',
+            b'<p><a href="https://one.example">one.example</a> then '
+            b'<a href="https://two.example">two.example</a>.</p>')
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        changed = chapters[0].content.replace(
+            'one.example then two.example', 'two.example затем one.example')
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'Hyperlink order'):
+            ep.build(self.source, [{'markdown': changed}, {'markdown': chapters[1].content}],
+                     expected_source_sha256=report['source_sha256'], language='ru')
+
+    def test_word_break_outside_link_is_rejected(self):
+        self.replace_xhtml('OPS/intro.xhtml', b'</body>',
+                           b'<p>Orphan<wbr/>break</p></body>')
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'Unmapped word-break'):
+            ep.analyze(self.source)
+
     def test_nested_section_wrappers_preserve_layout_and_all_prose(self):
         # Two semantic section containers are NOT prose blocks themselves:
         # their heading and both paragraphs must be translated independently.

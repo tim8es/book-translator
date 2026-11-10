@@ -7,6 +7,7 @@ these markers and their order before a new package can be assembled.
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 import io
 import posixpath
 import re
@@ -22,7 +23,7 @@ VALIDATOR = "epub-preserved-xhtml-v1"
 MODE = "original_xhtml_v1"
 _MARKER = re.compile(r"(?m)^<!-- bt-block:(\d{6}) -->\s*$")
 _PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre"}
-_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre"}
+_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
 
 class PreservedEpubError(ValueError):
     pass
@@ -38,6 +39,54 @@ def _hash(data: bytes) -> str:
 
 def _tokens(text: str) -> list[str]:
     return re.findall(r"\w+|[^\w\s]", unicodedata.normalize("NFC", text))
+
+
+_STATIC_SVG_NS = "http://www.w3.org/2000/svg"
+_STATIC_SVG_TAGS = {
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline",
+    "polygon", "defs", "linearGradient", "radialGradient", "stop", "title", "desc",
+}
+_SVG_INTERNAL_REF = re.compile(r"url\(\s*#([A-Za-z_][\w.:-]*)\s*\)")
+
+
+def _verify_static_svg(content: bytes, path: str) -> None:
+    """Admit only inert, text-free vector art copied unchanged from the source."""
+    if len(content) > 262144 or b"<!doctype" in content.lower() or b"<!entity" in content.lower():
+        raise PreservedEpubError(f"Unsafe SVG resource: {path}")
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as exc:
+        raise PreservedEpubError(f"Malformed SVG resource: {path}") from exc
+    if root.tag != f"{{{_STATIC_SVG_NS}}}svg":
+        raise PreservedEpubError(f"Unsafe SVG root: {path}")
+    ids: set[str] = set()
+    references: list[str] = []
+    for node in root.iter():
+        if not isinstance(node.tag, str) or not node.tag.startswith(f"{{{_STATIC_SVG_NS}}}"):
+            raise PreservedEpubError(f"Unsafe SVG namespace: {path}")
+        tag = _local(node.tag)
+        if tag not in _STATIC_SVG_TAGS or (tag not in {"title", "desc"} and (node.text or "").strip()):
+            raise PreservedEpubError(f"Unsafe SVG element or visible text: {path}")
+        if tag in {"title", "desc"} and list(node):
+            raise PreservedEpubError(f"Unsafe SVG metadata: {path}")
+        if (node.tail or "").strip():
+            raise PreservedEpubError(f"Unsafe SVG tail text: {path}")
+        for key, value in node.attrib.items():
+            if (key.startswith("{") or key.lower().startswith("on")
+                    or key.lower() in {"style", "href", "src", "filter"}
+                    or re.search(r"https?://|data:|javascript:|@import", value, re.I)):
+                raise PreservedEpubError(f"Unsafe SVG attribute: {path}")
+            if "url(" in value.lower():
+                ref = _SVG_INTERNAL_REF.fullmatch(value.strip())
+                if not ref:
+                    raise PreservedEpubError(f"Unsafe SVG external reference: {path}")
+                references.append(ref.group(1))
+            if key == "id":
+                if not value or value in ids:
+                    raise PreservedEpubError(f"Unsafe SVG duplicate ID: {path}")
+                ids.add(value)
+    if any(ref not in ids for ref in references):
+        raise PreservedEpubError(f"Unsafe SVG unresolved local reference: {path}")
 
 
 def _path(opf: str, href: str) -> str:
@@ -130,10 +179,17 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
     if len(bodies) != 1:
         raise PreservedEpubError("XHTML must have exactly one body")
     body = bodies[0]
+    parents = {child: parent for parent in body.iter() for child in parent}
     for node in body.iter():
         name = _local(node.tag)
         if name not in _ALLOWED:
             raise PreservedEpubError(f"Unsupported semantic element <{name}>")
+        if name == "wbr":
+            parent = parents.get(node)
+            while parent is not None and _local(parent.tag) != "a":
+                parent = parents.get(parent)
+            if parent is None or list(node) or (node.text or "").strip():
+                raise PreservedEpubError("Unmapped word-break outside an inert link")
         for key, value in node.attrib.items():
             attr = _local(key)
             if attr.startswith("on") or attr in {"hidden", "srcset"}:
@@ -311,12 +367,15 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
                 if not href:
                     raise PreservedEpubError(f"Missing image reference: {path}")
                 asset = _path(path, href)
-                if media_by_path.get(asset) not in {"image/jpeg", "image/png", "image/gif"}:
+                media_type = media_by_path.get(asset)
+                if media_type not in {"image/jpeg", "image/png", "image/gif", "image/svg+xml"}:
                     raise PreservedEpubError(f"Undeclared or unsupported raster asset: {asset}")
                 data = zf.read(asset)
                 if not data:
                     raise PreservedEpubError(f"Empty image: {asset}")
-                imgs.append({"path": asset, "sha256": _hash(data), "media_type": media_by_path[asset]})
+                if media_type == "image/svg+xml":
+                    _verify_static_svg(data, asset)
+                imgs.append({"path": asset, "sha256": _hash(data), "media_type": media_type})
             blocks = _blocks(root)
             if not blocks and not imgs:
                 raise PreservedEpubError(f"No text or artwork in spine XHTML: {path}")
@@ -410,6 +469,18 @@ def _render_inline(node: ET.Element, content: str) -> None:
     append(content[pos:])
 
 
+def _append_inline(node: ET.Element, text: str) -> None:
+    """Append translated inline text after existing preserved links or emphasis."""
+    fragment = ET.Element("{http://www.w3.org/1999/xhtml}span")
+    _render_inline(fragment, text)
+    if fragment.text:
+        if len(node):
+            node[-1].tail = (node[-1].tail or "") + fragment.text
+        else:
+            node.text = (node.text or "") + fragment.text
+    node.extend(list(fragment))
+
+
 def extract(source: Path, factory) -> list[Any]:
     docs, _ = analyze(source)
     result = []
@@ -498,22 +569,29 @@ def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_sourc
                                  or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha())
                             else None)
                 links = [n for n in node.iter() if _local(n.tag) == "a"]
-                if len(links) > 1:
-                    raise PreservedEpubError(f"Multiple inline links require manual alignment: {doc.path}")
-                link = links[0] if links else None
-                if link is not None:
+                positions = []
+                cursor = 0
+                for link in links:
                     label = "".join(link.itertext())
-                    if translated.count(label) != 1:
-                        raise PreservedEpubError(f"Hyperlink label was lost in translation: {doc.path}")
+                    if not label or translated.count(label) != 1:
+                        raise PreservedEpubError(f"Hyperlink label was lost or ambiguous: {doc.path}")
+                    at = translated.find(label, cursor)
+                    if at < cursor:
+                        raise PreservedEpubError(f"Hyperlink order or boundary changed: {doc.path}")
+                    positions.append((link, label, at))
+                    cursor = at + len(label)
                 for child in list(node):
                     node.remove(child)
                 node.text = None
-                if link is not None:
-                    at = translated.index(label)
-                    _render_inline(node, translated[:at])
-                    new_link = ET.SubElement(node, link.tag, link.attrib)
-                    new_link.text = label
-                    new_link.tail = _plain_markdown(translated[at + len(label):])
+                if positions:
+                    cursor = 0
+                    for link, label, at in positions:
+                        _append_inline(node, translated[cursor:at])
+                        preserved = deepcopy(link)
+                        preserved.tail = None
+                        node.append(preserved)
+                        cursor = at + len(label)
+                    _append_inline(node, translated[cursor:])
                 elif drop_cap is not None and translated:
                     # Preserve either a single styled initial or an opening quote
                     # plus a styled initial, including italic/bold decorated initials.
