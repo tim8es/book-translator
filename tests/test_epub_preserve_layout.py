@@ -776,6 +776,131 @@ class PreserveTests(unittest.TestCase):
             self.assertEqual(p[0].text, '“O')
             self.assertEqual(p[0].get('class'), 'initial')
 
+    def test_russian_opening_quote_does_not_break_styled_drop_cap(self):
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        translated = chapters[1].content.replace(
+            "Once upon a time.", "«Однажды всё случилось.»"
+        )
+        output = ep.build(
+            self.source,
+            [{"markdown": chapters[0].content}, {"markdown": translated}],
+            expected_source_sha256=coverage["source_sha256"], language="ru",
+        )
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            paragraph = ET.fromstring(archive.read("OPS/chapter.xhtml")).find(
+                ".//{*}p[@class='first']"
+            )
+            self.assertEqual(paragraph.text, "«")
+            self.assertEqual(paragraph[0].get("class"), "initial")
+            self.assertEqual(paragraph[0].text, "О")
+            self.assertIn("«Однажды всё случилось.»", "".join(paragraph.itertext()))
+
+    def test_russian_dialogue_dash_keeps_letter_as_drop_cap(self):
+        self.replace_xhtml(
+            "OPS/chapter.xhtml",
+            b'<span class="initial">O</span>nce',
+            "<span class=\"initial\">“O</span>nce".encode("utf-8"),
+        )
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        translated = chapters[1].content.replace(
+            "“Once upon a time.", "— Давай начнём."
+        )
+        output = ep.build(
+            self.source,
+            [{"markdown": chapters[0].content}, {"markdown": translated}],
+            expected_source_sha256=coverage["source_sha256"], language="ru",
+        )
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            paragraph = ET.fromstring(archive.read("OPS/chapter.xhtml")).find(
+                ".//{*}p[@class='first']"
+            )
+            self.assertEqual(paragraph.text, "— ")
+            self.assertEqual(paragraph[0].text, "Д")
+            self.assertIn("— Давай начнём.", "".join(paragraph.itertext()))
+
+    def test_whole_paragraph_translated_link_retains_original_href(self):
+        self.replace_xhtml(
+            "OPS/intro.xhtml",
+            b'<p class="intro"><span class="italic">Hello</span> world.</p>',
+            b'<p><a href="https://example.org/order">Order now!</a></p>',
+        )
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        translated = chapters[0].content.replace("Order now!", "Закажите сейчас!")
+        output = ep.build(
+            self.source,
+            [{"markdown": translated}, {"markdown": chapters[1].content}],
+            expected_source_sha256=coverage["source_sha256"], language="ru",
+        )
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            link = ET.fromstring(archive.read("OPS/intro.xhtml")).find(".//{*}a")
+            self.assertEqual(link.get("href"), "https://example.org/order")
+            self.assertEqual("".join(link.itertext()), "Закажите сейчас!")
+
+    def test_partial_link_needs_explicit_translated_label(self):
+        self.replace_xhtml(
+            "OPS/intro.xhtml",
+            b'<p class="intro"><span class="italic">Hello</span> world.</p>',
+            b'<p>Read <a href="https://example.org/more">more</a> today.</p>',
+        )
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        translated = chapters[0].content.replace(
+            "Read more today.", "Читайте подробнее сегодня."
+        )
+        options = {
+            "source": self.source,
+            "chapters": [{"markdown": translated}, {"markdown": chapters[1].content}],
+            "expected_source_sha256": coverage["source_sha256"],
+            "language": "ru",
+        }
+        with self.assertRaisesRegex(ep.PreservedEpubError, "explicit label binding"):
+            ep.build(**options)
+        output = ep.build(
+            **options,
+            link_bindings={"OPS/intro.xhtml#1:1": "подробнее"},
+        )
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            paragraph = ET.fromstring(archive.read("OPS/intro.xhtml")).find(".//{*}p")
+            link = paragraph.find("{*}a")
+            self.assertEqual(link.get("href"), "https://example.org/more")
+            self.assertEqual("".join(link.itertext()), "подробнее")
+            self.assertEqual("".join(paragraph.itertext()), "Читайте подробнее сегодня.")
+        with self.assertRaisesRegex(ep.PreservedEpubError, "did not match source links"):
+            ep.build(
+                **options,
+                link_bindings={"OPS/intro.xhtml#2:1": "подробнее"},
+            )
+        with self.assertRaisesRegex(ep.PreservedEpubError, "lost or ambiguous"):
+            ep.build(
+                **options,
+                link_bindings={"OPS/intro.xhtml#1:1": "nonexistent"},
+            )
+
+    def test_translated_italic_link_has_no_literal_markdown_markers(self):
+        self.replace_xhtml(
+            "OPS/intro.xhtml",
+            b'<p class="intro"><span class="italic">Hello</span> world.</p>',
+            b'<p><i><a href="https://example.org/promo">Shop here</a></i></p>',
+        )
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        translated = chapters[0].content.replace("Shop here", "Покупайте здесь")
+        output = ep.build(
+            self.source,
+            [{"markdown": translated}, {"markdown": chapters[1].content}],
+            expected_source_sha256=coverage["source_sha256"], language="ru",
+        )
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            paragraph = ET.fromstring(archive.read("OPS/intro.xhtml")).find(".//{*}p")
+            link = paragraph.find(".//{*}a")
+            self.assertEqual(link.get("href"), "https://example.org/promo")
+            self.assertEqual("".join(link.itertext()), "Покупайте здесь")
+            self.assertEqual("".join(paragraph.itertext()), "Покупайте здесь")
+            self.assertIsNotNone(paragraph.find("{*}em"))
+
     def test_missing_or_duplicate_markers_are_blocked(self):
         sample='<!-- bt-block:000001 -->\nFirst\n\n<!-- bt-block:000002 -->\nSecond\n'
         for invalid in (sample.replace('000002','000001'),sample.replace('000001','000003'),sample.replace('Second',''),'Unmapped\n'+sample):
