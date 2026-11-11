@@ -165,6 +165,35 @@ def _resolutions(book_dir: Path, repository: WorkflowStateRepository, progress, 
         raise EpubCliError(f"review evidence is unavailable or invalid: {exc}") from exc
 
 
+def _read_link_bindings(book_dir: Path) -> tuple[dict[str, str], bytes | None]:
+    """Optional, source-bound labels for genuinely ambiguous partial hyperlinks.
+
+    The source EPUB supplies trusted URL destinations. This file only maps
+    verified translated text spans to already-preserved source links.
+    """
+    path = book_dir / ".workflow" / "epub-link-bindings.json"
+    if not path.exists():
+        return {}, None
+    if not path.is_file() or path.is_symlink():
+        raise EpubCliError("EPUB link bindings must be a regular file")
+    data = path.read_bytes()
+    if len(data) > 16384:
+        raise EpubCliError("EPUB link bindings exceed size limit")
+    try:
+        document = json.loads(data)
+    except (UnicodeError, ValueError) as exc:
+        raise EpubCliError("Invalid EPUB link bindings JSON") from exc
+    if (not isinstance(document, dict) or set(document) != {"schema_version", "bindings"}
+            or type(document["schema_version"]) is not int
+            or document["schema_version"] != 1
+            or not isinstance(document["bindings"], dict)
+            or any(not isinstance(k, str) or not isinstance(v, str)
+                   or not k.strip() or not v.strip() or len(v) > 1000
+                   for k, v in document["bindings"].items())):
+        raise EpubCliError("Invalid EPUB link bindings schema")
+    return document["bindings"], data
+
+
 def _build_identity(
     root: Path,
     slug: str,
@@ -227,7 +256,16 @@ def _build_identity(
         fingerprint = input_fingerprint(snapshot)
     except EpubOutputError as exc:
         raise EpubCliError(str(exc)) from exc
+    link_bindings = {}
+    if metadata_doc.data.get("layout_mode") == PRESERVE_MODE:
+        link_bindings, bindings_bytes = _read_link_bindings(book_dir)
+        if bindings_bytes is not None:
+            fingerprint = hashlib.sha256(
+                ("epub-link-bindings-v1:" + fingerprint + ":" +
+                 hashlib.sha256(bindings_bytes).hexdigest()).encode("ascii")
+            ).hexdigest()
     return {
+        "link_bindings": link_bindings,
         "book_dir": book_dir,
         "storage": storage,
         "repository": repository,
@@ -339,6 +377,7 @@ def epub_build_command(args: argparse.Namespace, root: Path) -> int:
                 context["book_dir"] / "source" / metadata["source_file"],
                 _unit_payloads(context), expected_source_sha256=metadata["source"]["sha256"],
                 language=metadata["target_language"],
+                link_bindings=context["link_bindings"],
             )
         else:
             artifact_bytes = build_epub_bytes(
