@@ -701,6 +701,19 @@ def build(
                                  or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha())
                             else None)
                 links = [n for n in node.iter() if _local(n.tag) == "a"]
+                # Markdown emphasis enclosing a hyperlink must be rendered
+                # across the link boundary, not as stray literal asterisks.
+                linked_content = translated
+                linked_wrapper = None
+                if links:
+                    if (translated.startswith("**") and translated.endswith("**")
+                            and len(translated) > 4):
+                        linked_content = translated[2:-2]
+                        linked_wrapper = "strong"
+                    elif (translated.startswith("*") and translated.endswith("*")
+                          and len(translated) > 2):
+                        linked_content = translated[1:-1]
+                        linked_wrapper = "em"
                 positions = []
                 cursor = 0
                 for link_number, link in enumerate(links, 1):
@@ -711,14 +724,14 @@ def build(
                         label = explicit
                         replace_label = True
                         used_bindings.add(binding_key)
-                    elif original_label and translated.count(original_label) == 1:
+                    elif original_label and linked_content.count(original_label) == 1:
                         label = original_label
                         replace_label = False
                     elif (len(links) == 1 and original_label.strip()
                           and original.strip() == original_label.strip()):
                         # The source's one hyperlink spans the entire paragraph.
                         # Its visible translated label can change, but not its URL.
-                        label = translated
+                        label = linked_content
                         replace_label = True
                     else:
                         # A partly linked sentence needs an explicit, reviewable
@@ -727,9 +740,9 @@ def build(
                             f"Translated hyperlink needs an explicit label binding: "
                             f"{doc.path} block {block_number} link {link_number}"
                         )
-                    if not label or translated.count(label) != 1:
+                    if not label or linked_content.count(label) != 1:
                         raise PreservedEpubError(f"Hyperlink label was lost or ambiguous: {doc.path}")
-                    at = translated.find(label, cursor)
+                    at = linked_content.find(label, cursor)
                     if at < cursor:
                         raise PreservedEpubError(f"Hyperlink order or boundary changed: {doc.path}")
                     positions.append((link, label, at, replace_label))
@@ -739,8 +752,10 @@ def build(
                 node.text = None
                 if positions:
                     cursor = 0
+                    target = (ET.SubElement(node, "{http://www.w3.org/1999/xhtml}" + linked_wrapper)
+                              if linked_wrapper else node)
                     for link, label, at, replace_label in positions:
-                        _append_inline(node, translated[cursor:at])
+                        _append_inline(target, linked_content[cursor:at])
                         preserved = deepcopy(link)
                         preserved.tail = None
                         if replace_label:
@@ -750,9 +765,9 @@ def build(
                                 preserved.remove(child)
                             preserved.text = None
                             _render_inline(preserved, label)
-                        node.append(preserved)
+                        target.append(preserved)
                         cursor = at + len(label)
-                    _append_inline(node, translated[cursor:])
+                    _append_inline(target, linked_content[cursor:])
                 elif drop_cap is not None and translated:
                     # Russian prose can start with « or an em-dash dialogue
                     # marker. Keep that punctuation outside the styled initial.
