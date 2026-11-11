@@ -655,13 +655,28 @@ def audit(source: Path, chapters: Sequence[Any]) -> dict[str, Any]:
                  "images": d.images} for d in docs], "extracted": extracted}
 
 
-def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_source_sha256: str, language: str) -> bytes:
+def build(
+    source: Path,
+    chapters: Sequence[Mapping[str, Any]],
+    *,
+    expected_source_sha256: str,
+    language: str,
+    link_bindings: Mapping[str, str] | None = None,
+) -> bytes:
     if _hash(source.read_bytes()) != expected_source_sha256:
         raise PreservedEpubError("Stored EPUB original SHA-256 mismatch")
     docs, identity = analyze(source)
     textual = [d for d in docs if d.kind == "text"]
     if len(textual) != len(chapters):
         raise PreservedEpubError("Translation count differs from source XHTML documents")
+    bindings = link_bindings if link_bindings is not None else {}
+    if not isinstance(bindings, Mapping) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        or not value.strip() or len(value) > 1000
+        for key, value in bindings.items()
+    ):
+        raise PreservedEpubError("Invalid translated hyperlink bindings")
+    used_bindings: set[str] = set()
     originals = zipfile.ZipFile(source)
     _, drop_classes = _source_style_classes(originals)
     replacements: dict[str, bytes] = {}
@@ -674,7 +689,7 @@ def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_sourc
             nodes = _blocks(root)
             if len(nodes) != len(blocks):
                 raise PreservedEpubError(f"Source XHTML block count changed: {doc.path}")
-            for (node, original), translated in zip(nodes, blocks):
+            for block_number, ((node, original), translated) in enumerate(zip(nodes, blocks), 1):
                 # Preserve block tag/class/id and image siblings. Inline content cannot
                 # be automatically aligned; reject links unless label survives.
                 source_children = list(node)
@@ -688,43 +703,89 @@ def build(source: Path, chapters: Sequence[Mapping[str, Any]], *, expected_sourc
                 links = [n for n in node.iter() if _local(n.tag) == "a"]
                 positions = []
                 cursor = 0
-                for link in links:
-                    label = "".join(link.itertext())
+                for link_number, link in enumerate(links, 1):
+                    original_label = "".join(link.itertext())
+                    binding_key = f"{doc.path}#{block_number}:{link_number}"
+                    explicit = bindings.get(binding_key)
+                    if explicit is not None:
+                        label = explicit
+                        replace_label = True
+                        used_bindings.add(binding_key)
+                    elif original_label and translated.count(original_label) == 1:
+                        label = original_label
+                        replace_label = False
+                    elif (len(links) == 1 and original_label.strip()
+                          and original.strip() == original_label.strip()):
+                        # The source's one hyperlink spans the entire paragraph.
+                        # Its visible translated label can change, but not its URL.
+                        label = translated
+                        replace_label = True
+                    else:
+                        # A partly linked sentence needs an explicit, reviewable
+                        # target phrase; guessing would put the URL on wrong words.
+                        raise PreservedEpubError(
+                            f"Translated hyperlink needs an explicit label binding: "
+                            f"{doc.path} block {block_number} link {link_number}"
+                        )
                     if not label or translated.count(label) != 1:
                         raise PreservedEpubError(f"Hyperlink label was lost or ambiguous: {doc.path}")
                     at = translated.find(label, cursor)
                     if at < cursor:
                         raise PreservedEpubError(f"Hyperlink order or boundary changed: {doc.path}")
-                    positions.append((link, label, at))
+                    positions.append((link, label, at, replace_label))
                     cursor = at + len(label)
                 for child in list(node):
                     node.remove(child)
                 node.text = None
                 if positions:
                     cursor = 0
-                    for link, label, at in positions:
+                    for link, label, at, replace_label in positions:
                         _append_inline(node, translated[cursor:at])
                         preserved = deepcopy(link)
                         preserved.tail = None
+                        if replace_label:
+                            # Preserve the original, source-verified destination
+                            # and link attributes; render only the translated label.
+                            for child in list(preserved):
+                                preserved.remove(child)
+                            preserved.text = None
+                            _render_inline(preserved, label)
                         node.append(preserved)
                         cursor = at + len(label)
                     _append_inline(node, translated[cursor:])
                 elif drop_cap is not None and translated:
-                    # Preserve either a single styled initial or an opening quote
-                    # plus a styled initial, including italic/bold decorated initials.
-                    prefix_len = 2 if len(initial) == 2 and translated.startswith(initial[0]) and len(translated) > 1 and translated[1].isalpha() else 1
-                    if not translated[prefix_len - 1].isalpha():
+                    # Russian prose can start with « or an em-dash dialogue
+                    # marker. Keep that punctuation outside the styled initial.
+                    letter_at = next((n for n, char in enumerate(translated)
+                                      if char.isalpha()), -1)
+                    allowed_prefix = '«“„‘\'"—–- \u00a0'
+                    if (letter_at < 0 or letter_at > 8
+                            or any(char not in allowed_prefix
+                                   for char in translated[:letter_at])):
                         raise PreservedEpubError(f"Invalid translated drop-cap initial: {doc.path}")
-                    node.text = None
+                    if (len(initial) == 2 and letter_at == 1
+                            and translated.startswith(initial[0])):
+                        # Preserve the original quoted-initial styling if unchanged.
+                        node.text = None
+                        styled = translated[:2]
+                    else:
+                        node.text = translated[:letter_at] or None
+                        styled = translated[letter_at]
                     first = ET.SubElement(node, drop_cap.tag, drop_cap.attrib)
-                    first.text = translated[:prefix_len]
+                    first.text = styled
                     wrapper = ET.Element("{http://www.w3.org/1999/xhtml}span")
-                    _render_inline(wrapper, translated[prefix_len:])
+                    _render_inline(wrapper, translated[letter_at + 1:])
                     first.tail = wrapper.text
                     node.extend(list(wrapper))
                 else:
                     _render_inline(node, translated)
             replacements[doc.path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        unused = set(bindings) - used_bindings
+        if unused:
+            raise PreservedEpubError(
+                "Translated hyperlink bindings did not match source links: "
+                + ", ".join(sorted(unused))
+            )
         opf = identity["opf_path"]
         package = ET.fromstring(originals.read(opf))
         for node in package.iter():
