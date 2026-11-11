@@ -901,6 +901,44 @@ class PreserveTests(unittest.TestCase):
             self.assertEqual("".join(paragraph.itertext()), "Покупайте здесь")
             self.assertIsNotNone(paragraph.find("{*}em"))
 
+    def test_publisher_epub_with_late_compressed_mimetype_is_normalized(self):
+        with zipfile.ZipFile(self.source) as archive:
+            members = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(self.source, "w") as archive:
+            for info, data in members:
+                if info.filename == "mimetype":
+                    continue
+                archive.writestr(info, data)
+            archive.writestr(
+                "mimetype", b"application/epub+zip",
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+        with zipfile.ZipFile(self.source) as archive:
+            self.assertNotEqual(archive.namelist()[0], "mimetype")
+            self.assertNotEqual(
+                archive.getinfo("mimetype").compress_type,
+                zipfile.ZIP_STORED,
+            )
+        chapters = self.extracted()
+        coverage = ep.audit(self.source, chapters)
+        output = ep.build(
+            self.source, [{"markdown": c.content} for c in chapters],
+            expected_source_sha256=coverage["source_sha256"], language="ru",
+        )
+        self.assertEqual(
+            ep.validate(output, source=self.source, expected_docs=5)["unit_count"], 2
+        )
+        with zipfile.ZipFile(io.BytesIO(output)) as result, zipfile.ZipFile(self.source) as original:
+            self.assertEqual(result.namelist()[0], "mimetype")
+            self.assertEqual(
+                result.getinfo("mimetype").compress_type,
+                zipfile.ZIP_STORED,
+            )
+            self.assertEqual(
+                set(result.namelist()), set(original.namelist())
+            )
+            self.assertEqual(result.read("OPS/front.jpg"), original.read("OPS/front.jpg"))
+
     def test_missing_or_duplicate_markers_are_blocked(self):
         sample='<!-- bt-block:000001 -->\nFirst\n\n<!-- bt-block:000002 -->\nSecond\n'
         for invalid in (sample.replace('000002','000001'),sample.replace('000001','000003'),sample.replace('Second',''),'Unmapped\n'+sample):
