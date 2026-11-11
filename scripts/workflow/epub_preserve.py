@@ -809,7 +809,16 @@ def build(
         replacements[opf] = ET.tostring(package, encoding="utf-8", xml_declaration=True)
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w") as dest:
+            if "mimetype" not in originals.namelist():
+                raise PreservedEpubError("Original EPUB is missing mimetype")
+            # EPUB packaging requires mimetype as the first STORED member,
+            # even if the imported source was compressed or ordered differently.
+            mime_info = deepcopy(originals.getinfo("mimetype"))
+            mime_info.compress_type = zipfile.ZIP_STORED
+            dest.writestr(mime_info, originals.read("mimetype"))
             for info in originals.infolist():
+                if info.filename == "mimetype":
+                    continue
                 dest.writestr(info, replacements.get(info.filename, originals.read(info.filename)))
         result = output.getvalue()
         validate(result, source=source, expected_docs=len(docs))
@@ -823,7 +832,10 @@ def validate(content: bytes, *, source: Path, expected_docs: int) -> dict[str, A
     if len(docs) != expected_docs:
         raise PreservedEpubError("EPUB source document count changed")
     with zipfile.ZipFile(source) as old, zipfile.ZipFile(io.BytesIO(content)) as new:
-        if old.namelist() != new.namelist():
+        expected_names = ["mimetype"] + [
+            path for path in old.namelist() if path != "mimetype"
+        ]
+        if new.namelist() != expected_names:
             raise PreservedEpubError("Output EPUB ZIP member list changed")
         infos = new.infolist()
         if not infos or infos[0].filename != "mimetype" or infos[0].compress_type != zipfile.ZIP_STORED:
