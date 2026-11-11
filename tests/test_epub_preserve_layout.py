@@ -868,7 +868,7 @@ class PreserveTests(unittest.TestCase):
             self.assertEqual(link.get("href"), "https://example.org/more")
             self.assertEqual("".join(link.itertext()), "подробнее")
             self.assertEqual("".join(paragraph.itertext()), "Читайте подробнее сегодня.")
-        with self.assertRaisesRegex(ep.PreservedEpubError, "did not match source links"):
+        with self.assertRaisesRegex(ep.PreservedEpubError, "explicit label binding"):
             ep.build(
                 **options,
                 link_bindings={"OPS/intro.xhtml#2:1": "подробнее"},
