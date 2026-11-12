@@ -18,7 +18,7 @@ from workflow.reviews import ReviewClaimError, ReviewEvidenceError, ReviewLedger
 from workflow.schemas import SCHEMA_VERSION, SchemaKind
 
 try:
-    from workflow.proposals import ProposalConflict, ProposalManager
+    from workflow.proposals import ProposalConflict, ProposalError, ProposalManager
 except (ImportError, ModuleNotFoundError):
     ProposalConflict = None
     ProposalManager = None
@@ -165,6 +165,27 @@ class WorkflowProposalTests(unittest.TestCase):
         self.assertFalse(result.changed_shared_state)
         self.assertEqual(self.storage.read("glossary.md"), glossary_before)
         self.assertIsNone(result.resolution["resulting_revision"])
+
+    def test_reconcile_rejects_unapproved_latin_character_name_for_ru(self):
+        self.storage.create_if_absent(
+            "metadata.json", b'{"target_language":"ru"}'
+        )
+        proposal = self.submit()
+        replacement = (
+            "# Glossary\n"
+            "| Original | Translation | Type | Notes |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Cade | Cade | character | Recurring character. |\n"
+        ).encode("utf-8")
+        before = self.storage.read("glossary.md")
+        with self.assertRaisesRegex(ProposalError, "Cade"):
+            self.manager().reconcile(
+                proposal.proposal["proposal_id"],
+                session_id="orchestrator-a",
+                accept=True,
+                replacement=replacement,
+            )
+        self.assertEqual(self.storage.read("glossary.md"), before)
 
     def test_reconcile_accepts_with_cas_and_persists_idempotent_resolution(self):
         proposal = self.submit(target="glossary")

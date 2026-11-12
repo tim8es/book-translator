@@ -9,6 +9,8 @@ import hashlib
 import re
 from collections import Counter
 
+from .glossary_guard import suspicious_untranslated_character_names
+
 NUMBERS = re.compile(r"(?<!\w)\d+(?:[.,]\d+)*(?!\w)")
 HEADINGS = re.compile(r"(?m)^#{1,6}\s+\S")
 BREAKS = re.compile(r"(?m)^\s*(?:\* ?\* ?\*|- ?- ?-|_{3,})\s*$")
@@ -57,7 +59,21 @@ def inspect(source: bytes, translation: bytes, glossary: str = "") -> dict:
         if src_count != dst_count:
             flag("structure", f"{kind}: source={src_count}, translation={dst_count}")
 
+    # The source may use Latin names where the Russian translation correctly
+    # transliterates and inflects them. Never turn a suspect glossary entry
+    # into a directive to replace natural Cyrillic text with Latin spelling.
+    suspects = set()
+    if re.search(r"[А-Яа-яЁё]", target):
+        suspects = set(suspicious_untranslated_character_names(glossary, "ru"))
+        for name in sorted(suspects):
+            if name.casefold() in original.casefold():
+                flag("glossary_script_risk",
+                     f"{name}: Latin spelling copied into Russian character glossary; "
+                     "review glossary against the source and target-language usage")
+
     for source_term, target_term in _glossary_pairs(glossary):
+        if source_term in suspects:
+            continue
         # Case-folded substring matching is a diagnostic, not a language-aware
         # validator; Russian inflection and synonyms can create false positives.
         if len(source_term) < 3 or len(target_term) < 3:

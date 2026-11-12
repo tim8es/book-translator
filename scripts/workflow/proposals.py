@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from .coordination import BookCoordinationManager, CoordinationError, CoordinationLease
+from .glossary_guard import suspicious_untranslated_character_names
 from .repository import RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError, SchemaKind
 from .shared_state import (
@@ -606,6 +607,36 @@ class ProposalManager:
             )
 
         target = proposal["target"]
+        if target == "glossary":
+            # Guard the authoritative shared-state write, not just an advisory
+            # preflight. Existing books without metadata remain compatible.
+            try:
+                metadata_bytes = self.repository.storage.read("metadata.json").content
+            except StorageNotFound:
+                target_language = ""
+            except StorageError as exc:
+                raise ProposalError(f"cannot validate glossary language: {exc}") from exc
+            else:
+                try:
+                    target_language = json.loads(metadata_bytes.decode("utf-8")).get(
+                        "target_language", ""
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as exc:
+                    raise ProposalError("cannot validate glossary against metadata") from exc
+            try:
+                candidate_glossary = replacement.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ProposalError("glossary must be UTF-8") from exc
+            suspects = suspicious_untranslated_character_names(
+                candidate_glossary, target_language
+            )
+            if suspects:
+                raise ProposalError(
+                    "Russian character glossary retains unapproved Latin names: "
+                    + ", ".join(suspects[:10])
+                    + "; transliterate or document a human-approved "
+                    "[latin-script-exception]"
+                )
         target_path = SHARED_STATE_PATHS[target]
         self._renew_reconciliation_lease(lease_state)
         try:

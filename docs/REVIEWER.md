@@ -36,7 +36,7 @@ For every section, check:
 16. Are significant repetitions preserved rather than automatically varied?
 17. Is meaningful rhythm, pacing, fragmentation, or sentence movement preserved?
 18. Are there misleading literal calques or false friends?
-19. Does the passage follow established glossary and style decisions?
+19. Does the passage follow established glossary and style decisions? If the glossary itself conflicts with natural target-language name spelling or inflection, identify the defective glossary decision instead of demanding a literal substitution of the name into the text.
 20. Is meaningful formatting preserved?
 21. If EPUB source has `<!-- bt-anchor:... -->` markers or `](#fragment)`
     links, are marker locations and link destinations preserved verbatim?

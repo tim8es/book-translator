@@ -25,6 +25,36 @@ class ReviewPreflightTests(unittest.TestCase):
         self.assertEqual(original, "The Warden opened the gate.".encode())
         self.assertEqual(target, "Страж открыл ворота.".encode())
 
+    def test_latin_character_glossary_is_flagged_not_enforced(self):
+        glossary = (
+            "| Original | Translation | Type | Notes |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Cade | Cade | character | Recurring character; keep consistent. |\n"
+        )
+        report = inspect(
+            b"Cade and I were friends.",
+            "Мы с Кейдом дружили.".encode("utf-8"),
+            glossary,
+        )
+        self.assertEqual(
+            [warning["kind"] for warning in report["warnings"]],
+            ["glossary_script_risk"],
+        )
+
+    def test_latin_brand_and_explicit_character_exception_are_not_flagged(self):
+        glossary = (
+            "| Original | Translation | Type | Notes |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Xbox | Xbox | brand | Retain trademark. |\n"
+            "| R2D2 | R2D2 | character | [latin-script-exception] Human approved. |\n"
+        )
+        report = inspect(
+            b"R2D2 plays Xbox.",
+            "R2D2 играет на Xbox.".encode("utf-8"),
+            glossary,
+        )
+        self.assertFalse(any(w["kind"] == "glossary_script_risk" for w in report["warnings"]))
+
     def test_clean_sample_does_not_claim_literary_pass(self):
         report = inspect("Five people spoke.".encode(), "Говорили пять человек.".encode())
         self.assertEqual(report["warnings"], [])

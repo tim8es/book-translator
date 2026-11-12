@@ -126,6 +126,8 @@ Use `glossary.md` for recurring lexical and continuity decisions that must remai
 
 Read the current glossary before translating or reviewing a chapter. Do not change an established rendering casually. If evidence justifies a better decision, propose the change and explain enough for the Orchestrator to apply it consistently.
 
+A glossary is a revisable linguistic decision, not proof that a translation is correct. For Russian translations, character names normally require Cyrillic spelling and grammatical inflection (for example, `Cade → Кейд`, `с Кейдом`). Never turn a correct inflected Cyrillic name into raw Latin spelling merely to match a glossary entry. If a character name was accidentally copied unchanged from Latin into a Russian glossary, report it as a glossary defect and reconcile the canonical entry before issuing terminology corrections. Only a documented human-approved `[latin-script-exception]` in the entry's notes permits intentionally retained Latin-script character names. This exception does not apply to brands, URLs, or titles that legitimately remain in Latin.
+
 ## Dialogue and character voice
 
 Dialogue should be natural in the target language while remaining specific to the speaker.
