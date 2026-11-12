@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from .coordination import BookCoordinationManager, CoordinationError, CoordinationLease
+from .glossary_guard import conflicting_glossary_entries
 from .repository import RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError, SchemaKind
 from .shared_state import (
@@ -606,6 +607,16 @@ class ProposalManager:
             )
 
         target = proposal["target"]
+        if target == "glossary":
+            # Reject contradictory mappings, not unchanged names or scripts.
+            try:
+                markdown = replacement.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ProposalError("glossary must be UTF-8") from exc
+            conflicts = conflicting_glossary_entries(markdown)
+            if conflicts:
+                raise ProposalError("conflicting glossary decisions for: "
+                                    + ", ".join(conflicts[:10]))
         target_path = SHARED_STATE_PATHS[target]
         self._renew_reconciliation_lease(lease_state)
         try:

@@ -25,6 +25,32 @@ class ReviewPreflightTests(unittest.TestCase):
         self.assertEqual(original, "The Warden opened the gate.".encode())
         self.assertEqual(target, "Страж открыл ворота.".encode())
 
+    def test_same_script_glossary_conflict_is_advisory(self):
+        glossary = (
+            "| Original | Translation | Type | Notes |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Cade | Cade | character | recurring |\n"
+        )
+        report = inspect(
+            b"Cade and I were friends.",
+            "Мы с Кейдом дружили.".encode("utf-8"),
+            glossary,
+        )
+        self.assertEqual(
+            [warning["kind"] for warning in report["warnings"]],
+            ["glossary_decision_review"],
+        )
+        self.assertTrue(report["advisory_only"])
+
+    def test_genuine_unmodified_english_names_still_permitted(self):
+        glossary = (
+            "| Original | Translation | Type | Notes |\n"
+            "| --- | --- | --- | --- |\n"
+            "| R2D2 | R2D2 | character | unchanged by decision |\n"
+        )
+        report = inspect(b"R2D2 left.", "R2D2 ушёл.".encode("utf-8"), glossary)
+        self.assertEqual(report["warnings"], [])
+
     def test_clean_sample_does_not_claim_literary_pass(self):
         report = inspect("Five people spoke.".encode(), "Говорили пять человек.".encode())
         self.assertEqual(report["warnings"], [])

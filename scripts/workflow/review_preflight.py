@@ -9,6 +9,8 @@ import hashlib
 import re
 from collections import Counter
 
+from .glossary_guard import glossary_mismatch_candidates
+
 NUMBERS = re.compile(r"(?<!\w)\d+(?:[.,]\d+)*(?!\w)")
 HEADINGS = re.compile(r"(?m)^#{1,6}\s+\S")
 BREAKS = re.compile(r"(?m)^\s*(?:\* ?\* ?\*|- ?- ?-|_{3,})\s*$")
@@ -57,13 +59,20 @@ def inspect(source: bytes, translation: bytes, glossary: str = "") -> dict:
         if src_count != dst_count:
             flag("structure", f"{kind}: source={src_count}, translation={dst_count}")
 
-    for source_term, target_term in _glossary_pairs(glossary):
-        # Case-folded substring matching is a diagnostic, not a language-aware
-        # validator; Russian inflection and synonyms can create false positives.
-        if len(source_term) < 3 or len(target_term) < 3:
-            continue
-        if source_term.casefold() in original.casefold() and target_term.casefold() not in target.casefold():
-            flag("glossary_candidate", f"{source_term} -> {target_term}: expected rendering not found exactly")
+    # Glossary comparisons are language-neutral advisory signals; neither exact
+    # matching nor the glossary itself proves that the translation is incorrect.
+    for entry in glossary_mismatch_candidates(original, target, glossary):
+        source_term, target_term = entry["original"], entry["translation"]
+        if entry["kind"] == "glossary_decision_review":
+            flag("glossary_decision_review",
+                 f"{source_term} -> {target_term}: source spelling is absent "
+                 "from the translation; inspect whether the glossary decision "
+                 "or a target-language adaptation is correct. Do not blindly "
+                 "replace a translated form with the glossary literal")
+        else:
+            flag("glossary_candidate",
+                 f"{source_term} -> {target_term}: exact rendering absent; "
+                 "may be an inflected form or a glossary mismatch (advisory only)")
 
     return {
         "schema_version": 1,

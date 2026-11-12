@@ -126,6 +126,10 @@ Use `glossary.md` for recurring lexical and continuity decisions that must remai
 
 Read the current glossary before translating or reviewing a chapter. Do not change an established rendering casually. If evidence justifies a better decision, propose the change and explain enough for the Orchestrator to apply it consistently.
 
+Glossary entries are source-term → target-language lexical decisions accompanied by type and contextual notes. They are not instructions to paste one literal string into every occurrence. Use the book's `source_language` and `target_language`; apply grammatical case, number, agreement, transliteration, or intentional unchanged spelling according to language and context. A glossary cannot be validated by writing-system assumptions.
+
+A glossary is revisable evidence, not proof that the translated text is wrong. If a canonical rendering conflicts with source meaning, natural target-language usage, or established usage in the book, flag the glossary decision for review with concrete evidence. Do not corrupt a correct translation to match a questionable glossary entry. The Orchestrator reconciles shared decisions, and the Reviewer independently rechecks impacted text. Automated exact-substring warnings are advisory, not literary-error evidence.
+
 ## Dialogue and character voice
 
 Dialogue should be natural in the target language while remaining specific to the speaker.
