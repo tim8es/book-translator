@@ -212,3 +212,33 @@ sentences and cross-paragraph dependencies, and perform an appropriate
 chapter-level continuity/completeness check. If a local edit affects distant
 references, structure, perspective or voice, perform full comparison. Old PASS
 never survives changed translation bytes without new current evidence.
+
+### Glossary reconciliation with an unchanged translation artifact
+
+For anchored v2 evidence, a previous unresolved finding normally requires a
+changed translation artifact before it may be resolved. A narrow exception is
+available when a **terminology-only** finding was caused by a glossary decision
+that has since been corrected and the unchanged translation already matches
+the new decision.
+
+The independent Reviewer must compare source and translation again. To close
+only that stale lexical finding, a resolved terminology recheck uses this
+additional provenance in the existing `resolves` object:
+
+```json
+{
+  "record_id": "<prior-record-id>",
+  "finding_id": "<prior-terminology-finding-id>",
+  "recheck_reason": "glossary_reconciliation",
+  "glossary_revision": "<current-claimed-glossary-SHA256>"
+}
+```
+
+The workflow verifies both review categories are terminology, the exact
+previous source/translation anchors are unchanged, the target artifact is
+unchanged, and the claimed glossary SHA-256 differs from the original review.
+The historical finding is retained. This does not permit automatic closure of
+meaning errors, omissions, additions, structure, style, or other issues; each
+still needs independently validated correction evidence. Do not invent a
+changed artifact or use this exception simply to obtain PASS. The check is
+language-agnostic and does not enforce literal target spellings.
