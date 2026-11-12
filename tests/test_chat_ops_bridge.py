@@ -29,6 +29,8 @@ def sample(operation="claim"):
         base.update({"translation": "Русский текст\n",
                      "translation_sha256": hashlib.sha256("Русский текст\n".encode()).hexdigest(),
                      "source_sha256": "a" * 64, "claim_sha256": "b" * 64})
+    if operation == "defer-review":
+        base["reason"] = "correction-limit"
     if operation == "review-record":
         base.update({"outcome": "PASS", "quality_report": {"checks": {}},
                      "source_sha256": "a" * 64, "translation_sha256": "c" * 64,
@@ -77,6 +79,30 @@ class RequestTests(unittest.TestCase):
                 self.assertEqual(control["mode"], mode)
             self.assertFalse((book / "progress.json").exists())
             self.assertFalse((book / ".workflow" / "claims").exists())
+
+    def test_defer_review_is_allowlisted_and_requires_reason(self):
+        payload = sample("defer-review")
+        self.assertEqual(bridge.validate(payload, RID)["reason"], "correction-limit")
+        for invalid in (None, "arbitrary-shell", 42, ""):
+            bad = dict(payload)
+            if invalid is None:
+                bad.pop("reason")
+            else:
+                bad["reason"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(bridge.RequestError):
+                bridge.validate(bad, RID)
+
+    def test_defer_review_runs_only_canonical_pinned_command(self):
+        payload = bridge.validate(sample("defer-review"), RID)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(bridge, "expected_book", return_value=(root, {})), \
+                 patch.object(bridge, "pinned_engine"), \
+                 patch.object(bridge, "cli", return_value={"unit_id": "chapter-000004"}) as cli:
+                result = bridge.execute(root, root, payload)
+            self.assertEqual(result["unit_id"], "chapter-000004")
+            cli.assert_any_call(root, "book.py", "defer-review", "test-book", "4",
+                                "--reason", "correction-limit", "--json")
 
     def test_unknown_operation_fails(self):
         obj = sample()

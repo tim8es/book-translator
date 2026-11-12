@@ -24,7 +24,7 @@ SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
 SESSION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 OPERATIONS = {"claim", "renew-claim", "release", "accept-translation",
               "review-record", "accept-review", "cleanup-claims",
-              "pause-auto", "resume-auto"}
+              "defer-review", "pause-auto", "resume-auto"}
 REQUESTS = Path(".chat-ops/requests")
 RESULTS = Path(".chat-ops/results")
 
@@ -86,12 +86,19 @@ def validate(raw: dict, file_id: str) -> dict:
                           "translation_sha256", "claim_sha256"},
         "accept-review": set(),
         "cleanup-claims": set(),
+        "defer-review": {"reason"},
         "pause-auto": set(),
         "resume-auto": set(),
     }[op]
     require(set(raw) == common | extras if op in {"accept-translation", "review-record"}
             else set(raw).issuperset(common) and set(raw).issubset(common | extras),
             "missing or unexpected request fields")
+    if op == "defer-review":
+        require(raw.get("reason") in {
+            "correction-limit", "review-round-limit", "model-anchor-retries",
+            "operator-attention",
+        } if isinstance(raw.get("reason"), str) else False,
+                "invalid or missing defer reason")
     if op == "claim":
         require(raw.get("role") in {"translator", "reviewer"}, "invalid claim role")
         if "base_commit" in raw:
@@ -255,6 +262,9 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
         return cli(root, "book.py", "claim", *args)
     if op == "cleanup-claims":
         return cli(root, "book.py", "cleanup-claims", slug, "--json")
+    if op == "defer-review":
+        return cli(root, "book.py", "defer-review", slug, chapter,
+                   "--reason", request["reason"], "--json")
     if op in {"renew-claim", "release"}:
         return cli(root, "book.py", op, slug, chapter, "--session-id", session, "--json")
     if op == "accept-translation":
