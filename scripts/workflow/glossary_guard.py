@@ -19,9 +19,11 @@ def glossary_entries(markdown: str) -> list[dict[str, str]]:
         if not line.lstrip().startswith("|"):
             continue
         cells = [cell.strip().replace(r"\|", "|") for cell in _ROW_SPLIT.split(line.strip().strip("|"))]
-        if len(cells) < 4 or not all(cells[:3]):
+        if len(cells) < 2 or not all(cells[:2]):
             continue
-        original, translation, kind, notes = cells[:4]
+        original, translation = cells[:2]
+        kind = cells[2] if len(cells) > 2 and cells[2] else "term"
+        notes = cells[3] if len(cells) > 3 else ""
         if original.casefold() in _HEADER or re.fullmatch(r"[-:\s]+", original):
             continue
         entries.append({"original": original, "translation": translation,
