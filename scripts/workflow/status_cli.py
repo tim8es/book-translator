@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from .filesystem import FilesystemStorage
+from .attention import AttentionManager, AttentionError, ATTENTION_REASONS
+from .reviews import ReviewLedgerManager
+from .schemas import SchemaKind
 from .repository import RepositoryError, WorkflowStateRepository
 from .session_planner import SessionPlanError, plan_sessions
 from .session_runtime import SessionRuntimeError, save_dispatch, load_dispatch, next_action
@@ -332,6 +335,35 @@ def session_next_command(args: argparse.Namespace, root: Path, preflight: Prefli
     return 1 if decision["action"] == "blocked" else 0
 
 
+def defer_review_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
+    """Persist exact-version needs-attention evidence, not an implicit PASS."""
+    snapshot = _snapshot(args, root, preflight)
+    if not snapshot.get("valid"):
+        raise StatusCliError("cannot defer a unit while canonical preflight is invalid")
+    unit = next((u for u in snapshot["units"]
+                 if u["chapter_number"] == args.chapter), None)
+    if unit is None or unit["lifecycle"] != "translated" or unit["review"] != "corrections_required":
+        raise StatusCliError("deferral requires a translated unit with current corrections-required review")
+    if any(claim.get("unit_id") == unit["unit_id"] for claim in snapshot.get("claims", [])):
+        raise StatusCliError("cannot defer a currently claimed unit")
+    book_dir = _book_directory(root, args.slug)
+    repository = WorkflowStateRepository(FilesystemStorage(book_dir))
+    try:
+        metadata = repository.read("metadata.json", SchemaKind.METADATA).data
+        progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+        review = ReviewLedgerManager(repository, artifact_reader=_artifact_reader(book_dir))
+        resolution = review.resolve_unit(progress, metadata, args.chapter)
+        entry = AttentionManager(repository).defer(
+            metadata["workflow"]["resolved_revision"], resolution, reason=args.reason)
+    except (AttentionError, StorageError, RepositoryError, SchemaError, ValueError) as exc:
+        raise StatusCliError(f"cannot record needs-attention entry: {exc}") from exc
+    if args.json:
+        _print_json(entry)
+    else:
+        print(f"needs_attention={entry['unit_id']} reason={entry['reason']}")
+    return 0
+
+
 def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
     status = _snapshot(args, root, preflight)
     resolver = _resolver(root, args.slug)
@@ -366,6 +398,8 @@ def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -
             print(f"ERROR: {error}")
     elif payload["operation"] == "complete":
         print("next=complete")
+    elif payload["operation"] == "needs_attention":
+        print("next=needs_attention units=" + ",".join(payload["units"]))
     elif payload["operation"] == "finalize":
         print(f"next=finalize role={payload['context']['role']}")
     elif payload["operation"] == "parallel":
@@ -441,6 +475,21 @@ def register_status_commands(
     resume.set_defaults(
         func=_adapt_errors(
             lambda args: resume_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
+
+    defer = subparsers.add_parser(
+        "defer-review",
+        help="Record a hash-bound, unresolved review for later attention; continue other chapters.",
+    )
+    defer.add_argument("slug")
+    defer.add_argument("chapter", type=int)
+    defer.add_argument("--reason", required=True, choices=sorted(ATTENTION_REASONS))
+    defer.add_argument("--json", action="store_true")
+    defer.set_defaults(
+        func=_adapt_errors(
+            lambda args: defer_review_command(args, root, resolved_preflight),
             error_factory,
         )
     )

@@ -8,6 +8,7 @@ from typing import Any
 
 from .context_routing import ContextRoutingError, contract_paths, read_manifest
 from .operations import next_unit_operation
+from .attention import AttentionManager, AttentionError, active_attention
 
 from .claims import ClaimManager, unit_id_for_chapter
 from .coordination import FINALIZATION_PATH
@@ -118,6 +119,7 @@ class StatusResolver:
             lifecycle[state] += 1
 
         review_states_by_number: dict[int, str] = {}
+        review_resolutions = []
         review_ledger_revision: str | None = None
         try:
             review_ledger_revision = self.repository.read(
@@ -129,7 +131,8 @@ class StatusResolver:
                 artifact_reader=self._artifact_reader,
             )
             verified_hashes: dict[tuple[str, str], str | None] = {}
-            for resolution in review_manager.resolve_all(progress, metadata):
+            review_resolutions = review_manager.resolve_all(progress, metadata)
+            for resolution in review_resolutions:
                 review_states_by_number[resolution.chapter_number] = resolution.state
                 verified_hashes[(resolution.unit_id, "source_sha256")] = resolution.source_sha256
                 verified_hashes[(resolution.unit_id, "translation_sha256")] = resolution.translation_sha256
@@ -174,6 +177,14 @@ class StatusResolver:
                 }
             )
 
+        attention_units = []
+        try:
+            queue, _ = AttentionManager(self.repository).load(workflow_revision)
+            attention_units = active_attention(
+                queue["entries"], review_resolutions, chapters)
+        except (AttentionError, StorageError, RepositoryError) as exc:
+            errors.append(f"needs-attention queue is invalid: {exc}")
+
         try:
             active_claims = ClaimManager(self.repository).list_active()
         except Exception as exc:
@@ -205,7 +216,7 @@ class StatusResolver:
             except StorageError as exc:
                 errors.append(f"{path} revision is unavailable: {exc}")
 
-        return {
+        result = {
             "schema_version": STATUS_SCHEMA_VERSION,
             "book_slug": progress.get("book_slug"),
             "workflow_revision": workflow_revision,
@@ -220,6 +231,9 @@ class StatusResolver:
             "units": units,
             "state_revisions": revisions,
         }
+        if attention_units:
+            result["needs_attention"] = attention_units
+        return result
 
     def resume(
         self,
@@ -258,6 +272,15 @@ class StatusResolver:
         units = status.get("units")
         if not isinstance(units, list):
             raise StatusError("status snapshot must contain units")
+        deferred = status.get("needs_attention", ())
+        known_units = {unit.get("unit_id") for unit in units
+                       if isinstance(unit, Mapping)}
+        if (not isinstance(deferred, (list, tuple))
+                or any(not isinstance(unit_id, str) or unit_id not in known_units
+                       for unit_id in deferred)
+                or len(set(deferred)) != len(deferred)):
+            raise StatusError("status snapshot has an invalid needs-attention list")
+        deferred_ids = set(deferred)
 
         if parallel is not None:
             assignments: list[dict[str, Any]] = []
@@ -278,6 +301,8 @@ class StatusResolver:
                 if unit_id in seen_units:
                     raise StatusError(f"status snapshot contains duplicate unit {unit_id}")
                 seen_units.add(unit_id)
+                if unit_id in deferred_ids:
+                    continue
                 if unit_id in claims_by_unit:
                     continue
 
@@ -312,6 +337,8 @@ class StatusResolver:
                 continue
 
             unit_id = unit.get("unit_id")
+            if unit_id in deferred_ids:
+                continue
             if unit_id in claims_by_unit:
                 return {
                     "schema_version": STATUS_SCHEMA_VERSION,
@@ -356,6 +383,14 @@ class StatusResolver:
                 "context": self._context(operation, unit, status),
             }
 
+        if deferred_ids:
+            return {
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "operation": "needs_attention",
+                "reason": "unreviewed_units_deferred",
+                "units": list(deferred),
+                "context": self._context("needs_attention", None, status),
+            }
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
             "operation": "complete",
