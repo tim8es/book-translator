@@ -53,11 +53,12 @@ class StructuralTranslationTests(unittest.TestCase):
         p = structure.plan(src)
         self.assertEqual(sum(x["kind"] == "link" for x in p["parts"]), 3)
         self.assertEqual(sum(x["kind"] == "epub_marker" for x in p["parts"]), 2)
-        self.assertEqual(sum(x["kind"] == "text" for x in p["parts"]), 3)
+        self.assertEqual(sum(x["kind"] == "text" for x in p["parts"]), 4)
         out = structure.render(p, {
             "s00001": "См.",
             "s00002": "или",
             "s00003": "и",
+            "s00004": ".",
         })
         self.assertIn("<!-- bt-block:01 -->", out)
         self.assertIn("<!-- bt-anchor:c2 -->", out)
