@@ -258,6 +258,15 @@ def _build_identity(
         raise EpubCliError(str(exc)) from exc
     link_bindings = {}
     if metadata_doc.data.get("layout_mode") == PRESERVE_MODE:
+        # A renderer repair must invalidate the previous EPUB even when the
+        # book's translation and review hashes have not changed. Otherwise
+        # epub_build_command can report "unchanged" and keep faulty pages.
+        renderer = Path(__file__).with_name("epub_preserve.py")
+        renderer_digest = hashlib.sha256(renderer.read_bytes()).hexdigest()
+        fingerprint = hashlib.sha256(
+            ("epub-preserved-renderer-v1:" + fingerprint + ":" +
+             renderer_digest).encode("ascii")
+        ).hexdigest()
         link_bindings, bindings_bytes = _read_link_bindings(book_dir)
         if bindings_bytes is not None:
             fingerprint = hashlib.sha256(
