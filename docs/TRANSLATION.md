@@ -126,7 +126,9 @@ Use `glossary.md` for recurring lexical and continuity decisions that must remai
 
 Read the current glossary before translating or reviewing a chapter. Do not change an established rendering casually. If evidence justifies a better decision, propose the change and explain enough for the Orchestrator to apply it consistently.
 
-A glossary is a revisable linguistic decision, not proof that a translation is correct. For Russian translations, character names normally require Cyrillic spelling and grammatical inflection (for example, `Cade → Кейд`, `с Кейдом`). Never turn a correct inflected Cyrillic name into raw Latin spelling merely to match a glossary entry. If a character name was accidentally copied unchanged from Latin into a Russian glossary, report it as a glossary defect and reconcile the canonical entry before issuing terminology corrections. Only a documented human-approved `[latin-script-exception]` in the entry's notes permits intentionally retained Latin-script character names. This exception does not apply to brands, URLs, or titles that legitimately remain in Latin.
+Glossary entries are source-term → target-language lexical decisions accompanied by type and contextual notes. They are not instructions to paste one literal string into every occurrence. Use the book's `source_language` and `target_language`; apply grammatical case, number, agreement, transliteration, or intentional unchanged spelling according to language and context. A glossary cannot be validated by writing-system assumptions.
+
+A glossary is revisable evidence, not proof that the translated text is wrong. If a canonical rendering conflicts with source meaning, natural target-language usage, or established usage in the book, flag the glossary decision for review with concrete evidence. Do not corrupt a correct translation to match a questionable glossary entry. The Orchestrator reconciles shared decisions, and the Reviewer independently rechecks impacted text. Automated exact-substring warnings are advisory, not literary-error evidence.
 
 ## Dialogue and character voice
 
