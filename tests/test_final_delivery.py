@@ -178,7 +178,7 @@ class FinalDeliveryTests(unittest.TestCase):
         self.assertIn("github.event.repository.private", workflow)
         self.assertIn("contents: read", workflow)
         self.assertNotIn("contents: write", workflow)
-        self.assertIn("ref: 3af03eab33bbbfc9937b676bca8fa02c96c8e70e", workflow)
+        self.assertIn("ref: 83b9ed832480747d71e424950f9aa4b446a5f48f", workflow)
         self.assertIn("--preflight-only", workflow)
         self.assertIn("--scratch", workflow)
         self.assertNotIn("git push", workflow)
