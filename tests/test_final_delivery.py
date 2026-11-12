@@ -170,5 +170,28 @@ class FinalDeliveryTests(unittest.TestCase):
             delivery.build(self.root, "sample-book", scratch)
 
 
+    def test_reusable_workflow_is_privacy_gated_and_read_only(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] /
+                    ".github/workflows/final-epub.yml").read_text("utf-8")
+        self.assertIn("workflow_call:", workflow)
+        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertIn("github.event.repository.private", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertIn("ref: 3af03eab33bbbfc9937b676bca8fa02c96c8e70e", workflow)
+        self.assertIn("--preflight-only", workflow)
+        self.assertIn("--scratch", workflow)
+        self.assertNotIn("git push", workflow)
+        self.assertNotIn("secrets.", workflow)
+
+    def test_verify_epub_rejects_manifest_path_escape(self) -> None:
+        self._artifact(self.book)
+        manifest = self._read("output/manifest.json")
+        manifest["artifact_path"] = "../escape.epub"
+        self._write("output/manifest.json", manifest)
+        with self.assertRaisesRegex(delivery.DeliveryError, "Unsafe"):
+            delivery.verify_epub(self.book, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
