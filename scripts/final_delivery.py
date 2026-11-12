@@ -18,6 +18,7 @@ from pathlib import Path
 
 PUBLIC_REPO = "https://github.com/tim8es/book-translator"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+SHA64 = re.compile(r"^[0-9a-f]{64}$")
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
 
 
@@ -63,7 +64,7 @@ def preflight(repository: Path, slug: str) -> dict:
     source = metadata.get("source") or {}
     source_sha = source.get("sha256")
     filename = source.get("filename")
-    if not isinstance(source_sha, str) or not SHA40.fullmatch(source_sha[:40]) or len(source_sha) != 64:
+    if not isinstance(source_sha, str) or not SHA64.fullmatch(source_sha):
         raise DeliveryError("Missing source SHA-256")
     if not isinstance(filename, str) or filename in ("", ".", "..") or Path(filename).name != filename:
         raise DeliveryError("Unsafe or missing original source filename")
@@ -162,15 +163,37 @@ def build(repository: Path, slug: str, scratch: Path) -> dict:
     (scratch / ".book-translator-install.json").write_text(
         json.dumps(marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    commands = [
-        ["scripts/book.py", "validate", slug],
-        ["scripts/corpus.py", "verify", slug],
-        ["scripts/book.py", "finalize", slug, "--json"],
-        ["scripts/book.py", "build", slug, "--format", "epub"],
-        ["scripts/book.py", "build-status", slug, "--json"],
-    ]
-    for args in commands:
-        _command([sys.executable, *args], scratch)
+    # The book-pinned CLI is not guaranteed to expose EPUB/finalize flags.
+    # All audited revisions expose these canonical library entrypoints.
+    _command([sys.executable, "scripts/book.py", "validate", slug], scratch)
+    _command([sys.executable, "scripts/corpus.py", "verify", slug], scratch)
+    engine_command = """
+import argparse
+from pathlib import Path
+from workflow.finalize_cli import finalize_command
+from workflow.epub_cli import epub_build_command, build_status_command
+from workflow.status_cli import default_preflight
+root = Path.cwd()
+slug = __import__("sys").argv[1]
+result = finalize_command(
+    argparse.Namespace(slug=slug, session_id=None, json=False),
+    root, preflight=lambda name: default_preflight(root, name),
+)
+if result != 0:
+    raise SystemExit("Pinned finalization rejected the book")
+result = epub_build_command(
+    argparse.Namespace(slug=slug, output=None, allow_unreviewed=False), root,
+)
+if result != 0:
+    raise SystemExit("Pinned EPUB renderer failed")
+result = build_status_command(
+    argparse.Namespace(slug=slug, format="epub", allow_unreviewed=False, json=True),
+    root,
+)
+if result != 0:
+    raise SystemExit("Pinned build-status check failed")
+"""
+    _command([sys.executable, "-c", engine_command, slug], scratch)
     delivered = verify_epub(book, plan["unit_count"])
     return {**plan, **delivered}
 
