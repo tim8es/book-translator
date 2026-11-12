@@ -80,6 +80,14 @@ Do not ask the user to choose internal worker topology, directories, slugs, help
 - Never copy another user's or example book contents into a new workspace.
 - Never commit credentials, API keys, tokens, or unrelated secrets.
 
+## Shared workflow and book-repository boundary
+
+- The canonical public `book-translator` repository owns shared translation, review, source handling, EPUB assembly, lifecycle logic, and their reusable tests. A book-state repository stores its own `books/<book-slug>/` state and may carry minimal repository-specific Actions entrypoints or private integration adapters; it must not become a second fork of the shared engine.
+- A book name, slug, or one-off delivery must **not** result in a dedicated `.github/workflows/*<book>*` workflow or a copied book-specific implementation. Use an existing parameterized workflow, or design one reusable workflow for all books. The caller supplies the book/job identity and executes the exact immutable `metadata.json.workflow.resolved_revision` selected for that book.
+- When an urgent one-off repair exposes a missing shared capability, improve the canonical public implementation and its regression tests rather than shipping a permanent per-book Action. Preserve existing pinned book revisions unless an explicit workflow upgrade is authorized.
+- Historical per-book Actions are deployment debt: do not reproduce them and do not delete them without first verifying replacement behavior, downstream dependencies, and existing book artifacts. Keeping an old Action temporarily does not make it normative.
+- Runtime secrets belong in the book repository's protected Actions secret/variable configuration, not in the public engine, committed JSON state, source files, or logs.
+
 ## Scope discipline
 
 Keep Book Translator file-based, inspectable, and resumable.
