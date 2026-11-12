@@ -169,7 +169,11 @@ def build(repository: Path, slug: str, scratch: Path) -> dict:
     _command([sys.executable, "scripts/corpus.py", "verify", slug], scratch)
     engine_command = """
 import argparse
+import sys
 from pathlib import Path
+# An isolated -c runner does not automatically add ./scripts to sys.path.
+# The pinned book.py CLI does; preserve that same import boundary here.
+sys.path.insert(0, str(Path.cwd() / "scripts"))
 from workflow.finalize_cli import finalize_command
 from workflow.epub_cli import epub_build_command, build_status_command
 from workflow.status_cli import default_preflight
