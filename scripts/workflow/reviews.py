@@ -440,6 +440,7 @@ class ReviewLedgerManager:
                 validated_quality, previous=history[-1] if history else None,
                 source_sha256=source_sha256, translation_sha256=translation_sha256,
                 outcome=outcome,
+                current_shared_state_revisions=claim.get("shared_state_revisions"),
             )
         except EvidenceAnchorError as exc:
             raise ReviewEvidenceError(f"source-linked review evidence failed: {exc}") from exc

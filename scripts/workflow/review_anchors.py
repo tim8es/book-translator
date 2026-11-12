@@ -13,6 +13,7 @@ from typing import Any
 
 FINDING_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 RECORD_ID = re.compile(r"^[0-9a-f]{32}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 CATEGORIES = {
     "omission", "addition", "meaning", "modality", "referent",
     "terminology", "register", "voice", "style", "structure",
@@ -66,8 +67,20 @@ def validate_v2_finding(finding: Any, number: int) -> dict[str, Any]:
         raise EvidenceAnchorError(f"{where} resolved finding requires a current translation anchor")
     resolves = finding["resolves"]
     if resolves is not None:
-        if not isinstance(resolves, Mapping) or set(resolves) != {"record_id", "finding_id"}:
-            raise EvidenceAnchorError(f"{where}.resolves requires record_id and finding_id")
+        base = {"record_id", "finding_id"}
+        reconciled = base | {"recheck_reason", "glossary_revision"}
+        if not isinstance(resolves, Mapping) or set(resolves) not in (base, reconciled):
+            raise EvidenceAnchorError(
+                f"{where}.resolves needs record_id/finding_id and optional "
+                "recheck_reason/glossary_revision pair"
+            )
+        if set(resolves) == reconciled:
+            if (resolves["recheck_reason"] != "glossary_reconciliation"
+                    or not isinstance(resolves["glossary_revision"], str)
+                    or SHA256.fullmatch(resolves["glossary_revision"]) is None):
+                raise EvidenceAnchorError(
+                    f"{where}.resolves needs an exact glossary reconciliation revision"
+                )
         if (not isinstance(resolves["record_id"], str)
                 or RECORD_ID.fullmatch(resolves["record_id"]) is None
                 or not isinstance(resolves["finding_id"], str)
@@ -125,8 +138,9 @@ def verify_correction_lineage(
     source_sha256: str,
     translation_sha256: str,
     outcome: str,
+    current_shared_state_revisions: Mapping[str, Any] | None = None,
 ) -> None:
-    """Do not allow a previous anchored unresolved issue to disappear on re-review."""
+    """Protect correction lineage while permitting audited lexical rechecks."""
     if previous is None or previous.get("source_sha256") != source_sha256:
         return
     prior_report = previous.get("quality_report")
@@ -153,10 +167,38 @@ def verify_correction_lineage(
         if old_id in references:
             raise EvidenceAnchorError(f"prior finding {old_id} was rechecked twice")
         references[old_id] = current
-        if current["resolved"] and translation_sha256 == previous["translation_sha256"]:
-            raise EvidenceAnchorError(
-                "cannot mark a prior correction resolved without a changed translation artifact"
+        unchanged_translation = translation_sha256 == previous["translation_sha256"]
+        has_reconciliation = "recheck_reason" in ref
+        if has_reconciliation and not current["resolved"]:
+            raise EvidenceAnchorError("glossary reconciliation must resolve a rechecked finding")
+        if has_reconciliation and not unchanged_translation:
+            raise EvidenceAnchorError("glossary-only reconciliation requires an unchanged translation")
+        if current["resolved"] and unchanged_translation:
+            old_snapshot = previous.get("shared_state_revisions")
+            old_glossary = (old_snapshot.get("glossary")
+                            if isinstance(old_snapshot, Mapping) else None)
+            new_snapshot = current_shared_state_revisions
+            new_glossary = (new_snapshot.get("glossary")
+                            if isinstance(new_snapshot, Mapping) else None)
+            prior = unresolved[old_id]
+            valid_reconciliation = (
+                has_reconciliation
+                and prior["category"] == "terminology"
+                and current["category"] == "terminology"
+                and isinstance(old_glossary, str)
+                and SHA256.fullmatch(old_glossary) is not None
+                and isinstance(new_glossary, str)
+                and SHA256.fullmatch(new_glossary) is not None
+                and old_glossary != new_glossary
+                and ref.get("glossary_revision") == new_glossary
+                and current["source_anchor"] == prior["source_anchor"]
+                and current["translation_anchor"] == prior["translation_anchor"]
             )
+            if not valid_reconciliation:
+                raise EvidenceAnchorError(
+                    "cannot mark a prior correction resolved without a changed translation artifact "
+                    "or audited terminology glossary reconciliation"
+                )
     missing = sorted(set(unresolved) - set(references))
     if missing:
         raise EvidenceAnchorError("prior unresolved findings lack explicit rechecks: " + ", ".join(missing))
