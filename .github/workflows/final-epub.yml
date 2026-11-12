@@ -40,7 +40,7 @@ jobs:
         with:
           repository: tim8es/book-translator
           # Reviewed, independent launcher code. Literary work uses the book's own pin.
-          ref: 3af03eab33bbbfc9937b676bca8fa02c96c8e70e
+          ref: 83b9ed832480747d71e424950f9aa4b446a5f48f
           path: delivery-runner
           persist-credentials: false
 
