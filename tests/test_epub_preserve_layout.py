@@ -89,6 +89,77 @@ class PreserveTests(unittest.TestCase):
                     data = data.replace(b'chapter.xhtml', b'chapter.html')
                 rewritten.writestr(info, data)
 
+    def install_textual_cover_fixture(self):
+        # A cover can contain an SVG image plus a short styled credit.
+        # It must not be re-serialized when its translation is unchanged.
+        self.replace_xhtml(
+            "OPS/cover.xhtml",
+            b"</svg>",
+            b'</svg><p class="publisher"><i>Publisher label</i></p>',
+        )
+        self.replace_xhtml(
+            "OPS/package.opf",
+            b"</spine></package>",
+            b'</spine><guide><reference type="cover" href="cover.xhtml" '
+            b'title="Cover"/></guide></package>',
+        )
+
+    def test_unchanged_textual_cover_is_byte_identical_and_first_in_spine(self):
+        self.install_textual_cover_fixture()
+        chapters = self.extracted()
+        self.assertEqual(len(chapters), 3)
+        self.assertIn("Publisher label", chapters[0].content)
+        report = ep.audit(self.source, chapters)
+        changed_chapter = chapters[2].content.replace(
+            "Once upon a time.", "Однажды."
+        )
+        output = ep.build(
+            self.source,
+            [{"markdown": chapters[0].content},
+             {"markdown": chapters[1].content},
+             {"markdown": changed_chapter}],
+            expected_source_sha256=report["source_sha256"], language="ru",
+        )
+        ep.validate(output, source=self.source, expected_docs=5)
+        with zipfile.ZipFile(self.source) as source, zipfile.ZipFile(io.BytesIO(output)) as result:
+            self.assertEqual(source.read("OPS/cover.xhtml"), result.read("OPS/cover.xhtml"))
+            self.assertEqual(source.read("OPS/front.jpg"), result.read("OPS/front.jpg"))
+            opf = ET.fromstring(result.read("OPS/package.opf"))
+            refs = [n for n in opf.iter() if n.tag.endswith("itemref")]
+            self.assertEqual(refs[0].get("idref"), "cover")
+            cover = ET.fromstring(result.read("OPS/cover.xhtml"))
+            self.assertEqual(
+                cover.find(".//{http://www.w3.org/2000/svg}image").get(
+                    "{http://www.w3.org/1999/xlink}href"
+                ), "front.jpg"
+            )
+            chapter = ET.fromstring(result.read("OPS/chapter.xhtml"))
+            self.assertIn("Однажды.", "".join(chapter.itertext()))
+
+    def test_changed_cover_text_is_not_silently_preserved(self):
+        self.install_textual_cover_fixture()
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        cover_text = chapters[0].content.replace(
+            "Publisher label", "Название издателя"
+        )
+        output = ep.build(
+            self.source,
+            [{"markdown": cover_text},
+             {"markdown": chapters[1].content},
+             {"markdown": chapters[2].content}],
+            expected_source_sha256=report["source_sha256"], language="ru",
+        )
+        with zipfile.ZipFile(self.source) as source, zipfile.ZipFile(io.BytesIO(output)) as result:
+            self.assertNotEqual(source.read("OPS/cover.xhtml"), result.read("OPS/cover.xhtml"))
+            cover = ET.fromstring(result.read("OPS/cover.xhtml"))
+            self.assertIn("Название издателя", "".join(cover.itertext()))
+            self.assertEqual(
+                cover.find(".//{http://www.w3.org/2000/svg}image").get(
+                    "{http://www.w3.org/1999/xlink}href"
+                ), "front.jpg"
+            )
+
     def test_html_spine_image_selects_preserved_layout_and_keeps_artwork(self):
         # The .html resource is declared as XHTML in OPF, as in real EPUBs.
         # Before the fix, read_epub used the lossy fallback and rejected <img>.
