@@ -107,6 +107,82 @@ class AnchoredReviewTests(unittest.TestCase):
                                       source_sha256="1" * 64, translation_sha256="3" * 64,
                                       outcome="PASS")
 
+    def test_glossary_change_resolves_only_lexical_review_without_text_edit(self):
+        old = finding("name-1")
+        old["category"] = "terminology"
+        previous = {
+            "record_id": "a" * 32, "outcome": "CORRECTIONS_REQUIRED",
+            "source_sha256": "1" * 64, "translation_sha256": "2" * 64,
+            "shared_state_revisions": {"glossary": "3" * 64},
+            "quality_report": report(old),
+        }
+        rechecked = finding("recheck-1", resolved=True, resolves={
+            "record_id": previous["record_id"], "finding_id": "name-1",
+            "recheck_reason": "glossary_reconciliation",
+            "glossary_revision": "4" * 64,
+        })
+        rechecked["category"] = "terminology"
+        current = report(rechecked)
+        checked = validate_quality_report(current, outcome="PASS")
+        self.assertEqual(checked["findings"][0]["resolves"]["glossary_revision"], "4" * 64)
+        verify_evidence_anchors(
+            checked, b"She might have recognized him.", "Она узнала его.".encode(),
+        )
+        verify_correction_lineage(
+            checked, previous=previous, source_sha256="1" * 64,
+            translation_sha256="2" * 64, outcome="PASS",
+            current_shared_state_revisions={"glossary": "4" * 64},
+        )
+        for snapshot in (
+            {"glossary": "3" * 64},
+            {"glossary": "5" * 64},
+            {},
+        ):
+            with self.assertRaisesRegex(EvidenceAnchorError, "glossary reconciliation"):
+                verify_correction_lineage(
+                    checked, previous=previous, source_sha256="1" * 64,
+                    translation_sha256="2" * 64, outcome="PASS",
+                    current_shared_state_revisions=snapshot,
+                )
+        rechecked["category"] = "meaning"
+        with self.assertRaisesRegex(EvidenceAnchorError, "glossary reconciliation"):
+            verify_correction_lineage(
+                current, previous=previous, source_sha256="1" * 64,
+                translation_sha256="2" * 64, outcome="PASS",
+                current_shared_state_revisions={"glossary": "4" * 64},
+            )
+
+    def test_glossary_change_cannot_resolve_semantic_errors(self):
+        old = finding("meaning-1")
+        previous = {
+            "record_id": "b" * 32, "outcome": "CORRECTIONS_REQUIRED",
+            "source_sha256": "1" * 64, "translation_sha256": "2" * 64,
+            "shared_state_revisions": {"glossary": "3" * 64},
+            "quality_report": report(old),
+        }
+        new = finding("recheck-1", resolved=True, resolves={
+            "record_id": previous["record_id"], "finding_id": "meaning-1",
+            "recheck_reason": "glossary_reconciliation",
+            "glossary_revision": "4" * 64,
+        })
+        with self.assertRaisesRegex(EvidenceAnchorError, "glossary reconciliation"):
+            verify_correction_lineage(
+                report(new), previous=previous, source_sha256="1" * 64,
+                translation_sha256="2" * 64, outcome="PASS",
+                current_shared_state_revisions={"glossary": "4" * 64},
+            )
+
+    def test_legacy_rechecks_and_wrong_reconciliation_schema_stay_rejected(self):
+        bad = finding("recheck", resolved=True, resolves={
+            "record_id": "a" * 32, "finding_id": "name-1",
+            "recheck_reason": "glossary_reconciliation",
+        })
+        with self.assertRaisesRegex(ReviewQualityError, "resolves"):
+            validate_quality_report(report(bad), outcome="PASS")
+        bad["resolves"]["glossary_revision"] = "bad"
+        with self.assertRaisesRegex(ReviewQualityError, "glossary"):
+            validate_quality_report(report(bad), outcome="PASS")
+
     def test_new_source_revision_does_not_inherit_old_finding_coordinates(self):
         previous = {
             "record_id": "a" * 32, "outcome": "CORRECTIONS_REQUIRED",
