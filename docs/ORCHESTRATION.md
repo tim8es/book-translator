@@ -271,6 +271,33 @@ python scripts/book.py accept-review <book-slug> <chapter>
 
 `accept-review` re-resolves current PASS evidence and compare-and-swaps `progress.json`; missing, stale, mismatched, or `CORRECTIONS_REQUIRED` evidence cannot produce `reviewed`.
 
+## Deferred review / needs attention (all runtimes)
+
+A single unit that exhausts bounded correction or review attempts must not stall
+unrelated chapters. The Orchestrator records a reviewed, rejected exact artifact
+using `python scripts/book.py defer-review <slug> <chapter> --reason correction-limit`
+(or `model-anchor-retries`, `review-round-limit`, `operator-attention`).
+The canonical repository stores `.workflow/needs-attention.json`, a
+compare-and-swap, workflow-revision- and source/translation/review-hash-bound
+queue. This is **not** a lifecycle state or a reviewer PASS: the affected unit
+remains `translated` with its `CORRECTIONS_REQUIRED` review, and all
+unresolved findings remain intact.
+
+Both ChatOps and Auto use the canonical `book.py resume` resolver: it skips
+only current queue entries with exactly matching artifact and reviewer evidence.
+A changed translation, a fresh review, or an accepted PASS invalidates the old
+skip automatically. The queue cannot waive a preflight error, an active claim,
+or a missing extracted source. If every other unit is handled, `resume`
+returns `needs_attention` with the remaining IDs instead of `complete`.
+Only after all units have current PASS and have been promoted to `reviewed`
+can normal `finalize` and EPUB build run. The operator explicitly resolves
+the deferred units by valid new work and review; do not manufacture PASS,
+silently promote unreviewed text, or hide attention entries.
+
+The correction-attempt budget itself belongs to the caller, but the decision to
+defer and the future selection of work use this shared contract. Backends must
+not maintain a second, diverging list of skipped units.
+
 ## Resume
 
 Repository state is authoritative, not chat history. For every resumed run:
