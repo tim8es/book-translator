@@ -1,38 +1,74 @@
-"""Conservative checks for accidental untransliterated character names.
+"""Language-independent glossary parsing and conservative consistency signals.
 
-This is a language-specific integrity guard, NOT a machine transliterator or
-a substitute for source-grounded literary review.
+These checks never transliterate or decide literary correctness.
 """
 from __future__ import annotations
 
+import json
 import re
+from collections import defaultdict
 
-_LATIN = re.compile(r"[A-Za-z]")
-_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-_EXCEPTION = "[latin-script-exception]"
+_ROW_SPLIT = re.compile(r"(?<!\\)\|")
+_HEADER = {"original", "source", "term", "оригинал"}
 
 
-def suspicious_untranslated_character_names(markdown: str, target_language: str) -> list[str]:
-    """Return names copied in Latin script in a Russian character glossary.
-
-    An explicitly reviewed Latin-script exception can be recorded in notes.
-    Other types (brands, links, book titles) are intentionally unaffected.
-    """
-    if not isinstance(target_language, str) or target_language.lower().split("-")[0] != "ru":
-        return []
-    names: list[str] = []
+def glossary_entries(markdown: str) -> list[dict[str, str]]:
+    """Parse standard four-column Markdown glossary into typed model context."""
+    entries: list[dict[str, str]] = []
     for line in markdown.splitlines():
-        if not line.startswith("|"):
+        if not line.lstrip().startswith("|"):
             continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) < 4:
+        cells = [cell.strip().replace(r"\|", "|") for cell in _ROW_SPLIT.split(line.strip().strip("|"))]
+        if len(cells) < 4 or not all(cells[:3]):
             continue
         original, translation, kind, notes = cells[:4]
-        if kind.casefold() not in {"character", "персонаж"}:
+        if original.casefold() in _HEADER or re.fullmatch(r"[-:\s]+", original):
             continue
-        if _EXCEPTION in notes.casefold():
+        entries.append({"original": original, "translation": translation,
+                        "type": kind, "notes": notes})
+    return entries
+
+
+def conflicting_glossary_entries(markdown: str) -> list[str]:
+    """Only structurally contradictory entries are forbidden; any script is valid."""
+    groups: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for entry in glossary_entries(markdown):
+        groups[(entry["original"].casefold(), entry["type"].casefold())].add(
+            entry["translation"].casefold()
+        )
+    return sorted(set(original for (original, _kind), values in groups.items()
+                      if len(values) > 1))
+
+
+def glossary_context(markdown: str, source_language: str, target_language: str) -> str:
+    """JSON context with explicit language pair, types, translations and notes."""
+    return json.dumps({
+        "source_language": source_language,
+        "target_language": target_language,
+        "entries": glossary_entries(markdown),
+        "guidance": (
+            "Glossary values are lexical decisions, not immutable surface strings. "
+            "Apply target-language morphology, grammatical agreement and context. "
+            "Intentionally unchanged proper names are permitted in any language. "
+            "If a decision contradicts the source or natural target-language usage, "
+            "propose a glossary correction with evidence instead of forcing a literal "
+            "replacement in correct translated prose."
+        ),
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+def glossary_mismatch_candidates(source: str, translation: str,
+                                 markdown: str) -> list[dict[str, str]]:
+    """Nonliteral mismatches for reviewer attention only (no automatic edits)."""
+    result = []
+    src, dst = source.casefold(), translation.casefold()
+    for entry in glossary_entries(markdown):
+        original, rendering = entry["original"], entry["translation"]
+        if len(original) < 3 or len(rendering) < 3:
             continue
-        if (_LATIN.search(original) and not _CYRILLIC.search(original)
-                and original.casefold() == translation.casefold()):
-            names.append(original)
-    return list(dict.fromkeys(names))
+        if original.casefold() not in src or rendering.casefold() in dst:
+            continue
+        kind = ("glossary_decision_review" if original.casefold() == rendering.casefold()
+                else "glossary_candidate")
+        result.append({**entry, "kind": kind})
+    return result
