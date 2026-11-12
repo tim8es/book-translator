@@ -46,17 +46,25 @@ class WorkflowEpicCloseoutContractTests(unittest.TestCase):
             orchestration,
         )
 
-    def test_only_generic_ci_and_explicit_manual_apify_workflows_exist(self):
+    def test_only_generic_ci_manual_or_reusable_workflows_exist(self):
         workflow_dir = PROJECT_ROOT / ".github" / "workflows"
         workflows = sorted(path.name for path in workflow_dir.glob("*.yml"))
-        allowed = {"tests.yml", "deploy-apify-private.yml", "smoke-apify-private.yml"}
+        allowed = {"tests.yml", "deploy-apify-private.yml", "smoke-apify-private.yml",
+                   "final-epub.yml"}
         self.assertIn("tests.yml", workflows)
         self.assertEqual(set(workflows) - allowed, set())
         for filename in workflows:
             if filename == "tests.yml":
                 continue
             source = (workflow_dir / filename).read_text(encoding="utf-8")
-            self.assertIn("workflow_dispatch:", source)
+            if filename == "final-epub.yml":
+                self.assertIn("workflow_call:", source)
+                self.assertNotIn("workflow_dispatch:", source)
+                self.assertIn("github.event.repository.private", source)
+                self.assertIn("contents: read", source)
+                self.assertNotIn("contents: write", source)
+            else:
+                self.assertIn("workflow_dispatch:", source)
             self.assertNotIn("  push:", source)
             self.assertNotIn("  pull_request:", source)
 

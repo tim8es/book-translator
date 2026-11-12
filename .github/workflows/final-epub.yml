@@ -1,0 +1,81 @@
+name: Shared verified EPUB delivery
+
+# Reusable public implementation; invoked only from a book-state repository.
+# One caller per requested book. No per-book YAML and no write-back to the repo.
+on:
+  workflow_call:
+    inputs:
+      book_slug:
+        description: Canonical books/<slug>/ identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Require private source repository
+        shell: bash
+        env:
+          CALLER_IS_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          if [[ "$CALLER_IS_PRIVATE" != "true" ]]; then
+            echo "::error::Book source repository must be private before final delivery."
+            exit 1
+          fi
+
+      - name: Check out caller book-state repository without retained credentials
+        uses: actions/checkout@v4
+        with:
+          path: book-state
+          persist-credentials: false
+
+      - name: Check out immutable public delivery runner
+        uses: actions/checkout@v4
+        with:
+          repository: tim8es/book-translator
+          # Reviewed, independent launcher code. Literary work uses the book's own pin.
+          ref: 83b9ed832480747d71e424950f9aa4b446a5f48f
+          path: delivery-runner
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read-only source and review preflight
+        shell: bash
+        env:
+          BOOK_SLUG: ${{ inputs.book_slug }}
+        run: |
+          set -euo pipefail
+          python delivery-runner/scripts/final_delivery.py \
+            --repository book-state --book "$BOOK_SLUG" --preflight-only
+
+      - name: Finalize and build with exact immutable book pin in disposable directory
+        shell: bash
+        env:
+          BOOK_SLUG: ${{ inputs.book_slug }}
+        run: |
+          set -euo pipefail
+          python delivery-runner/scripts/final_delivery.py \
+            --repository book-state --book "$BOOK_SLUG" \
+            --scratch "$RUNNER_TEMP/book-delivery"
+
+      - name: Upload independently verified EPUB and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-epub-${{ inputs.book_slug }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/book-delivery/books/${{ inputs.book_slug }}/output/*.epub
+            ${{ runner.temp }}/book-delivery/books/${{ inputs.book_slug }}/output/manifest.json
+            ${{ runner.temp }}/book-delivery/books/${{ inputs.book_slug }}/FINAL_QUALITY_GATES.md
+            ${{ runner.temp }}/book-delivery/books/${{ inputs.book_slug }}/REVIEW_REPORT.md
