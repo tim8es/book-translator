@@ -166,24 +166,34 @@ class WorkflowProposalTests(unittest.TestCase):
         self.assertEqual(self.storage.read("glossary.md"), glossary_before)
         self.assertIsNone(result.resolution["resulting_revision"])
 
-    def test_reconcile_rejects_unapproved_latin_character_name_for_ru(self):
-        self.storage.create_if_absent(
-            "metadata.json", b'{"target_language":"ru"}'
-        )
+    def test_reconcile_allows_unchanged_names_independent_of_target_language(self):
+        self.storage.create_if_absent("metadata.json", b'{"target_language":"ja"}')
         proposal = self.submit()
         replacement = (
-            "# Glossary\n"
-            "| Original | Translation | Type | Notes |\n"
+            "# Glossary\n| Original | Translation | Type | Notes |\n"
             "| --- | --- | --- | --- |\n"
-            "| Cade | Cade | character | Recurring character. |\n"
+            "| Dillon | Dillon | character | Preserve unchanged |\n"
+        ).encode("utf-8")
+        result = self.manager().reconcile(
+            proposal.proposal["proposal_id"],
+            session_id="orchestrator-a",
+            accept=True, replacement=replacement,
+        )
+        self.assertEqual(result.resolution["status"], "accepted")
+
+    def test_reconcile_rejects_conflicting_entries_with_no_mutation(self):
+        proposal = self.submit()
+        replacement = (
+            "# Glossary\n| Original | Translation | Type | Notes |\n"
+            "| --- | --- | --- | --- |\n"
+            "| Cade | Кейд | character | Name |\n"
+            "| Cade | Kaid | character | alternative |\n"
         ).encode("utf-8")
         before = self.storage.read("glossary.md")
-        with self.assertRaisesRegex(ProposalError, "Cade"):
+        with self.assertRaisesRegex(ProposalError, "conflicting glossary decisions"):
             self.manager().reconcile(
-                proposal.proposal["proposal_id"],
-                session_id="orchestrator-a",
-                accept=True,
-                replacement=replacement,
+                proposal.proposal["proposal_id"], session_id="orchestrator-a",
+                accept=True, replacement=replacement,
             )
         self.assertEqual(self.storage.read("glossary.md"), before)
 
