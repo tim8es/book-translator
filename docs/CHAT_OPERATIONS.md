@@ -36,6 +36,7 @@ Allowlisted operations:
 | `accept-translation` | `translation`, `translation_sha256`, `source_sha256`, `claim_sha256` | write chapter artifact and run `book.py accept-translation` |
 | `review-record` | `outcome`, `quality_report`, `source_sha256`, `translation_sha256`, `claim_sha256` | `book.py review-record` |
 | `accept-review` | none | `book.py accept-review` |
+| `defer-review` | `reason` = `correction-limit`, `review-round-limit`, `model-anchor-retries`, or `operator-attention` | Exact-artifact, CORRECTIONS_REQUIRED-only `book.py defer-review` queue entry; does not accept review |
 | `cleanup-claims` | none | `book.py cleanup-claims` |
 
 `shared_state` is `{"glossary": "<40-hex-Git-blob-SHA>", "style_guide": "<40-hex-Git-blob-SHA>"}`; it is required only for a parallel snapshot-bound claim and must be paired with `base_commit`. The executor checks the Git blob identities **before** converting to the filesystem backend's internal SHA-256 revision values. Never compare a Git blob SHA with a filesystem SHA-256 directly.
@@ -65,6 +66,7 @@ After receiving an `ok` claim receipt, fetch the exact current source, glossary,
 - The worker runs `book.py validate` and `corpus.py verify` before each mutation. It verifies the book's pinned revision, session claim ownership, expiry and artifact hashes before acceptance.
 - The job serializes writers **from this queue**, and Git's non-force `push` ensures remote changes are not silently overwritten. On a rejected push, the full request is re-evaluated from a fresh checkout. External direct writers must themselves respect canonical CAS; this queue cannot make arbitrary outside writers cooperative.
 - The executor never silently changes a book's pinned workflow revision. Existing translations, progress, and reviewed units are not migrated.
+- `defer-review` works only with a book pin that supports the canonical needs-attention queue, requires the current rejected reviewer record, and never creates PASS or bypasses finalization. Older pinned versions fail closed on this request.
 - A successful `claim` is not translation; a successful `review-record` is not automatically `reviewed`; `accept-review` remains a separate gate.
 - GitHub Actions must be permitted to push to `main` (or use a separately tested branch-gated publication policy). If branch protection denies the push, results remain absent and operations **must not** be reported successful.
 - Runner `GITHUB_TOKEN` pushes do not trigger additional runs; scheduled replay and manual dispatch are recovery paths. A large backlog is processed in bounded batches.
