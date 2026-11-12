@@ -681,8 +681,24 @@ def build(
     _, drop_classes = _source_style_classes(originals)
     replacements: dict[str, bytes] = {}
     try:
+        # Some cover XHTMLs mix a raster/SVG frontispiece with one small
+        # unmodified credit line. Re-serializing that XHTML can alter reader-
+        # sensitive namespace and viewport formatting even when no translation
+        # was needed. Retain the complete original page in that case.
+        source_package = ET.fromstring(originals.read(identity["opf_path"]))
+        cover_pages = {
+            _path(identity["opf_path"], ref.get("href", ""))
+            for ref in source_package.iter()
+            if _local(ref.tag) == "reference" and ref.get("type") == "cover"
+        }
         for doc, chapter in zip(textual, chapters):
             blocks = parse_blocks(chapter["markdown"], expected=len(doc.blocks))
+            if (doc.path in cover_pages and doc.images
+                    and blocks == (doc.formatted or doc.blocks)):
+                # This is not a translation shortcut: it applies only when
+                # every source-styled text block is byte-identical in Markdown.
+                # The source remains immutable, and the page is kept verbatim.
+                continue
             root = ET.fromstring(originals.read(doc.path))
             root.set("{http://www.w3.org/XML/1998/namespace}lang", language)
             root.set("lang", language)
