@@ -280,7 +280,7 @@ class ReviewLedgerManager:
         indexed_history: list[dict[str, Any]] | None = None,
     ) -> ReviewResolution:
         workflow_revision, contract_revision = self._workflow_context(metadata)
-        unit_id, _, source_sha256, translation_sha256 = self._artifact_identity(
+        unit_id, chapter, source_sha256, translation_sha256 = self._artifact_identity(
             progress,
             chapter_number,
             allow_untranslated=True,
