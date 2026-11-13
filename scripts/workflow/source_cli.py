@@ -24,6 +24,7 @@ from .source_updates import (
     source_revision_integrity_errors,
 )
 from .storage import StorageError
+from .upgrade_evidence import EvidenceUpgradeError, adopted_acceptance
 
 
 CURRENT_REVIEW_EVIDENCE = "review-ledger-v1"
@@ -205,6 +206,8 @@ def manifest_integrity_errors(
 def translation_acceptance_errors(
     metadata: Mapping[str, Any],
     progress: Mapping[str, Any],
+    *,
+    storage: Any | None = None,
 ) -> list[str]:
     """Reject translated-or-later state that bypassed Translator acceptance."""
 
@@ -237,9 +240,16 @@ def translation_acceptance_errors(
         if evidence.get("role") != "translator":
             errors.append(f"Chapter {number}: translation_acceptance role must be translator")
         if workflow_revision is not None and evidence.get("workflow_revision") != workflow_revision:
-            errors.append(
-                f"Chapter {number}: translation_acceptance uses another workflow revision"
-            )
+            try:
+                inherited = (adopted_acceptance(storage, metadata, chapter)
+                             if storage is not None else None)
+            except EvidenceUpgradeError as exc:
+                errors.append(f"Chapter {number}: invalid workflow-upgrade evidence: {exc}")
+                continue
+            if inherited is None:
+                errors.append(
+                    f"Chapter {number}: translation_acceptance uses another workflow revision"
+                )
     return errors
 
 
@@ -277,7 +287,9 @@ def _current_workspace_errors(book_module: Any, slug: str) -> list[str]:
             manifest = {}
         errors.extend(source_revision_integrity_errors(repository, metadata, progress, manifest))
     errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
-    errors.extend(translation_acceptance_errors(metadata, progress))
+    errors.extend(translation_acceptance_errors(
+        metadata, progress, storage=repository.storage,
+    ))
     return errors
 
 
