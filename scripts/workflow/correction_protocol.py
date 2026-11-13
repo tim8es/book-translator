@@ -22,6 +22,10 @@ _REPAIRABLE = {
     "an omission requires an insertion patch": "wrong_operation",
     "corrector patch operation is unsupported": "wrong_operation",
     "corrector insertion anchor is invalid": "invalid_anchor",
+    "corrector response must contain patches, glossary, style_guide": "invalid_fields",
+    "corrector must return a structured patch response": "invalid_fields",
+    "corrector patch must identify one unresolved finding exactly once": "invalid_fields",
+    "corrector patches are not bounded or no findings are open": "invalid_fields",
     "patch must target the reviewer's exact translation anchor": "wrong_anchor",
 }
 
