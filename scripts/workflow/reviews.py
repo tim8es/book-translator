@@ -23,6 +23,7 @@ from .review_anchors import (
 from .schemas import SCHEMA_VERSION, SchemaError, SchemaKind, parse_document
 from .shared_state import SharedStateError, SharedStateStale, require_current_shared_state
 from .storage import StorageAlreadyExists, StorageError, StorageNotFound, StorageVersionConflict
+from .upgrade_evidence import EvidenceUpgradeError, adopted_pass
 
 
 LEDGER_PATH = "review-ledger.json"
@@ -314,8 +315,16 @@ class ReviewLedgerManager:
             current = exact[-1]
             state = "pass" if current["outcome"] == "PASS" else "corrections_required"
         elif history:
-            current = None
-            state = "stale"
+            # A user-authorized workflow upgrade may carry an ORIGINAL hash-bound
+            # PASS forward. Do not rewrite its reviewer session or contract revision.
+            try:
+                current = adopted_pass(
+                    self.repository.storage, metadata, chapter,
+                    history, source_sha256, translation_sha256,
+                )
+            except EvidenceUpgradeError as exc:
+                raise ReviewEvidenceError(f"invalid workflow upgrade evidence: {exc}") from exc
+            state = "pass" if current is not None else "stale"
         else:
             current = None
             state = "missing"
