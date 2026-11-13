@@ -137,12 +137,13 @@ class WorkflowUpgradeEvidenceTests(unittest.TestCase):
         self.assertIsNone(adopted_acceptance(self.storage, self.meta, self.chapter))
 
     def test_modified_translation_or_review_record_is_never_pass(self):
-        with self.assertRaises(ReviewEvidenceError):
+        self.assertEqual(
             self.manager().resolve_unit(
                 self.progress, self.meta, 1, chapter_record={
                     **self.chapter, "translation_path": "missing.md",
                 },
-            )
+            ).state, "untranslated",
+        )
         # The old review is not silently re-labelled after an edited translation.
         changed = self.root / "translated/one.md"
         changed.write_bytes(b"edited target\n")
