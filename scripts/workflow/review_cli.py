@@ -28,6 +28,7 @@ from .storage import (
     StorageNotFound,
     StorageVersionConflict,
 )
+from .upgrade_evidence import EvidenceUpgradeError, adopted_acceptance
 from .translations import (
     AcceptTranslationResult,
     TranslationAcceptanceError,
@@ -126,8 +127,9 @@ def _require_current_translation_acceptance(
     progress: Mapping[str, Any],
     metadata: Mapping[str, Any],
     chapter_number: int,
+    repository: WorkflowStateRepository | None = None,
 ) -> None:
-    """Keep Reviewer operations behind the durable Translator acceptance gate."""
+    """Keep Reviewer work behind verified or explicitly adopted acceptance."""
 
     chapters = progress.get("chapters")
     if not isinstance(chapters, list):
@@ -167,9 +169,18 @@ def _require_current_translation_acceptance(
     if workflow_revision is None:
         raise ReviewCliError("metadata workflow revision is unavailable")
     if evidence.get("workflow_revision") != workflow_revision:
-        raise ReviewCliError(
-            f"chapter {chapter_number} translation_acceptance uses another workflow revision"
-        )
+        # Preserve original claim/revision; never manufacture a new acceptance.
+        try:
+            adopted = (
+                adopted_acceptance(repository.storage, metadata, chapter)
+                if repository is not None else None
+            )
+        except EvidenceUpgradeError as exc:
+            raise ReviewCliError(f"invalid workflow upgrade evidence: {exc}") from exc
+        if adopted is None:
+            raise ReviewCliError(
+                f"chapter {chapter_number} translation_acceptance uses another workflow revision"
+            )
 
 
 def _print_json(payload: Mapping[str, Any]) -> None:
@@ -247,7 +258,7 @@ def review_delta_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, _ = _load_progress(repository)
     metadata = _load_metadata(repository)
-    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    _require_current_translation_acceptance(progress, metadata, args.chapter, repository)
     chapter = next(ch for ch in progress["chapters"] if ch["number"] == args.chapter)
     manager = _manager(book_dir, repository)
     unit_id = unit_id_for_chapter(chapter)
@@ -286,7 +297,7 @@ def review_preflight_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, _ = _load_progress(repository)
     metadata = _load_metadata(repository)
-    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    _require_current_translation_acceptance(progress, metadata, args.chapter, repository)
     chapter = next(ch for ch in progress["chapters"] if ch["number"] == args.chapter)
     read = _artifact_reader(book_dir)
     try:
@@ -307,7 +318,7 @@ def review_record_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
     metadata = _load_metadata(repository)
-    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    _require_current_translation_acceptance(progress, metadata, args.chapter, repository)
     manager = _manager(book_dir, repository)
     review_commit = args.review_commit if args.review_commit is not None else _git_head(root)
     quality_report = None
@@ -423,7 +434,7 @@ def accept_review_command(args: argparse.Namespace, root: Path) -> int:
     book_dir, repository = _repository(root, args.slug)
     progress, progress_revision = _load_progress(repository)
     metadata = _load_metadata(repository)
-    _require_current_translation_acceptance(progress, metadata, args.chapter)
+    _require_current_translation_acceptance(progress, metadata, args.chapter, repository)
     manager = _manager(book_dir, repository)
     try:
         result = manager.accept_review(progress, progress_revision, metadata, args.chapter)
