@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from workflow.filesystem import FilesystemStorage
 from workflow.repository import LoadedDocument, WorkflowStateRepository
 from workflow.review_cli import ReviewCliError, _require_current_translation_acceptance
+from workflow.source_cli import translation_acceptance_errors
 from workflow.reviews import ReviewEvidenceError, ReviewLedgerManager
 from workflow.upgrade_evidence import (
     BRIDGE_PATH, EvidenceUpgradeError, adopted_acceptance, adopted_pass,
@@ -104,6 +105,7 @@ class WorkflowUpgradeEvidenceTests(unittest.TestCase):
 
     def test_historical_review_stays_original_and_passes_exact_bytes(self):
         _require_current_translation_acceptance(self.progress, self.meta, 1, self.repo)
+        self.assertEqual(translation_acceptance_errors(self.meta, self.progress, self.repo), [])
         current = self.manager().resolve_unit(self.progress, self.meta, 1)
         self.assertEqual(current.state, "pass")
         self.assertEqual(current.current_record, self.old_pass)
@@ -114,6 +116,10 @@ class WorkflowUpgradeEvidenceTests(unittest.TestCase):
         (self.root / BRIDGE_PATH).unlink()
         with self.assertRaisesRegex(ReviewCliError, "another workflow revision"):
             _require_current_translation_acceptance(self.progress, self.meta, 1, self.repo)
+        self.assertIn(
+            "translation_acceptance uses another workflow revision",
+            " ".join(translation_acceptance_errors(self.meta, self.progress, self.repo)),
+        )
         self.assertEqual(self.manager().resolve_unit(self.progress, self.meta, 1).state, "stale")
 
     def test_new_workflow_pin_or_book_source_drift_rejected(self):
