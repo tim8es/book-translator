@@ -15,6 +15,7 @@ from workflow.filesystem import FilesystemStorage
 from workflow.repository import LoadedDocument, WorkflowStateRepository
 from workflow.review_cli import ReviewCliError, _require_current_translation_acceptance
 from workflow.reviews import ReviewEvidenceError, ReviewLedgerManager
+from workflow.source_cli import translation_acceptance_errors
 from workflow.upgrade_evidence import (
     BRIDGE_PATH, EvidenceUpgradeError, adopted_acceptance, adopted_pass,
     fingerprint, read_upgrade_bridge,
@@ -109,6 +110,28 @@ class WorkflowUpgradeEvidenceTests(unittest.TestCase):
         self.assertEqual(current.current_record, self.old_pass)
         self.assertEqual(current.current_record["workflow_revision"], OLD)
         self.assertNotEqual(current.current_record["workflow_revision"], NEW)
+
+    def test_structural_preflight_reuses_only_audited_original_acceptance(self):
+        self.assertEqual(
+            translation_acceptance_errors(self.meta, self.progress, storage=self.storage),
+            [],
+        )
+        self.assertEqual(
+            translation_acceptance_errors(self.meta, self.progress),
+            ["Chapter 1: translation_acceptance uses another workflow revision"],
+        )
+        self.bridge["entries"][0]["acceptance_fingerprint"] = "0" * 64
+        self.write_bridge()
+        self.assertEqual(
+            translation_acceptance_errors(self.meta, self.progress, storage=self.storage),
+            ["Chapter 1: translation_acceptance uses another workflow revision"],
+        )
+        self.bridge["entries"][0]["acceptance_fingerprint"] = fingerprint(self.acceptance)
+        self.bridge["source_book_sha256"] = "0" * 64
+        self.write_bridge()
+        errors = translation_acceptance_errors(self.meta, self.progress, storage=self.storage)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("invalid workflow-upgrade evidence", errors[0])
 
     def test_without_bridge_old_acceptance_is_rejected(self):
         (self.root / BRIDGE_PATH).unlink()
