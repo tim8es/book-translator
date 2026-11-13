@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .filesystem import FilesystemStorage
-from .attention import AttentionManager, AttentionError, ATTENTION_REASONS
+from .attention import (AttentionManager, AttentionError, ATTENTION_REASONS,
+                        TRANSLATION_REASONS)
 from .reviews import ReviewLedgerManager
 from .schemas import SchemaKind
 from .repository import RepositoryError, WorkflowStateRepository
@@ -364,6 +365,73 @@ def defer_review_command(args: argparse.Namespace, root: Path, preflight: Prefli
     return 0
 
 
+
+def defer_translation_command(args: argparse.Namespace, root: Path,
+                              preflight: Preflight) -> int:
+    """Skip only a verified extracted source unit with no active claim."""
+    snapshot = _snapshot(args, root, preflight)
+    if not snapshot.get("valid"):
+        raise StatusCliError("cannot defer translation while canonical preflight is invalid")
+    unit = next((u for u in snapshot["units"]
+                 if u["chapter_number"] == args.chapter), None)
+    if (unit is None or unit["lifecycle"] != "extracted"
+            or unit["review"] != "untranslated"):
+        raise StatusCliError("deferral requires an extracted unit without accepted translation")
+    if any(claim.get("unit_id") == unit["unit_id"]
+           for claim in snapshot.get("claims", [])):
+        raise StatusCliError("cannot defer a currently claimed unit")
+    book_dir = _book_directory(root, args.slug)
+    repository = WorkflowStateRepository(FilesystemStorage(book_dir))
+    try:
+        metadata = repository.read("metadata.json", SchemaKind.METADATA).data
+        progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+        review = ReviewLedgerManager(repository, artifact_reader=_artifact_reader(book_dir))
+        resolution = review.resolve_unit(progress, metadata, args.chapter)
+        if resolution.unit_id != unit["unit_id"]:
+            raise StatusCliError("translation deferral source identity changed")
+        entry = AttentionManager(repository).defer_translation(
+            metadata["workflow"]["resolved_revision"], resolution, reason=args.reason)
+    except (AttentionError, StorageError, RepositoryError, SchemaError, ValueError) as exc:
+        raise StatusCliError(f"cannot defer untranslated unit: {exc}") from exc
+    if args.json:
+        _print_json(entry)
+    else:
+        print(f"needs_attention={entry['unit_id']} reason={entry['reason']}")
+    return 0
+
+
+def retry_attention_command(args: argparse.Namespace, root: Path,
+                            preflight: Preflight) -> int:
+    """Explicitly re-admit one exact unresolved unit without forging its state."""
+    snapshot = _snapshot(args, root, preflight)
+    if not snapshot.get("valid"):
+        raise StatusCliError("cannot retry attention while canonical preflight is invalid")
+    unit = next((u for u in snapshot["units"]
+                 if u["chapter_number"] == args.chapter), None)
+    if unit is None:
+        raise StatusCliError("attention retry unit does not exist")
+    if any(claim.get("unit_id") == unit["unit_id"]
+           for claim in snapshot.get("claims", [])):
+        raise StatusCliError("cannot retry a currently claimed unit")
+    book_dir = _book_directory(root, args.slug)
+    repository = WorkflowStateRepository(FilesystemStorage(book_dir))
+    try:
+        metadata = repository.read("metadata.json", SchemaKind.METADATA).data
+        progress = repository.read("progress.json", SchemaKind.PROGRESS).data
+        review = ReviewLedgerManager(repository, artifact_reader=_artifact_reader(book_dir))
+        resolution = review.resolve_unit(progress, metadata, args.chapter)
+        changed = AttentionManager(repository).retry(
+            metadata["workflow"]["resolved_revision"], resolution)
+    except (AttentionError, StorageError, RepositoryError, SchemaError, ValueError) as exc:
+        raise StatusCliError(f"cannot re-admit attention unit: {exc}") from exc
+    payload = {"unit_id": unit["unit_id"], "readmitted": changed}
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"attention_readmitted={str(changed).lower()} unit={unit['unit_id']}")
+    return 0
+
+
 def resume_command(args: argparse.Namespace, root: Path, preflight: Preflight) -> int:
     status = _snapshot(args, root, preflight)
     resolver = _resolver(root, args.slug)
@@ -490,6 +558,37 @@ def register_status_commands(
     defer.set_defaults(
         func=_adapt_errors(
             lambda args: defer_review_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
+
+
+    defer_translation = subparsers.add_parser(
+        "defer-translation",
+        help="Record an exact-source, untranslated unit that exhausted model attempts.",
+    )
+    defer_translation.add_argument("slug")
+    defer_translation.add_argument("chapter", type=int)
+    defer_translation.add_argument("--reason", required=True,
+                                   choices=sorted(TRANSLATION_REASONS))
+    defer_translation.add_argument("--json", action="store_true")
+    defer_translation.set_defaults(
+        func=_adapt_errors(
+            lambda args: defer_translation_command(args, root, resolved_preflight),
+            error_factory,
+        )
+    )
+
+    retry_attention = subparsers.add_parser(
+        "retry-attention",
+        help="Explicitly re-admit one unchanged deferred unit for new work.",
+    )
+    retry_attention.add_argument("slug")
+    retry_attention.add_argument("chapter", type=int)
+    retry_attention.add_argument("--json", action="store_true")
+    retry_attention.set_defaults(
+        func=_adapt_errors(
+            lambda args: retry_attention_command(args, root, resolved_preflight),
             error_factory,
         )
     )
