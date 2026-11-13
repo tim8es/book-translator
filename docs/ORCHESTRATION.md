@@ -383,3 +383,39 @@ memory revisions remain pinned, the accepted translation is current, review is
 still required, the Reviewer session differs from the accepted Translator session,
 and the supplied Git/shared-state snapshot matches. Existing CAS and lease
 requirements apply. Translator claims still require a saved wave dispatch.
+
+## Explicit workflow-upgrade reuse of unchanged evidence
+
+A book never silently changes its pinned workflow. When the user authorizes an
+upgrade, the Orchestrator may preserve existing accepted translations and
+historical PASS records **without replaying the entire independent review**
+only through the book-local `.workflow/workflow-upgrade-evidence.json` bridge.
+
+The bridge is a separately audited import manifest with schema_version=1,
+kind=`adopt-unchanged-historical-translation-and-review`, original/target
+40-character Git commit identities, the original sealed book SHA-256, the
+pre-upgrade progress/ledger Git blob IDs, and one entry per reused unit.
+Each entry records stable unit_id, original source and translation SHA-256,
+the canonical JSON SHA-256 fingerprint of the **original** translator
+acceptance, and (only if a current historical PASS existed) the original
+PASS record ID and canonical fingerprint. Do not add a PASS reference for
+unreviewed or rejected units.
+
+The active book metadata must pin the exact target revision. The source
+identity must remain unchanged. Old translation acceptance objects retain
+their original `workflow_revision` and immutable translator claim details;
+old PASS records retain their original reviewer session, contract, and
+record ID. Hash-bound bridge verification allows the current workflow to
+*reuse the unchanged historical result*, not to pretend that a new Reviewer
+session ran. Any mismatching hash, changed artifact, altered record, changed
+pin, duplicate unit, or malformed bridge fails closed. A newer review supersedes
+historical evidence in the normal way.
+
+Migration must be explicit, isolated to the chosen book, inspectable in Git
+history, and validated with canonical status/validate/corpus verification
+before an Auto job is unblocked. Do not delete the historical ledger or
+relabel old claims as new claims. Any glossary inconsistencies documented by
+earlier audits remain separate quality obligations and must not be silenced
+by reusing historical PASS. Correct affected text or decisions with a
+targeted source-grounded check; do not blindly redo every chapter and do
+not confuse migration reuse with fresh literary review.
