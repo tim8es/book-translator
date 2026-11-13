@@ -39,6 +39,20 @@ accept-translation and independent Reviewer PASS are still mandatory.
 - Source ingestion and coverage verification still own safe conversion into
   verified Markdown units; the helper does not reinterpret raw source formats.
 
+## Structured protocol recovery and coverage gate
+
+Callers may use `protocol_failure_code` to classify a rejected model output
+as a repairable protocol error. Transport, source, plan and persisted-state
+errors are not repairable by this path. `repair_guidance` generates one focused
+single-span JSON instruction with the canonical source ID. A caller must
+durably reserve the additional paid model invocation before retrying, preserve
+already accepted segments, and never relax `parse_batch` or `render`.
+
+The pure `coverage_alert` is a conservative truncation alarm for long units:
+both length and paragraph coverage must be substantially below the source.
+It is a fail-closed pre-acceptance indicator, not proof of semantic
+completeness; independent review remains mandatory.
+
 ## Tests
 
 Tests in tests/test_structural_translation.py cover external/internal and
