@@ -343,7 +343,7 @@ It refuses stale or changed evidence and active claims. External model
 fallbacks and retry budgets belong to the Auto adapter; the canonical queue
 never authorizes an automatic retry of unknown/corrupted input or unlimited
 API calls. Existing books keep their pinned workflow revision and acquire
-these new canonical commands only through an explicit workflow upgrade.
+these new canonical commands only through an explicit revision migration.
 
 ## Deferred review / needs attention (all runtimes)
 
