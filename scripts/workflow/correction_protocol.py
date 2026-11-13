@@ -76,7 +76,8 @@ def repair_spec(findings: Sequence[Mapping], error: str | None = None) -> dict:
         omission = anchor is None
         items.append({
             "finding_id": finding["id"],
-            "operation": ("insert_before|insert_after" if omission\n                          else "replace|insert_before|insert_after"),
+            "operation": ("insert_before|insert_after" if omission
+                          else "replace|insert_before|insert_after"),
             "required_keys": (
                 ["finding_id", "operation", "replacement", "insertion_anchor"]
                 if omission else ["finding_id", "operation", "replacement"]
