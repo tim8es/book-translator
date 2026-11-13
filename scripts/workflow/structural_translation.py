@@ -125,6 +125,61 @@ def next_spans(translation_plan: dict, completed: dict,
     return [x for x in available if x["id"] not in completed][:limit]
 
 
+
+# Only rejected model-output protocol defects are eligible for focused retry.
+# Source, persisted-state and plan validation errors are never model retries.
+_PROTOCOL_FAILURES = {
+    "incomplete structural translation JSON": "json_incomplete",
+    "structural translator must return JSON": "json_invalid",
+    "structural translator JSON schema mismatch": "schema_mismatch",
+    "structural translation omitted or overflowed a batch": "invalid_batch_size",
+    "unknown or duplicate translation segment": "invalid_segment_id",
+    "unsafe translated segment": "unsafe_segment",
+}
+
+
+def protocol_failure_code(error: str) -> str | None:
+    """Classify rejected model output, never an infrastructure failure."""
+    return _PROTOCOL_FAILURES.get(error) if isinstance(error, str) else None
+
+
+def repair_guidance(selected: list[dict], error: str) -> str:
+    """Explain one source-ID-bound retry without trusting model coordinates."""
+    failure = protocol_failure_code(error)
+    if failure is None:
+        raise StructureError("structural failure is not a model protocol error")
+    if (not isinstance(selected, list) or len(selected) != 1
+            or not isinstance(selected[0], dict)
+            or not ID_RE.fullmatch(str(selected[0].get("id", "")))
+            or not isinstance(selected[0].get("source"), str)
+            or not selected[0]["source"].strip()):
+        raise StructureError("focused structural retry requires one source span")
+    return json.dumps({
+        "previous_response_rejected": failure,
+        "required_segment_id": selected[0]["id"],
+        "instructions": (
+            "Translate only the supplied single source span. Return a JSON object, "
+            "not Markdown or commentary. Use exactly the required ID; no extra IDs, "
+            "URLs, links, EPUB markers or placeholders. Preserve the complete "
+            "meaning and paragraph structure of the source."
+        ),
+        "required_shape": {
+            "segments": [{"id": selected[0]["id"], "translation": "translated source text"}],
+            "glossary": [], "style_guide": [],
+        },
+    }, ensure_ascii=False)
+
+
+def coverage_alert(source: str, translation: str) -> bool:
+    """Conservative pre-acceptance truncation alarm; not a literary PASS."""
+    if not isinstance(source, str) or not isinstance(translation, str):
+        raise StructureError("coverage input must be text")
+    source_paragraphs = sum(bool(p.strip()) for p in re.split(r"\n\s*\n", source))
+    translation_paragraphs = sum(bool(p.strip()) for p in re.split(r"\n\s*\n", translation))
+    return (len(source) >= 3500 and source_paragraphs >= 15
+            and len(translation) * 100 < len(source) * 70
+            and translation_paragraphs * 100 < source_paragraphs * 70)
+
 def parse_batch(response: str, expected_ids: list[str]) -> tuple[dict, list, list]:
     """Accept only nonempty, source-identified translation proposals."""
     if (not isinstance(response, str) or not isinstance(expected_ids, list)

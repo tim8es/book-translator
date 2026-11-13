@@ -132,5 +132,41 @@ class StructuralTranslationTests(unittest.TestCase):
         self.assertEqual(out, "Вверх [read](#x) вниз [read](#x) конец.\n")
 
 
+
+    def test_protocol_failure_codes_repair_only_rejected_model_output(self):
+        self.assertEqual(structure.protocol_failure_code(
+            "structural translator must return JSON"), "json_invalid")
+        self.assertEqual(structure.protocol_failure_code(
+            "unknown or duplicate translation segment"), "invalid_segment_id")
+        for infrastructure in ("invalid translation structure plan",
+                               "invalid persisted segment translations",
+                               "model transport timeout or connection failure",
+                               "source changed during structural translation"):
+            self.assertIsNone(structure.protocol_failure_code(infrastructure))
+            with self.assertRaisesRegex(structure.StructureError, "not a model protocol"):
+                structure.repair_guidance(
+                    [{"id": "s00001", "source": "A sentence"}], infrastructure)
+
+    def test_focused_schema_guidance_binds_exact_id(self):
+        payload = json.loads(structure.repair_guidance(
+            [{"id": "s00002", "source": "A sentence"}],
+            "structural translator JSON schema mismatch"))
+        self.assertEqual(payload["required_segment_id"], "s00002")
+        self.assertEqual(payload["required_shape"]["segments"][0]["id"], "s00002")
+        self.assertEqual(payload["required_shape"]["glossary"], [])
+        with self.assertRaisesRegex(structure.StructureError, "one source span"):
+            structure.repair_guidance(
+                [{"id": "s00001", "source": "A"}, {"id": "s00002", "source": "B"}],
+                "structural translator must return JSON")
+
+    def test_coverage_alerts_on_large_missing_paragraphs_before_acceptance(self):
+        source = ("A source paragraph with many words and context. " * 4 + "\n\n") * 30
+        truncated = ("Перевод одного абзаца.\n\n") * 9
+        complete = ("Полный перевод исходного абзаца с контекстом и словами. " * 4 + "\n\n") * 30
+        self.assertTrue(structure.coverage_alert(source, truncated))
+        self.assertFalse(structure.coverage_alert(source, complete))
+        self.assertFalse(structure.coverage_alert("Short text.", "Краткий текст."))
+
+
 if __name__ == "__main__":
     unittest.main()
