@@ -303,6 +303,48 @@ other eligible units without declaring the book complete. If every remaining
 unit needs attention, return a visible `needs_attention` result and require
 actual correction plus independent PASS before final EPUB.
 
+## Source-bound deferred translation / needs attention
+
+When an extracted unit has exhausted **bounded model-output repair** (invalid
+JSON, unsafe model-produced markup, or incomplete candidate translation),
+the Orchestrator may use the canonical command:
+
+```bash
+python scripts/book.py defer-translation <slug> <chapter> --reason model-output-exhausted
+```
+
+A probable truncation after bounded repairs uses `model-coverage-exhausted`.
+Only a validated, independently extracted **untranslated** unit with a current
+source SHA-256, no active claim, a valid sealed corpus and preflight may be
+deferred. Do not defer transport errors, provider configuration, rate limits,
+source corruption, unsafe/unknown source identity or Git/CAS problems. Those
+failures are infrastructure/recovery concerns and **cannot** be deemed safe
+model-output failures.
+
+The same `.workflow/needs-attention.json` queue accepts either the existing
+legacy review entry or an explicit `kind: translation` entry with exact
+`unit_id`, `source_sha256`, `reason` and timestamp. No review record,
+translation acceptance, or PASS is synthesized. Existing review queue entries
+remain readable without migration. The shared canonical `resume` planner
+skips exactly current source-bound entries (both serial and parallel plans)
+while selecting other independent units. A source change or accepted
+translation automatically makes that entry inactive. Every outstanding entry
+keeps `resume` at `needs_attention` rather than `complete`. Final EPUB
+must not be built until every unit has current independent PASS.
+
+To retry one unchanged attention item after diagnosis, use the explicit,
+CAS-checked command:
+
+```bash
+python scripts/book.py retry-attention <slug> <chapter>
+```
+
+It refuses stale or changed evidence and active claims. External model
+fallbacks and retry budgets belong to the Auto adapter; the canonical queue
+never authorizes an automatic retry of unknown/corrupted input or unlimited
+API calls. Existing books keep their pinned workflow revision and acquire
+these new canonical commands only through an explicit revision migration.
+
 ## Deferred review / needs attention (all runtimes)
 
 A single unit that exhausts bounded correction or review attempts must not stall
