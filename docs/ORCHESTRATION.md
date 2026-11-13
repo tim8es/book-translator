@@ -271,6 +271,38 @@ python scripts/book.py accept-review <book-slug> <chapter>
 
 `accept-review` re-resolves current PASS evidence and compare-and-swaps `progress.json`; missing, stale, mismatched, or `CORRECTIONS_REQUIRED` evidence cannot produce `reviewed`.
 
+## Structured correction protocol (all runtimes)
+
+The public `scripts/workflow/correction_protocol.py` module defines a
+backend-neutral, **pure** contract for bounded reviewer-linked edits. It is
+also available as an explicitly pinned compatibility helper for an older
+book's private automation adapter; loading a helper does not silently upgrade
+the book's literary workflow revision.
+
+The Orchestrator derives the permitted operation and fields from the current
+SHA-bound `quality_report.findings[].translation_anchor`, **not** the
+reported error category. A non-null translation anchor permits strictly
+reviewer-bound edits; only a null anchor may request a model-selected
+`insertion_anchor`. The model may propose words, but cannot redefine a
+reviewer's exact target coordinates. Source omission repairs must be
+nonempty and bounded to the missing passage. Reject an oversized insertion,
+a whole-unit rewrite disguised as a local patch, an incorrect/ambiguous
+insertion address, and altered EPUB/link delimiters without modifying the
+accepted artifact.
+
+Provider errors have different handling from model-output protocol errors.
+For a classifiable protocol failure, an Auto or ChatOps adapter may reserve
+one additional tracked call with explicit error feedback and typed field
+requirements. Never replay an unsafe output, treat a protocol retry as
+proof of literary correctness, silently increase a maximum size, or count
+a transport failure as a schema error.
+
+After bounded unsuccessful corrections, use the canonical `defer-review`
+with the latest unchanged rejected artifact and explicit evidence. Continue
+other eligible units without declaring the book complete. If every remaining
+unit needs attention, return a visible `needs_attention` result and require
+actual correction plus independent PASS before final EPUB.
+
 ## Deferred review / needs attention (all runtimes)
 
 A single unit that exhausts bounded correction or review attempts must not stall
