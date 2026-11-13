@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .claims import unit_id_for_chapter
-from .repository import RepositoryError
+from .repository import RepositoryError, WorkflowStateRepository
+from .upgrade_evidence import EvidenceUpgradeError, adopted_acceptance
 from .schemas import SchemaError, SchemaKind
 from .source_integrity import SourceIntegrityError, build_source_manifest, sha256_path
 from .source_coverage import coverage_integrity_errors
@@ -205,6 +206,7 @@ def manifest_integrity_errors(
 def translation_acceptance_errors(
     metadata: Mapping[str, Any],
     progress: Mapping[str, Any],
+    repository: WorkflowStateRepository | None = None,
 ) -> list[str]:
     """Reject translated-or-later state that bypassed Translator acceptance."""
 
@@ -237,9 +239,18 @@ def translation_acceptance_errors(
         if evidence.get("role") != "translator":
             errors.append(f"Chapter {number}: translation_acceptance role must be translator")
         if workflow_revision is not None and evidence.get("workflow_revision") != workflow_revision:
-            errors.append(
-                f"Chapter {number}: translation_acceptance uses another workflow revision"
-            )
+            try:
+                adopted = (
+                    adopted_acceptance(repository.storage, metadata, chapter)
+                    if repository is not None else None
+                )
+            except EvidenceUpgradeError as exc:
+                errors.append(f"Chapter {number}: invalid historical acceptance adoption: {exc}")
+                continue
+            if adopted is None:
+                errors.append(
+                    f"Chapter {number}: translation_acceptance uses another workflow revision"
+                )
     return errors
 
 
@@ -277,7 +288,7 @@ def _current_workspace_errors(book_module: Any, slug: str) -> list[str]:
             manifest = {}
         errors.extend(source_revision_integrity_errors(repository, metadata, progress, manifest))
     errors.extend(coverage_integrity_errors(book_dir, metadata, progress))
-    errors.extend(translation_acceptance_errors(metadata, progress))
+    errors.extend(translation_acceptance_errors(metadata, progress, repository))
     return errors
 
 
