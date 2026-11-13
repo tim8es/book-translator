@@ -72,7 +72,7 @@ def repair_spec(findings: Sequence[Mapping], error: str | None = None) -> dict:
         omission = anchor is None
         items.append({
             "finding_id": finding["id"],
-            "operation": "insert_before|insert_after" if omission else "replace",
+            "operation": ("insert_before|insert_after" if omission\n                          else "replace|insert_before|insert_after"),
             "required_keys": (
                 ["finding_id", "operation", "replacement", "insertion_anchor"]
                 if omission else ["finding_id", "operation", "replacement"]
@@ -151,7 +151,7 @@ def validate_intent(patch: Mapping, finding: Mapping) -> None:
                 or type(candidate.get("occurrence")) is not int):
             raise CorrectionProtocolError("invalid_insertion_anchor")
     else:
-        if operation != "replace":
+        if operation not in {"replace", "insert_before", "insert_after"}:
             raise CorrectionProtocolError("unsupported_bound_operation")
         for name in ("insertion_anchor", "target_anchor"):
             if name in patch and patch[name] != anchor:
