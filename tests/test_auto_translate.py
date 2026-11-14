@@ -1072,7 +1072,8 @@ class AutomatedBookTests(unittest.TestCase):
             "unit_id": chapter["unit_id"],
             "chapter_number": 22,
         })
-        with patch.object(worker, "chapter_data", return_value=({}, ledger, [chapter])), \
+        with patch.object(worker, "ROOT", Path("/__legacy_pinned_without_attention__")), \
+             patch.object(worker, "chapter_data", return_value=({}, ledger, [chapter])), \
              patch.object(worker, "approved_unit_ids", return_value=set()), \
              patch.object(worker, "cli", return_value=decision):
             self.assertEqual(
@@ -1142,6 +1143,7 @@ from pathlib import Path
 from unittest.mock import patch
 repo = Path(sys.argv[1])
 sys.path.insert(0, str(repo / "automation"))
+sys.path.insert(0, str(repo / "scripts"))
 import book_runner
 chapter = {"unit_id": "chapter-000002", "number": 2, "status": "extracted"}
 with patch.object(book_runner, "chapter_data",
