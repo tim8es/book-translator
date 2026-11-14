@@ -186,6 +186,9 @@ def pinned_engine(root: Path, engine: Path, revision: str) -> Path:
     running. A temporary clone is reused by this process for the same book pin.
     """
     global _ACTIVE_PINNED_RUNTIME
+    helpers = str(Path(__file__).resolve().parent)
+    if helpers not in sys.path:
+        sys.path.insert(0, helpers)
     from pinned_runtime import prepare, git_head
     root = root.resolve(strict=True)
     engine = engine.resolve(strict=True)
