@@ -1145,7 +1145,9 @@ def install_engine(revision: str | None) -> tuple[Path, str]:
         raise JobError("engine checkout does not match selected revision")
     if not (temp / "scripts" / "book.py").is_file():
         raise JobError("canonical CLI is missing from pinned engine")
-    shutil.rmtree(ROOT / "scripts")
+    # In a state-only checkout scripts/ is a temporary, ignored installation.
+    # The directory need not exist before the first pinned run.
+    shutil.rmtree(ROOT / "scripts", ignore_errors=True)
     shutil.copytree(temp / "scripts", ROOT / "scripts")
     store_json(ROOT / ".book-translator-install.json", {
         "schema_version": 1,

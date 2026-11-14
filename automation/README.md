@@ -13,6 +13,11 @@ Modules:
   claim-bound proposals and reconciliations.
 - `omniroute.py`: OpenAI-compatible provider transport, JSON response
   validation and privacy-preserving diagnostics.
+- `job_monitor.py`: idempotent, signed delivery monitoring and book status
+  integrity checks.
+- `actions_failure_notifier.py`: safe startup-failure reporting.
+- `verify_changed_books.py`: read-only book artifact checks using each
+  book's *exact* pinned literary workflow, never a stale private installation.
 
 The runtime has no default book storage, user key, or provider credentials.
 Its caller supplies a state checkout root via `BOOK_TRANSLATOR_STATE_ROOT`.
