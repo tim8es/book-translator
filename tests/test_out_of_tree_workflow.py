@@ -107,6 +107,11 @@ class OutOfTreeWorkflowTests(unittest.TestCase):
                      "--outcome", "PASS", "--session-id", "reviewer",
                      "--quality-report", str(quality), "--json")
             accepted("accept-review", "synthetic-book", "1", "--json")
+            # Promotion does not waive an outstanding reviewer lease.
+            # Release the durable claim before finalization, as production
+            # final-EPUB admission requires an empty claim inventory.
+            accepted("release", "synthetic-book", "1",
+                     "--session-id", "reviewer", "--json")
             accepted("finalize", "synthetic-book", "--json")
             accepted("build", "synthetic-book", "--format", "epub")
             final_progress = json.loads((book / "progress.json").read_text("utf-8"))
