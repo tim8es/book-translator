@@ -47,8 +47,21 @@ def prepare(engine: Path, state: Path, revision: str) -> Path:
     if link.is_symlink():
         if link.resolve(strict=True) != books.resolve(strict=True):
             raise PinnedRuntimeError("pinned books link points outside the selected state")
+    elif link.is_dir() and not link.is_symlink():
+        # The canonical public repository tracks only books/.gitkeep. This is
+        # a non-content placeholder, not a book or implementation file. The
+        # separate disposable checkout can drop it before linking state.
+        # Refuse any other tracked/untracked files rather than hiding them.
+        contents = list(link.iterdir())
+        if (len(contents) != 1 or contents[0].name != ".gitkeep"
+                or not contents[0].is_file() or contents[0].is_symlink()
+                or contents[0].stat().st_size != 0):
+            raise PinnedRuntimeError("pinned public checkout unexpectedly contains books/")
+        contents[0].unlink()
+        link.rmdir()
+        link.symlink_to(books.resolve(strict=True), target_is_directory=True)
     elif link.exists():
-        raise PinnedRuntimeError("pinned public checkout unexpectedly contains books/")
+        raise PinnedRuntimeError("unsafe pinned books placeholder")
     else:
         link.symlink_to(books.resolve(strict=True), target_is_directory=True)
     marker = engine / ".book-translator-install.json"
