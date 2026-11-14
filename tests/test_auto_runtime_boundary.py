@@ -34,38 +34,31 @@ class PublicAutoBoundaryTests(unittest.TestCase):
                                  ("a" * 32 + ".json"))
             importlib.reload(worker)
 
-    def test_hydrating_pinned_contracts_does_not_erase_historical_book_evidence(self):
+    def test_install_engine_does_not_materialize_code_or_marker_in_book_state(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            state = root / "state"
-            engine = root / "public-checkout"
+            state, engine = root / "state", root / "public-checkout"
             (state / "docs/migrations").mkdir(parents=True)
             (engine / "scripts").mkdir(parents=True)
-            (engine / "docs").mkdir()
             (engine / "scripts/book.py").write_text("# pinned CLI", encoding="utf-8")
-            (engine / "docs/TRANSLATION.md").write_text(
-                "# pinned contract", encoding="utf-8")
-            (engine / "AGENTS.md").write_text("# pinned agents", encoding="utf-8")
-            (engine / "agent-manifest.json").write_text("{}", encoding="utf-8")
-            (engine / "SKILL.md").write_text("# pinned skill", encoding="utf-8")
             evidence = state / "docs/migrations/historical-review.json"
             evidence.write_text('{"immutable": true}', encoding="utf-8")
             success = type("Process", (), {"returncode": 0})()
-            with patch.object(worker, "ROOT", state), \
+            with patch.dict(os.environ, {}, clear=False), \
+                 patch.object(worker, "ROOT", state), \
                  patch.object(worker.tempfile, "mkdtemp", return_value=str(engine)), \
                  patch.object(worker.subprocess, "run", return_value=success), \
                  patch.object(worker.subprocess, "check_output",
                               return_value="a" * 40 + "\n"):
                 result, actual = worker.install_engine("a" * 40)
+                self.assertEqual(worker.pinned_scripts_dir(), engine / "scripts")
+                self.assertIn("pinned_cli.py", worker.canonical_command(
+                    "book", "validate", "synthetic-book")[1])
             self.assertEqual((result, actual), (engine, "a" * 40))
             self.assertEqual(evidence.read_text("utf-8"), '{"immutable": true}')
-            self.assertIn("pinned contract", (
-                state / "docs/TRANSLATION.md").read_text("utf-8"))
-            self.assertTrue((state / "scripts/book.py").is_file())
-            self.assertEqual(
-                __import__("json").loads(
-                    (state / ".book-translator-install.json").read_text("utf-8")
-                )["resolved_revision"], "a" * 40)
+            for path in ("scripts", "agent-manifest.json", "SKILL.md",
+                         ".book-translator-install.json", "docs/TRANSLATION.md"):
+                self.assertFalse((state / path).exists(), path)
 
     def test_public_runtime_is_not_book_state_or_secret_storage(self):
         self.assertFalse((AUTO / "status").exists())
