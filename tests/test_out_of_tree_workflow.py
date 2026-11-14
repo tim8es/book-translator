@@ -86,6 +86,49 @@ class OutOfTreeWorkflowTests(unittest.TestCase):
                              ["workflow"]["resolved_revision"])
             self.assertFalse((state / ".book-translator-install.json").exists())
 
+    def test_historical_existing_book_workflow_revision_runs_without_state_install(self):
+        # A real previously pinned revision of A Home in You; the fixture
+        # contains only original, synthetic text, never its copyrighted book.
+        historical = "ea9963ca546b7cc7f6aba4dc5350fa19ea7da862"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, engine = root / "state", root / "public-history"
+            state.mkdir()
+            (state / "books").mkdir()
+            git("init", str(state))
+            git("clone", "--quiet", str(PUBLIC), str(engine))
+            available = subprocess.run(
+                ["git", "-C", str(engine), "cat-file", "-e", historical + "^{commit}"],
+                capture_output=True)
+            if available.returncode:
+                git("-C", str(engine), "fetch", "--quiet",
+                    "https://github.com/tim8es/book-translator.git", historical)
+            git("-C", str(engine), "checkout", "--quiet", "--detach", historical)
+            old = git("-C", str(engine), "rev-parse", "HEAD")
+            self.assertEqual(old, historical)
+            source = state / "synthetic.md"
+            source.write_text("# Old Version\n\nA fictional fox crossed a bridge.\n",
+                              encoding="utf-8")
+            for tool, params in (
+                ("book", ("extract", str(source), "--slug",
+                          "legacy-synthetic", "--target-language", "ru")),
+                ("corpus", ("seal", "legacy-synthetic")),
+                ("book", ("validate", "legacy-synthetic")),
+                ("corpus", ("verify", "legacy-synthetic")),
+            ):
+                run = subprocess.run(
+                    [sys.executable, str(ADAPTER), "--engine", str(engine),
+                     "--state", str(state), "--revision", historical,
+                     tool, *params], cwd=state,
+                    capture_output=True, text=True, timeout=60)
+                self.assertEqual(run.returncode, 0, run.stderr)
+            book = state / "books/legacy-synthetic"
+            pin = json.loads((book / "metadata.json").read_text("utf-8"))
+            self.assertEqual(pin["workflow"]["resolved_revision"], historical)
+            self.assertFalse((state / ".book-translator-install.json").exists())
+            self.assertFalse((state / "scripts").exists())
+            self.assertTrue((engine / "books").is_symlink())
+
     def test_symlink_to_other_state_is_rejected_without_ownership_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
