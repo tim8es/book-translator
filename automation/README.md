@@ -29,10 +29,17 @@ python /path/to/book-translator/automation/book_runner.py --list-ready-json
 ```
 
 The state checkout must be a real writable Git checkout and contain the
-appropriate `books/`, `intake/`, `automation/status/` and pinned canonical
-workflow files. All book sources, translated texts, manifests, per-job
-checkpoints, previews, notifications, external callbacks and API credentials
-belong **only** in the caller's private state repository. Do not copy or
+appropriate `books/`, `intake/` and `automation/status/` durable data.
+The public runner clones each book's **exact** immutable literary revision
+into its own temporary checkout. The out-of-tree `scripts/pinned_cli.py`
+binds that checkout to state through a temporary `books/` symlink; it keeps
+the canonical installation marker, scripts, docs, and contracts in the
+**public engine checkout**, never in the state tree. Old book pins are not
+silently upgraded or rewritten. The Git HEAD used by canonical claims and
+parallel dispatch belongs to the book-state repository, not the public clone.
+All book sources, translated texts, manifests, per-job checkpoints,
+notifications, external callbacks and API credentials belong **only**
+in the caller's private state repository. Do not copy or
 upload any of them into this public engine.
 
 The private repository deploys this code at a verified immutable **runtime

@@ -86,6 +86,8 @@ class RequestTests(unittest.TestCase):
             root = Path(temp)
             state, engine = root / "book-state", root / "engine"
             state.mkdir()
+            (state / "books").mkdir()
+            run("init", str(state))
             (engine / "scripts").mkdir(parents=True)
             (engine / "docs").mkdir()
             (state / "docs/migrations").mkdir(parents=True)
@@ -105,22 +107,28 @@ class RequestTests(unittest.TestCase):
             revision = run("-C", str(engine), "rev-parse", "HEAD").stdout.strip()
             bridge.pinned_engine(state, engine, revision)
             install = json.loads(
-                (state / ".book-translator-install.json").read_text("utf-8"))
+                (engine / ".book-translator-install.json").read_text("utf-8"))
             self.assertEqual(install["resolved_revision"], revision)
             self.assertEqual(install["requested_ref"], revision)
-            self.assertTrue((state / "scripts/book.py").is_file())
-            self.assertTrue((state / "agent-manifest.json").is_file())
+            self.assertFalse((state / "scripts").exists())
+            self.assertFalse((state / "agent-manifest.json").exists())
+            self.assertFalse((state / ".book-translator-install.json").exists())
+            self.assertTrue((engine / "books").is_symlink())
+            self.assertTrue((engine / "agent-manifest.json").is_file())
             self.assertEqual(
                 (state / "docs/migrations/evidence.json").read_text("utf-8"),
                 '{"historic":true}')
             self.assertIn("Pinned translation rules",
-                          (state / "docs/TRANSLATION.md").read_text("utf-8"))
+                          (engine / "docs/TRANSLATION.md").read_text("utf-8"))
             bridge.pinned_engine(state, engine, revision)  # idempotent
-            (state / ".book-translator-install.json").unlink()
-            (state / ".book-translator-install.json").symlink_to(
-                state / "docs/migrations/evidence.json")
-            with self.assertRaisesRegex(bridge.RequestError, "unsafe canonical install"):
+            install_marker = engine / ".book-translator-install.json"
+            self.assertEqual(json.loads(install_marker.read_text("utf-8"))
+                             ["resolved_revision"], revision)
+            install_marker.unlink()
+            install_marker.symlink_to(state / "docs/migrations/evidence.json")
+            with self.assertRaisesRegex(bridge.RequestError, "unsafe pinned installation marker"):
                 bridge.pinned_engine(state, engine, revision)
+            self.assertFalse((state / ".book-translator-install.json").exists())
             self.assertEqual(
                 (state / "docs/migrations/evidence.json").read_text("utf-8"),
                 '{"historic":true}')

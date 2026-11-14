@@ -224,7 +224,7 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
 
 def canonical_translation_deferral_supported() -> bool:
     """A book's pinned CLI owns admission; never emulate a missing operation."""
-    target = ROOT / "scripts" / "workflow" / "status_cli.py"
+    target = pinned_scripts_dir() / "workflow" / "status_cli.py"
     return target.is_file() and "def defer_translation_command(" in target.read_text("utf-8")
 
 
@@ -1145,29 +1145,12 @@ def install_engine(revision: str | None) -> tuple[Path, str]:
         raise JobError("engine checkout does not match selected revision")
     if not (temp / "scripts" / "book.py").is_file():
         raise JobError("canonical CLI is missing from pinned engine")
-    # In a state-only checkout scripts/ is a temporary, ignored installation.
-    # The directory need not exist before the first pinned run.
-    # A book-state checkout contains only durable books and launchers.
-    # Materialize the *exact book-pinned revision* as an ignored, disposable
-    # runtime installation, never as committed private code.
-    shutil.rmtree(ROOT / "scripts", ignore_errors=True)
-    shutil.copytree(temp / "scripts", ROOT / "scripts")
-    # Preserve book-specific historical evidence under docs/migrations in an
-    # existing state checkout. Runtime contracts may be overlaid from the
-    # pinned public commit, but never erase unrelated durable state.
-    if (temp / "docs").is_dir():
-        shutil.copytree(temp / "docs", ROOT / "docs", dirs_exist_ok=True)
-    for path in ("AGENTS.md", "agent-manifest.json", "SKILL.md"):
-        origin = temp / path
-        if origin.is_file():
-            shutil.copy2(origin, ROOT / path)
-    store_json(ROOT / ".book-translator-install.json", {
-        "schema_version": 1,
-        "canonical_repository": "https://github.com/tim8es/book-translator",
-        "requested_ref": revision or "main",
-        "resolved_revision": actual,
-        "install_root": ".",
-    })
+    # No installation into ROOT: GitHub Actions checks out the canonical
+    # code separately, and each canonical call runs *inside* this pinned
+    # public checkout with external books/ linked by pinned_runtime.prepare.
+    # This preserves the exact historical CLI without rewriting its source.
+    os.environ["BOOK_TRANSLATOR_PINNED_ENGINE"] = str(temp)
+    os.environ["BOOK_TRANSLATOR_PINNED_REVISION"] = actual
     return temp, actual
 
 
@@ -1236,8 +1219,30 @@ def load_public_correction_helper(engine: Path):
     return module
 
 
+def pinned_scripts_dir() -> Path:
+    """Public book pin, or the local synthetic-test fixture with no pin."""
+    engine = os.environ.get("BOOK_TRANSLATOR_PINNED_ENGINE")
+    return Path(engine) / "scripts" if engine else ROOT / "scripts"
+
+
+def canonical_command(tool: str, *args: str) -> list[str]:
+    """Current public adapter dispatches the exact immutable literary CLI."""
+    engine = os.environ.get("BOOK_TRANSLATOR_PINNED_ENGINE")
+    if not engine:
+        # Existing synthetic tests may run a local canonical fixture directly.
+        return [sys.executable, str(ROOT / "scripts" / (tool + ".py")), *args]
+    revision = os.environ.get("BOOK_TRANSLATOR_PINNED_REVISION")
+    if not revision or not SHA.fullmatch(revision):
+        raise JobError("public pinned engine has no immutable workflow revision")
+    adapter = Path(__file__).resolve().parents[1] / "scripts" / "pinned_cli.py"
+    if not adapter.is_file():
+        raise JobError("public out-of-tree canonical adapter is unavailable")
+    return [sys.executable, str(adapter), "--engine", engine,
+            "--state", str(ROOT), "--revision", revision, tool, *args]
+
+
 def cli(*args: str) -> str:
-    command = [sys.executable, str(ROOT / "scripts" / "book.py"), *args]
+    command = canonical_command("book", *args)
     result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=200)
     if result.returncode:
         raise JobError("canonical CLI rejected operation: " + (result.stderr or result.stdout)[-700:])
@@ -1247,7 +1252,7 @@ def cli(*args: str) -> str:
 def verify(slug: str) -> None:
     cli("validate", slug)
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "corpus.py"), "verify", slug],
+        canonical_command("corpus", "verify", slug),
         cwd=ROOT, text=True, capture_output=True, timeout=180,
     )
     if result.returncode:
@@ -1263,7 +1268,7 @@ def init(job_id: str, request: dict, slug: str, revision: str) -> dict:
             args.extend(["--" + field, request[field]])
     cli(*args)
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "corpus.py"), "seal", slug],
+        canonical_command("corpus", "seal", slug),
         cwd=ROOT, text=True, capture_output=True,
     )
     if result.returncode:
@@ -1458,7 +1463,7 @@ def prepare_correction_limit_resume(status: dict, ledger: dict, chapter: dict) -
     # upgraded by changing their metadata pin: that invalidates PASS evidence.
     # Fail closed on review, but allow other extracted units to proceed.
     # On newer revisions canonical book.py defer-review owns this queue.
-    if not (ROOT / "scripts" / "workflow" / "attention.py").exists():
+    if not (pinned_scripts_dir() / "workflow" / "attention.py").exists():
         rounds = status.get("correction_rounds", {}).get(unit_id, 0)
         if (type(rounds) is int and rounds >= MAX_CORRECTIONS + MAX_CORRECTION_EXTENSIONS):
             record = latest_record(ledger, chapter)
@@ -2411,7 +2416,7 @@ def next_operation(slug: str, status: dict) -> tuple[str, dict | None]:
     # entrypoint runs from automation/, so Python does not search scripts/
     # unless we add the installed, book-pinned engine explicitly.
     # install_engine() has already checked out the exact book revision here.
-    scripts_dir = str(ROOT / "scripts")
+    scripts_dir = str(pinned_scripts_dir())
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     from workflow.operations import next_unit_operation
@@ -2513,7 +2518,7 @@ def apply_operator_review_reopen(job_id: str, slug: str, status: dict) -> bool:
     canon = json.loads(cli("status", slug, "--json"))
     if canon.get("claims") != [] or canon.get("errors") != []:
         raise JobError("operator review reopen blocked by canonical claims or errors")
-    scripts_dir = str(ROOT / "scripts")
+    scripts_dir = str(pinned_scripts_dir())
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     from workflow.attention import validate_attention
@@ -2580,7 +2585,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
         return next_operation(slug, status)
     # Canonical vNext owns the durable attention queue and selection. Older
     # immutable book pins retain their historical adapter until an audited upgrade.
-    if (ROOT / "scripts" / "workflow" / "attention.py").exists():
+    if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
         for _ in range(len(chapters) + 1):
             decision = json.loads(cli("resume", slug, "--json"))
             operation = decision.get("operation")
@@ -2623,7 +2628,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
     if len(matches) != 1 or matches[0].get("number") != decision.get("chapter_number"):
         raise JobError("canonical resume unit no longer matches durable progress")
     chapter = matches[0]
-    if (not (ROOT / "scripts" / "workflow" / "attention.py").exists()
+    if (not (pinned_scripts_dir() / "workflow" / "attention.py").exists()
             and chapter["unit_id"] in deferred_review_unit_ids(status)
             and operation != "accept_review"):
         return next_operation(slug, status)
@@ -2635,7 +2640,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
     if operation == "correct_translation":
         if accepted_review_count(ledger, chapter) >= operator_unit_limit(
                     status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
-            if (ROOT / "scripts" / "workflow" / "attention.py").exists():
+            if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
                 raise JobError("canonical attention selection left an over-budget unit")
             defer_review_unit(status, unit_id)
             return next_operation(slug, status)
@@ -2648,7 +2653,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             # actionable findings. Re-review rather than inventing corrections.
             return "reviewer", chapter
         if not correction_allowed(status, ledger, chapter):
-            if (ROOT / "scripts" / "workflow" / "attention.py").exists():
+            if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
                 raise JobError("canonical attention selection left a correction-limited unit")
             return "blocked", chapter
     return mapping[operation], chapter
@@ -3629,7 +3634,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
                 raise JobError("cannot resume while canonical claims or errors remain")
             if status.get("phase") == "model-blocked":
                 _, ledger, chapters = chapter_data(slug)
-                if (ROOT / "scripts" / "workflow" / "attention.py").exists():
+                if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
                     diagnostic = status.get("last_patch_anchor_mismatch")
                     if (status.get("failures", 0) >= MAX_FAILURES
                             and isinstance(diagnostic, dict)
@@ -3649,7 +3654,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
                 matches = [item for item in chapters if item.get("unit_id") == unit_id]
                 if len(matches) != 1:
                     raise JobError("correction-limited unit no longer maps to one source unit")
-                if (ROOT / "scripts" / "workflow" / "attention.py").exists():
+                if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
                     cli("defer-review", slug, str(matches[0]["number"]),
                         "--reason", "correction-limit")
                 else:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -138,7 +139,19 @@ def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def cli(root: Path, script: str, *args: str) -> dict:
-    cmd = [sys.executable, str(root / "scripts" / script), *map(str, args)]
+    if script not in {"book.py", "corpus.py"}:
+        raise RequestError("unsupported canonical CLI script")
+    active = _ACTIVE_PINNED_RUNTIME
+    if active is None:
+        # Synthetic unit fixtures may patch pinned_engine/cli without checkout.
+        cmd = [sys.executable, str(root / "scripts" / script), *map(str, args)]
+    else:
+        pinned, revision, bound_root = active
+        require(root.resolve() == bound_root, "pinned runtime belongs to another book-state checkout")
+        command = Path(__file__).resolve().with_name("pinned_cli.py")
+        cmd = [sys.executable, str(command), "--engine", str(pinned),
+               "--state", str(root), "--revision", revision,
+               script.removesuffix(".py"), *map(str, args)]
     result = subprocess.run(cmd, cwd=root, text=True, capture_output=True)
     if result.returncode:
         raise RequestError("canonical command failed: " +
@@ -161,58 +174,54 @@ def expected_book(root: Path, request: dict) -> tuple[Path, dict]:
     return book, metadata
 
 
-def pinned_engine(root: Path, engine: Path, revision: str) -> None:
-    # Only scripts from the book's exact commit are used; do not silently upgrade.
-    current = git(engine, "rev-parse", "HEAD").stdout.strip()
-    if current != revision:
-        fetched = git(engine, "fetch", "--quiet", "origin", revision, check=False)
-        require(fetched.returncode == 0, "cannot fetch pinned workflow revision")
-        git(engine, "checkout", "--quiet", "--force", revision)
-    require(git(engine, "rev-parse", "HEAD").stdout.strip() == revision,
-            "engine checkout is not pinned")
-    scripts = engine / "scripts"
-    require((scripts / "book.py").is_file() and (scripts / "corpus.py").is_file(),
-            "pinned workflow scripts unavailable")
-    # A state-only checkout contains no tracked scripts/contracts/installation.
-    # Materialize exactly this book's pin as disposable ignored files; never
-    # change the book's metadata.json.workflow or publish an installation.
-    target = root / "scripts"
-    require(not target.is_symlink(), "unsafe canonical scripts target")
-    if target.exists():
-        require(target.is_dir(), "canonical scripts path is not a directory")
-        shutil.rmtree(target)
-    shutil.copytree(scripts, target)
-    docs = engine / "docs"
-    if docs.is_dir():
-        destination = root / "docs"
-        require(not destination.is_symlink(), "unsafe canonical docs target")
-        shutil.copytree(docs, destination, dirs_exist_ok=True)
-    for filename in ("AGENTS.md", "agent-manifest.json", "SKILL.md"):
-        original = engine / filename
-        if original.is_file():
-            destination = root / filename
-            require(not destination.is_symlink(), "unsafe canonical contract target")
-            shutil.copy2(original, destination)
-    install_path = root / ".book-translator-install.json"
-    require(not install_path.is_symlink(), "unsafe canonical install target")
-    if install_path.exists():
-        installation = strict_json(install_path)
-        require(installation.get("schema_version") == 1 and
-                installation.get("canonical_repository") ==
-                "https://github.com/tim8es/book-translator" and
-                installation.get("install_root") == ".",
-                "invalid existing global workflow installation")
-    else:
-        installation = {"schema_version": 1,
-                        "canonical_repository": "https://github.com/tim8es/book-translator",
-                        "install_root": "."}
-    installation.update({"requested_ref": revision, "resolved_revision": revision})
-    install_path.write_text(
-        json.dumps(installation, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
-    require(strict_json(install_path)["resolved_revision"] == revision,
-            "temporary workflow installation pin was not applied")
+_PINNED_ENGINE_CACHE: dict[tuple[str, str], tuple[tempfile.TemporaryDirectory, Path]] = {}
+_ACTIVE_PINNED_RUNTIME: tuple[Path, str, Path] | None = None
 
+
+def pinned_engine(root: Path, engine: Path, revision: str) -> Path:
+    """Prepare the book's exact public workflow without modifying state code.
+
+    The ChatOps executor itself may have a newer, separately locked version;
+    never check out an old literary workflow over the code that's currently
+    running. A temporary clone is reused by this process for the same book pin.
+    """
+    global _ACTIVE_PINNED_RUNTIME
+    helpers = str(Path(__file__).resolve().parent)
+    if helpers not in sys.path:
+        sys.path.insert(0, helpers)
+    from pinned_runtime import prepare, git_head
+    root = root.resolve(strict=True)
+    engine = engine.resolve(strict=True)
+    if not SHA40.fullmatch(revision):
+        raise RequestError("invalid book workflow revision")
+    key = (str(root), revision)
+    if key in _PINNED_ENGINE_CACHE:
+        pinned = _PINNED_ENGINE_CACHE[key][1]
+    elif git_head(engine) == revision:
+        pinned = engine  # isolated fixture or exact book pin; no clone required
+    else:
+        temp = tempfile.TemporaryDirectory(prefix="chat-pinned-workflow-")
+        pinned = Path(temp.name) / "public-engine"
+        clone = subprocess.run(
+            ["git", "clone", "--quiet", "https://github.com/tim8es/book-translator.git",
+             str(pinned)], capture_output=True, text=True, timeout=180)
+        if clone.returncode:
+            temp.cleanup()
+            raise RequestError("cannot fetch book-pinned public workflow")
+        checkout = subprocess.run(
+            ["git", "-C", str(pinned), "checkout", "--quiet", "--detach", revision],
+            capture_output=True, text=True, timeout=50)
+        if checkout.returncode:
+            temp.cleanup()
+            raise RequestError("book-pinned public workflow revision is unavailable")
+        _PINNED_ENGINE_CACHE[key] = (temp, pinned)
+    try:
+        prepare(pinned, root, revision)
+    except (OSError, ValueError, RuntimeError) as exc:
+        _ACTIVE_PINNED_RUNTIME = None
+        raise RequestError("cannot prepare isolated book-pinned workflow: " + str(exc)) from exc
+    _ACTIVE_PINNED_RUNTIME = (pinned, revision, root)
+    return pinned
 
 def chapter_and_claim(book: Path, request: dict, *, role: str) -> dict:
     progress = strict_json(book / "progress.json")
@@ -243,6 +252,8 @@ def chapter_and_claim(book: Path, request: dict, *, role: str) -> dict:
 
 
 def execute(root: Path, engine: Path, request: dict) -> dict:
+    global _ACTIVE_PINNED_RUNTIME
+    _ACTIVE_PINNED_RUNTIME = None  # never inherit a previous request's pin
     book, _ = expected_book(root, request)
     if request["operation"] in {"pause-auto", "resume-auto"}:
         # Only change scheduling preference; never mutate chapter claims or evidence.
