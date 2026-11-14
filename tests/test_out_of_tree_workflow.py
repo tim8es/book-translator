@@ -79,6 +79,53 @@ class OutOfTreeWorkflowTests(unittest.TestCase):
             self.assertNotIn("scripts/", changed)
             self.assertNotIn("agent-manifest.json", changed)
 
+            # Complete the *real* canonical acceptance/review/final EPUB
+            # lifecycle, with no installed code in state or LLM API calls.
+            translated = "# Один\n\nМара прибыла на станцию.\n"
+            chapter = progress["chapters"][0]
+            translation_path = book / chapter["translation_path"]
+            translation_path.parent.mkdir(parents=True, exist_ok=True)
+            translation_path.write_text(translated, encoding="utf-8")
+            def accepted(*arguments):
+                result = canonical("book", *arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout
+            accepted("accept-translation", "synthetic-book", "1",
+                     "--session-id", "writer", "--json")
+            accepted("release", "synthetic-book", "1",
+                     "--session-id", "writer", "--json")
+            accepted("claim", "synthetic-book", "1", "--role", "reviewer",
+                     "--session-id", "reviewer", "--json")
+            quality = parent / "quality-report.json"
+            quality.write_text(json.dumps({
+                "context": "independent_session",
+                "checks": {"coverage": True, "meaning": True,
+                           "terminology": True, "style": True, "structure": True},
+                "findings": [],
+            }), encoding="utf-8")
+            accepted("review-record", "synthetic-book", "1",
+                     "--outcome", "PASS", "--session-id", "reviewer",
+                     "--quality-report", str(quality), "--json")
+            accepted("accept-review", "synthetic-book", "1", "--json")
+            # Promotion does not waive an outstanding reviewer lease.
+            # Release the durable claim before finalization, as production
+            # final-EPUB admission requires an empty claim inventory.
+            accepted("release", "synthetic-book", "1",
+                     "--session-id", "reviewer", "--json")
+            accepted("finalize", "synthetic-book", "--json")
+            accepted("build", "synthetic-book", "--format", "epub")
+            final_progress = json.loads((book / "progress.json").read_text("utf-8"))
+            self.assertEqual(final_progress["chapters"][0]["status"], "reviewed")
+            manifest = json.loads((book / "output/manifest.json").read_text("utf-8"))
+            self.assertEqual(manifest["format"], "epub")
+            self.assertFalse(manifest["preview"])
+            artifact = book / manifest["artifact_path"]
+            self.assertTrue(artifact.is_file())
+            self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                             manifest["artifact_sha256"])
+            self.assertFalse((state / ".book-translator-install.json").exists())
+            self.assertFalse((state / "scripts").exists())
+
             invalid = canonical("book", "validate", "synthetic-book", pin="b" * 40)
             self.assertNotEqual(invalid.returncode, 0)
             self.assertEqual(info["workflow"]["resolved_revision"],
