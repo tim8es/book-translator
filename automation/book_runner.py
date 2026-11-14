@@ -1152,9 +1152,11 @@ def install_engine(revision: str | None) -> tuple[Path, str]:
     # runtime installation, never as committed private code.
     shutil.rmtree(ROOT / "scripts", ignore_errors=True)
     shutil.copytree(temp / "scripts", ROOT / "scripts")
-    shutil.rmtree(ROOT / "docs", ignore_errors=True)
+    # Preserve book-specific historical evidence under docs/migrations in an
+    # existing state checkout. Runtime contracts may be overlaid from the
+    # pinned public commit, but never erase unrelated durable state.
     if (temp / "docs").is_dir():
-        shutil.copytree(temp / "docs", ROOT / "docs")
+        shutil.copytree(temp / "docs", ROOT / "docs", dirs_exist_ok=True)
     for path in ("AGENTS.md", "agent-manifest.json", "SKILL.md"):
         origin = temp / path
         if origin.is_file():
