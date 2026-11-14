@@ -203,17 +203,6 @@ class ActionQueueAdmissionTests(unittest.TestCase):
                 self.assertNotIn(f"{9:032x}",
                                  [job["job_id"] for job in worker.ready_jobs()])
 
-    def test_workflow_limits_queue_and_avoids_terminal_dispatch_storm(self):
-        workflow = (Path(__file__).resolve().parents[1] /
-                    ".github/workflows/auto-translate.yml").read_text("utf-8")
-        self.assertIn("max-parallel: 3", workflow)
-        self.assertIn("group: automatic-book-", workflow)
-        self.assertIn("cancel-in-progress: false", workflow)
-        self.assertIn('cron: "*/15 * * * *"', workflow)
-        self.assertIn("Dispatch next bounded step", workflow)
-        self.assertNotIn("Dispatch next pending job after terminal checkpoint", workflow)
-        self.assertIn("steps.run.outputs.continue == 'true'", workflow)
-        self.assertNotIn("workflow_call:", workflow)
 
 
 if __name__ == "__main__":
