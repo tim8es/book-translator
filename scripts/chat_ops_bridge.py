@@ -173,22 +173,40 @@ def pinned_engine(root: Path, engine: Path, revision: str) -> None:
     scripts = engine / "scripts"
     require((scripts / "book.py").is_file() and (scripts / "corpus.py").is_file(),
             "pinned workflow scripts unavailable")
+    # A state-only checkout contains no tracked scripts/contracts/installation.
+    # Materialize exactly this book's pin as disposable ignored files; never
+    # change the book's metadata.json.workflow or publish an installation.
     target = root / "scripts"
+    require(not target.is_symlink(), "unsafe canonical scripts target")
     if target.exists():
+        require(target.is_dir(), "canonical scripts path is not a directory")
         shutil.rmtree(target)
     shutil.copytree(scripts, target)
-    # The book repository may have been globally installed at a *newer*
-    # revision. Canonical CLI mutation guards compare the global install
-    # marker to this book's exact workflow revision. Adapt ONLY the
-    # disposable runner checkout; never stage or push this global marker.
+    docs = engine / "docs"
+    if docs.is_dir():
+        destination = root / "docs"
+        require(not destination.is_symlink(), "unsafe canonical docs target")
+        shutil.copytree(docs, destination, dirs_exist_ok=True)
+    for filename in ("AGENTS.md", "agent-manifest.json", "SKILL.md"):
+        original = engine / filename
+        if original.is_file():
+            destination = root / filename
+            require(not destination.is_symlink(), "unsafe canonical contract target")
+            shutil.copy2(original, destination)
     install_path = root / ".book-translator-install.json"
-    installation = strict_json(install_path)
-    require(installation.get("schema_version") == 1 and
-            installation.get("canonical_repository") ==
-            "https://github.com/tim8es/book-translator" and
-            installation.get("install_root") == ".",
-            "invalid existing global workflow installation")
-    installation["resolved_revision"] = revision
+    require(not install_path.is_symlink(), "unsafe canonical install target")
+    if install_path.exists():
+        installation = strict_json(install_path)
+        require(installation.get("schema_version") == 1 and
+                installation.get("canonical_repository") ==
+                "https://github.com/tim8es/book-translator" and
+                installation.get("install_root") == ".",
+                "invalid existing global workflow installation")
+    else:
+        installation = {"schema_version": 1,
+                        "canonical_repository": "https://github.com/tim8es/book-translator",
+                        "install_root": "."}
+    installation.update({"requested_ref": revision, "resolved_revision": revision})
     install_path.write_text(
         json.dumps(installation, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8")
