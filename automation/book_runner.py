@@ -1147,8 +1147,18 @@ def install_engine(revision: str | None) -> tuple[Path, str]:
         raise JobError("canonical CLI is missing from pinned engine")
     # In a state-only checkout scripts/ is a temporary, ignored installation.
     # The directory need not exist before the first pinned run.
+    # A book-state checkout contains only durable books and launchers.
+    # Materialize the *exact book-pinned revision* as an ignored, disposable
+    # runtime installation, never as committed private code.
     shutil.rmtree(ROOT / "scripts", ignore_errors=True)
     shutil.copytree(temp / "scripts", ROOT / "scripts")
+    shutil.rmtree(ROOT / "docs", ignore_errors=True)
+    if (temp / "docs").is_dir():
+        shutil.copytree(temp / "docs", ROOT / "docs")
+    for path in ("AGENTS.md", "agent-manifest.json", "SKILL.md"):
+        origin = temp / path
+        if origin.is_file():
+            shutil.copy2(origin, ROOT / path)
     store_json(ROOT / ".book-translator-install.json", {
         "schema_version": 1,
         "canonical_repository": "https://github.com/tim8es/book-translator",
