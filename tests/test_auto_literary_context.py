@@ -401,6 +401,9 @@ class LiteraryContextTests(unittest.TestCase):
         )
         with patch.dict(sys.modules, {"workflow": workflow,
                                       "workflow.operations": operations}), \
+             # This fixture exercises the adapter for an older pinned workflow
+             # that does not include the newer canonical attention queue.
+             patch.object(runner, "ROOT", Path("/__legacy_workflow_without_attention__")), \
              patch.object(runner, "chapter_data", return_value=({}, ledger, [first, second])), \
              patch.object(runner, "approved_unit_ids", return_value=set()), \
              patch.object(runner, "cli", return_value=json.dumps({
