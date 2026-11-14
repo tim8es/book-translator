@@ -80,6 +80,51 @@ class RequestTests(unittest.TestCase):
             self.assertFalse((book / "progress.json").exists())
             self.assertFalse((book / ".workflow" / "claims").exists())
 
+    def test_pinned_engine_bootstraps_state_only_repository(self):
+        """An ignored ephemeral install is sufficient; no tracked fork needed."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state, engine = root / "book-state", root / "engine"
+            state.mkdir()
+            (engine / "scripts").mkdir(parents=True)
+            (engine / "docs").mkdir()
+            (state / "docs/migrations").mkdir(parents=True)
+            (state / "docs/migrations/evidence.json").write_text(
+                '{"historic":true}', encoding="utf-8")
+            (engine / "scripts/book.py").write_text("# pinned CLI", encoding="utf-8")
+            (engine / "scripts/corpus.py").write_text("# pinned corpus", encoding="utf-8")
+            (engine / "docs/TRANSLATION.md").write_text(
+                "Pinned translation rules", encoding="utf-8")
+            for filename in ("AGENTS.md", "agent-manifest.json", "SKILL.md"):
+                (engine / filename).write_text("pinned", encoding="utf-8")
+            run("init", str(engine))
+            run("-C", str(engine), "config", "user.name", "Integration Test")
+            run("-C", str(engine), "config", "user.email", "dev@example.invalid")
+            run("-C", str(engine), "add", "-A")
+            run("-C", str(engine), "commit", "-m", "synthetic revision")
+            revision = run("-C", str(engine), "rev-parse", "HEAD").stdout.strip()
+            bridge.pinned_engine(state, engine, revision)
+            install = json.loads(
+                (state / ".book-translator-install.json").read_text("utf-8"))
+            self.assertEqual(install["resolved_revision"], revision)
+            self.assertEqual(install["requested_ref"], revision)
+            self.assertTrue((state / "scripts/book.py").is_file())
+            self.assertTrue((state / "agent-manifest.json").is_file())
+            self.assertEqual(
+                (state / "docs/migrations/evidence.json").read_text("utf-8"),
+                '{"historic":true}')
+            self.assertIn("Pinned translation rules",
+                          (state / "docs/TRANSLATION.md").read_text("utf-8"))
+            bridge.pinned_engine(state, engine, revision)  # idempotent
+            (state / ".book-translator-install.json").unlink()
+            (state / ".book-translator-install.json").symlink_to(
+                state / "docs/migrations/evidence.json")
+            with self.assertRaisesRegex(bridge.RequestError, "unsafe canonical install"):
+                bridge.pinned_engine(state, engine, revision)
+            self.assertEqual(
+                (state / "docs/migrations/evidence.json").read_text("utf-8"),
+                '{"historic":true}')
+
     def test_defer_review_is_allowlisted_and_requires_reason(self):
         payload = sample("defer-review")
         self.assertEqual(bridge.validate(payload, RID)["reason"], "correction-limit")
