@@ -107,7 +107,7 @@ class RequestTests(unittest.TestCase):
             revision = run("-C", str(engine), "rev-parse", "HEAD").stdout.strip()
             bridge.pinned_engine(state, engine, revision)
             install = json.loads(
-                (state / ".book-translator-install.json").read_text("utf-8"))
+                (engine / ".book-translator-install.json").read_text("utf-8"))
             self.assertEqual(install["resolved_revision"], revision)
             self.assertEqual(install["requested_ref"], revision)
             self.assertFalse((state / "scripts").exists())
