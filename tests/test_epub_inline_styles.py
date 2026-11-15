@@ -112,6 +112,51 @@ class InlineStylesTests(unittest.TestCase):
                             expected_source_sha256=hashlib.sha256(epub.read_bytes()).hexdigest(),
                             language="ru")
 
+    def test_mixed_inline_artwork_breaks_and_bold_are_source_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            epub = Path(directory) / "book.epub"
+            source_book(epub,
+                '<p class="illustrated">'
+                '<strong>First<br/>second</strong> '
+                '<img class="illustration" src="image.png" alt="Artwork"/>'
+                ' last<br/>line</p>')
+            original = epub.read_bytes()
+            chapter = chapter_for(epub)
+            self.assertEqual(chapter.content.count("<!-- bt-inline:"), 2)
+            self.assertEqual(chapter.content.count("<!-- bt-media:"), 3)
+            self.assertEqual(epub_preserve.audit(epub, [chapter])["state"], "verified")
+            translated = (chapter.content.replace("First", "Первый")
+                          .replace("second", "второй")
+                          .replace(" last", " последний")
+                          .replace("line", "строка"))
+            book_runner.check_markers(chapter.content, translated)
+            out = epub_preserve.build(
+                epub, [{"markdown": translated}],
+                expected_source_sha256=hashlib.sha256(original).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(out)) as zf:
+                root = ET.fromstring(zf.read("OPS/part.xhtml"))
+                p = root.find(f".//{{{XHTML}}}p")
+                strong = p.find(f"{{{XHTML}}}strong")
+                self.assertEqual(strong.text, "Первый")
+                self.assertEqual(strong.find(f"{{{XHTML}}}br").tail, "второй")
+                self.assertEqual(p.find(f"{{{XHTML}}}img").get("class"), "illustration")
+                self.assertEqual(p.find(f"{{{XHTML}}}img").get("alt"), "Artwork")
+                self.assertEqual(len(p.findall(f"{{{XHTML}}}br")), 1)
+                self.assertEqual(zf.read("OPS/image.png"), b"\x89PNG\r\n\x1a\nsentinel")
+            self.assertEqual(epub.read_bytes(), original)
+
+    def test_image_nested_inside_text_link_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            epub = Path(directory) / "book.epub"
+            source_book(epub,
+                '<p>Before <a href="https://example.org">'
+                '<img src="image.png"/></a> after.</p>')
+            with self.assertRaisesRegex(epub_preserve.PreservedEpubError,
+                                        "inside a link"):
+                epub_preserve.analyze(epub)
+
     def test_source_with_nested_inline_style_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             epub = Path(directory) / "book.epub"
