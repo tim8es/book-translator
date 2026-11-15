@@ -138,6 +138,55 @@ class EpubBigTests(unittest.TestCase):
             with self.assertRaisesRegex(epub_preserve.PreservedEpubError, "Unmapped prose"):
                 epub_preserve.analyze(source)
 
+    def test_single_link_div_text_and_destination_are_preserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(
+                source,
+                '<div class="nav">» <a href="#target" rel="next">Continue</a></div>'
+                '<p id="target">Chapter text.</p>',
+            )
+            chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
+            self.assertEqual(chapters[0].content.count("<!-- bt-block:"), 2)
+            self.assertEqual(epub_preserve.audit(source, chapters)["state"], "verified")
+            translation = chapters[0].content.replace("Chapter text.", "Текст главы.")
+            out = epub_preserve.build(
+                source, [{"markdown": translation}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(out)) as archive:
+                page = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                nav = page.find(f".//{{{XHTML}}}div")
+                self.assertEqual(nav.text, "» ")
+                link = nav.find(f"{{{XHTML}}}a")
+                self.assertEqual(link.get("href"), "#target")
+                self.assertEqual(link.get("rel"), "next")
+                self.assertEqual(link.text, "Continue")
+
+    def test_leaf_div_preserves_classed_big_wrapper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(source, '<div><big class="huge">Title</big></div>')
+            chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
+            output = epub_preserve.build(
+                source, [{"markdown": chapters[0].content.replace("Title", "Название")}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(output)) as archive:
+                page = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                big = page.find(f".//{{{XHTML}}}div/{{{XHTML}}}big")
+                self.assertEqual(big.attrib, {"class": "huge"})
+                self.assertEqual(big.text, "Название")
+
+    def test_link_div_with_inline_image_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(source, '<div>→ <a href="#target"><img src="picture.png"/></a></div>')
+            with self.assertRaises(epub_preserve.PreservedEpubError):
+                epub_preserve.analyze(source)
+
     def test_partial_inline_big_fails_closed_instead_of_losing_style(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "book.epub"
