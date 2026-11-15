@@ -103,7 +103,7 @@ class InlineStylesTests(unittest.TestCase):
                 chapter.content.replace("<!-- bt-inline:000001:start -->", ""),
                 chapter.content.replace("000001:start", "000002:start"),
                 chapter.content.replace("000002:end", "000002:start"),
-                chapter.content.replace("4th", "4th<!-- bt-inline:999999:end -->"),
+                chapter.content.replace("O and 4", "O and 4<!-- bt-inline:999999:end -->"),
             ):
                 with self.subTest(candidate=changed[-80:]):
                     with self.assertRaises((epub_preserve.PreservedEpubError, book_runner.JobError)):
