@@ -898,9 +898,14 @@ def recoverable_epub_preflight(status: dict) -> bool:
             and status.get("active") is None
             and status.get("workflow_revision") is None
             and status.get("source_sha256") is None
-            and type(retries) is int and retries in fixed_errors
+            and type(retries) is int
             and isinstance(error, str)
-            and error.startswith(prefix + fixed_errors[retries]))
+            and ((retries in fixed_errors
+                  and error.startswith(prefix + fixed_errors[retries]))
+                 or (retries == 2 and re.fullmatch(
+                     re.escape(prefix) + r"[^:\\n]+\\.xhtml: Unmapped prose in <div>\\n?",
+                     error,
+                 ) is not None)))
 
 def auto_resume_requested(status: dict) -> bool:
     """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
