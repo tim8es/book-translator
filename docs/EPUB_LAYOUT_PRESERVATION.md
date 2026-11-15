@@ -94,7 +94,7 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   link element remain source-bound; a changed inline label still needs an
   unambiguous binding at final assembly. Multi-link, image-bearing or
   structurally ambiguous `div` elements remain blocked.
-- XHTML `<small>`, `<sub>`, and `<sup>` are represented by
+- XHTML inline `<big>`, `<small>`, `<sub>`, and `<sup>` are represented by
   protected, ordered `<!-- bt-inline:NNNNNN:start -->` and
   `<!-- bt-inline:NNNNNN:end -->` boundaries inside the prose block.
   Translate the visible words *between* each pair, but keep every boundary
@@ -106,10 +106,9 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
 - A legacy XHTML `<big>` may wrap the complete text content of a prose
   paragraph, heading or simple leaf `div`. That single wrapper and its
   attributes are preserved around the translated content. A partial inline
-  `<big>` span, ambiguous nested wrappers, or unsupported surrounding markup
-  remain blocking: automatic realignment would silently change formatting.
-  A verified `<big>` around an entire prose block is also retained as part
-  of the original XHTML structure.
+  `<big>` uses the same protected boundaries as other styled inline text.
+  Nested styled wrappers and ambiguous mixed semantic markup still block,
+  rather than silently flattening source typography.
 - Body paragraph styles and raster placement are preserved, but arbitrary
   complex inline CSS cannot be reconstructed automatically for freely translated
   sentences. Only the explicitly supported emphasis and drop-cap cases are
