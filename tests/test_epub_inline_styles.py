@@ -147,6 +147,38 @@ class InlineStylesTests(unittest.TestCase):
                 self.assertEqual(zf.read("OPS/image.png"), b"\x89PNG\r\n\x1a\nsentinel")
             self.assertEqual(epub.read_bytes(), original)
 
+    def test_two_source_links_with_br_and_wbr_remain_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            epub = Path(directory) / "book.epub"
+            source_book(epub,
+                '<p><b>Links</b><br/>'
+                '<a href="https://example.org/first" rel="author">First<wbr/>Link</a> '
+                '<a href="https://example.org/second" rel="next">Second</a></p>')
+            chapter = chapter_for(epub)
+            self.assertEqual(epub_preserve.audit(epub, [chapter])["state"], "verified")
+            self.assertEqual(chapter.content.count("<!-- bt-inline:"), 4)
+            self.assertEqual(chapter.content.count("<!-- bt-media:"), 2)
+            translated = chapter.content.replace("Links", "Ссылки").replace("First", "Первая").replace("Second", "Вторая")
+            book_runner.check_markers(chapter.content, translated)
+            result = epub_preserve.build(
+                epub, [{"markdown": translated}],
+                expected_source_sha256=hashlib.sha256(epub.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(result)) as zf:
+                root = ET.fromstring(zf.read("OPS/part.xhtml"))
+                p = root.find(f".//{{{XHTML}}}p")
+                self.assertEqual(len(p.findall(f"{{{XHTML}}}a")), 2)
+                self.assertEqual(len(p.findall(f"{{{XHTML}}}br")), 1)
+                first, second = p.findall(f"{{{XHTML}}}a")
+                self.assertEqual(first.get("href"), "https://example.org/first")
+                self.assertEqual(first.get("rel"), "author")
+                self.assertEqual(first.text, "Первая")
+                self.assertIsNotNone(first.find(f"{{{XHTML}}}wbr"))
+                self.assertEqual(second.get("href"), "https://example.org/second")
+                self.assertEqual(second.get("rel"), "next")
+                self.assertEqual(second.text, "Вторая")
+
     def test_image_nested_inside_text_link_remains_blocked(self):
         with tempfile.TemporaryDirectory() as directory:
             epub = Path(directory) / "book.epub"
