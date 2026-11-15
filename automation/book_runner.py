@@ -977,6 +977,33 @@ def approve_auto_structural_span_resume(status: dict) -> None:
     status.pop("last_error_code", None)
 
 
+def recoverable_protected_correction_blocked(status: dict) -> bool:
+    """One-shot recovery after a verified marker-boundary correction rejection.
+
+    Does not reinterpret model failures, stale reviewer evidence or a previous
+    recovery as permission to bypass literary review.
+    """
+    unit = status.get("blocked_unit_id")
+    return (status.get("schema_version") == 1
+            and status.get("state") == "blocked"
+            and status.get("phase") == "model-blocked"
+            and status.get("last_error")
+                == "correction patch touches a protected EPUB marker or Markdown link boundary"
+            and status.get("active") is None
+            and type(status.get("failures")) is int
+            and status["failures"] >= MAX_FAILURES
+            and type(status.get("protected_correction_retries", 0)) is int
+            and status.get("protected_correction_retries", 0) == 0
+            and status.get("provider_retry") is None
+            and safe_book_slug(status.get("book_slug"))
+            and isinstance(status.get("source_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", status["source_sha256"]) is not None
+            and isinstance(status.get("workflow_revision"), str)
+            and SHA.fullmatch(status["workflow_revision"]) is not None
+            and isinstance(unit, str)
+            and re.fullmatch(r"chapter-[0-9]{6}", unit) is not None)
+
+
 def auto_resume_requested(status: dict) -> bool:
     """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
     if (status.get("state") != "blocked"
@@ -1048,7 +1075,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
             if (state and state.get("state") in FINAL
                     and not auto_resume_requested(state)
                     and not recoverable_epub_preflight(state)
-                    and not recoverable_structural_span_blocked(state)):
+                    and not recoverable_structural_span_blocked(state)
+                    and not recoverable_protected_correction_blocked(state)):
                 continue
             if state and state.get("state") == "running" and not provider_retry_due(state):
                 continue
@@ -2219,8 +2247,14 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             try:
                 check_markers(source, apply_correction_patches(translation, combined + [patch]))
             except JobError as exc:
-                if str(exc) != "correction patches overlap in the accepted translation":
+                if str(exc) not in {
+                        "correction patches overlap in the accepted translation",
+                        "correction patch touches a protected EPUB marker or Markdown link boundary",
+                }:
                     raise
+                # Never loosen source-bound anchors or edit technical markers.
+                # Apply only disjoint, valid findings and request a new,
+                # independent review for the still-unresolved observation.
                 conflicting.append(patch["finding_id"])
             else:
                 combined.append(patch)
@@ -3750,10 +3784,14 @@ def run(job_id: str, *, resume_blocked: bool = False,
     if (not resume_blocked and not resume_interrupted and status
             and (auto_resume_requested(status)
                  or recoverable_epub_preflight(status)
-                 or recoverable_structural_span_blocked(status))):
+                 or recoverable_structural_span_blocked(status)
+                 or recoverable_protected_correction_blocked(status))):
         resume_blocked = True
     preflight_resume = bool(resume_blocked and status and recoverable_epub_preflight(status))
     structural_resume = bool(resume_blocked and status and recoverable_structural_span_blocked(status))
+    protected_correction_resume = bool(
+        resume_blocked and status and recoverable_protected_correction_blocked(status)
+    )
     if resume_blocked and resume_interrupted:
         raise JobError("choose only one recovery mode")
     if resume_blocked and (status is None or status.get("state") != "blocked"):
@@ -3865,6 +3903,25 @@ def run(job_id: str, *, resume_blocked: bool = False,
                            and deferred_review_has_pass(ledger, by_id[unit_id])
                            for unit_id in deferred_review_unit_ids(status)):
                     raise JobError("deferred review units still require a current PASS review")
+            if protected_correction_resume:
+                _, ledger, chapters = chapter_data(slug)
+                matching = [item for item in chapters
+                            if item.get("unit_id") == status["blocked_unit_id"]]
+                if len(matching) != 1 or matching[0].get("status") != "translated":
+                    raise JobError("protected correction recovery requires one translated unit")
+                current = latest_record(ledger, matching[0])
+                acceptance = matching[0].get("translation_acceptance", {})
+                if (not isinstance(current, dict)
+                        or current.get("outcome") != "CORRECTIONS_REQUIRED"
+                        or not isinstance(acceptance, dict)
+                        or current.get("translation_sha256") != acceptance.get("translation_sha256")
+                        or current.get("source_sha256") != acceptance.get("source_sha256")
+                        or (current.get("quality_report") or {}).get("evidence_version") != 2):
+                    raise JobError("protected correction recovery has stale review evidence")
+                # After canonical verification and source/translation evidence
+                # validation, prevent a repeated automatic recovery loop.
+                status["protected_correction_retries"] = 1
+                status["protected_correction_review_record"] = current["record_id"]
             if structural_resume:
                 approve_auto_structural_span_resume(status)
             else:
