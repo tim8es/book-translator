@@ -83,6 +83,13 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   illustration). The pixels are not translated by this mode, and titles in
   image-only source documents remain original-language. A separate image/text
   localization pipeline is required for fully localized visual typography.
+- A legacy XHTML `<big>` may wrap the complete text content of a prose
+  paragraph, heading or simple leaf `div`. That single wrapper and its
+  attributes are preserved around the translated content. A partial inline
+  `<big>` span, ambiguous nested wrappers, or unsupported surrounding markup
+  remain blocking: automatic realignment would silently change formatting.
+  A verified `<big>` around an entire prose block is also retained as part
+  of the original XHTML structure.
 - Body paragraph styles and raster placement are preserved, but arbitrary
   complex inline CSS cannot be reconstructed automatically for freely translated
   sentences. Only the explicitly supported emphasis and drop-cap cases are
