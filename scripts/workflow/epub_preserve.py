@@ -173,9 +173,9 @@ def _leaf_div_text(node: ET.Element) -> bool:
     if (len(children) == 1 and _local(children[0].tag) == "a"
             and children[0].get("href", "").startswith(("https://", "http://", "mailto:", "#"))
             and set(children[0].attrib) <= {"href", "rel", "id", "class", "title"}
-            and all(_local(part.tag) in {"a", "span", "em", "i", "b", "strong"}
-                    and not part.attrib if part is not children[0] else True
-                    for part in children[0].iter())
+            and all(_local(part.tag) in {"span", "em", "i", "b", "strong"}
+                    and not part.attrib
+                    for part in children[0].iter() if part is not children[0])
             and all(_local(part.tag) != "img" for part in children[0].iter())):
         return True
     for child in node.iter():
