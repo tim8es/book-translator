@@ -23,7 +23,7 @@ VALIDATOR = "epub-preserved-xhtml-v1"
 MODE = "original_xhtml_v1"
 _MARKER = re.compile(r"(?m)^<!-- bt-block:(\d{6}) -->\s*$")
 _PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre"}
-_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
+_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
 
 class PreservedEpubError(ValueError):
     pass
@@ -169,9 +169,25 @@ def _leaf_div_text(node: ET.Element) -> bool:
     for child in node.iter():
         if child is node:
             continue
-        if _local(child.tag) not in {"span", "em", "i"} or child.attrib:
+        if _local(child.tag) not in {"span", "em", "i", "big"} or child.attrib:
             return False
     return True
+
+
+def _whole_big_wrapper(node: ET.Element) -> ET.Element | None:
+    """An unambiguous block-wide font-size wrapper can survive translation.
+
+    A partial inline <big> cannot be realigned with reworded prose without
+    changing its scope, so that case remains a deliberate extraction error.
+    """
+    children = list(node)
+    if (len(children) == 1 and _local(children[0].tag) == "big"
+            and not (node.text or "").strip()
+            and not (children[0].tail or "").strip()
+            and not any(_local(part.tag) == "big"
+                        for part in children[0].iter() if part is not children[0])):
+        return children[0]
+    return None
 
 
 def _preserved_linked_icon(node: ET.Element) -> bool:
@@ -229,6 +245,14 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             text = "".join(node.itertext()).strip()
             if text:
                 output.append((node, text))
+    for block, _ in output:
+        big_nodes = [item for item in block.iter() if _local(item.tag) == "big"]
+        if big_nodes and (len(big_nodes) != 1
+                          or big_nodes[0] is not _whole_big_wrapper(block)):
+            raise PreservedEpubError(
+                "Inline <big> cannot be positioned safely in translated prose; "
+                "only a whole-block <big> wrapper is supported"
+            )
     # No text outside a mapped block may silently disappear; e.g. standalone div prose.
     mapped = {id(node) for node, _ in output}
     def walk(node, inside=False):
@@ -709,6 +733,9 @@ def build(
                 # Preserve block tag/class/id and image siblings. Inline content cannot
                 # be automatically aligned; reject links unless label survives.
                 source_children = list(node)
+                big_wrapper = _whole_big_wrapper(node)
+                big_prefix = node.text if big_wrapper is not None else None
+                big_suffix = big_wrapper.tail if big_wrapper is not None else None
                 initial = ("".join(source_children[0].itertext()) if source_children
                            and _local(source_children[0].tag) == "span" else "")
                 drop_cap = (source_children[0] if initial and not list(source_children[0])
@@ -765,11 +792,15 @@ def build(
                     cursor = at + len(label)
                 for child in list(node):
                     node.remove(child)
-                node.text = None
+                node.text = big_prefix if big_wrapper is not None else None
                 if positions:
                     cursor = 0
-                    target = (ET.SubElement(node, "{http://www.w3.org/1999/xhtml}" + linked_wrapper)
-                              if linked_wrapper else node)
+                    target = (ET.SubElement(node, big_wrapper.tag, big_wrapper.attrib)
+                              if big_wrapper is not None else node)
+                    if big_wrapper is not None:
+                        target.tail = big_suffix
+                    if linked_wrapper:
+                        target = ET.SubElement(target, "{http://www.w3.org/1999/xhtml}" + linked_wrapper)
                     for link, label, at, replace_label in positions:
                         _append_inline(target, linked_content[cursor:at])
                         preserved = deepcopy(link)
@@ -808,6 +839,12 @@ def build(
                     _render_inline(wrapper, translated[letter_at + 1:])
                     first.tail = wrapper.text
                     node.extend(list(wrapper))
+                elif big_wrapper is not None:
+                    # Preserve the source font-size wrapper and its attributes.
+                    # Its single, block-wide scope remains correct after rewording.
+                    target = ET.SubElement(node, big_wrapper.tag, big_wrapper.attrib)
+                    target.tail = big_suffix
+                    _render_inline(target, translated)
                 else:
                     _render_inline(node, translated)
             replacements[doc.path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)

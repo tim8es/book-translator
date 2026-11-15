@@ -878,6 +878,28 @@ def auto_mode(slug: str) -> str:
     return data["mode"]
 
 
+def recoverable_big_preflight(status: dict) -> bool:
+    """One-shot recovery for a known, source-preserving initial EPUB rejection.
+
+    Never automatically replay ambiguous failures, changed source identities,
+    interrupted claims or previously initialized book workspaces.
+    """
+    error = status.get("last_error")
+    return (status.get("state") == "blocked"
+            and status.get("phase") == "operator-intervention-required"
+            and status.get("book_slug") is None
+            and status.get("active") is None
+            and status.get("workflow_revision") is None
+            and status.get("source_sha256") is None
+            and status.get("preflight_retries", 0) == 0
+            and isinstance(error, str)
+            and error.startswith(
+                "JobError: canonical CLI rejected operation: "
+                "ERROR: EPUB source-preserving extraction blocked: "
+                "Unsupported semantic element <big>"
+            ))
+
+
 def auto_resume_requested(status: dict) -> bool:
     """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
     if (status.get("state") != "blocked"
@@ -946,7 +968,9 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         # duplicate cannot bypass its existing review/recovery policy.
         keys.add(key)
         try:
-            if state and state.get("state") in FINAL and not auto_resume_requested(state):
+            if (state and state.get("state") in FINAL
+                    and not auto_resume_requested(state)
+                    and not recoverable_big_preflight(state)):
                 continue
             if state and state.get("state") == "running" and not provider_retry_due(state):
                 continue
@@ -3566,8 +3590,10 @@ def run(job_id: str, *, resume_blocked: bool = False,
     request = request_for(job_id)
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
-    if not resume_blocked and not resume_interrupted and status and auto_resume_requested(status):
+    if (not resume_blocked and not resume_interrupted and status
+            and (auto_resume_requested(status) or recoverable_big_preflight(status))):
         resume_blocked = True
+    preflight_resume = bool(resume_blocked and status and recoverable_big_preflight(status))
     if resume_blocked and resume_interrupted:
         raise JobError("choose only one recovery mode")
     if resume_blocked and (status is None or status.get("state") != "blocked"):
@@ -3579,7 +3605,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
     if (status and status.get("state") == "running" and
             not provider_retry_due(status)):
         return status
-    if (resume_blocked and (status.get("phase") not in
+    if (resume_blocked and not preflight_resume and (status.get("phase") not in
             {"model-blocked", "correction-limit-reached", "review-deferred-requires-operator", "attention-requires-operator"}
             or status.get("active") is not None)):
         raise JobError("resume requires an inactive blocked job")
@@ -3612,7 +3638,16 @@ def run(job_id: str, *, resume_blocked: bool = False,
         raise BookIdentityError("existing book is pinned to a different workflow revision")
     engine, actual = install_engine(revision)
     try:
+        if preflight_resume and folder.exists():
+            raise BookIdentityError(
+                "initial extraction recovery unexpectedly matched an existing book"
+            )
         if not folder.exists():
+            if preflight_resume:
+                # Durable one-shot marker before executing the formerly blocked
+                # extractor. A second failure cannot loop on the 15-minute scan.
+                status["preflight_retries"] = 1
+                checkpoint(job_id, status, None)
             initial_request = {**request, "title": title}
             if author:
                 initial_request["author"] = author
