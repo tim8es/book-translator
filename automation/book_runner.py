@@ -57,7 +57,7 @@ CORRECTION_BATCH_SIZE = 3
 CORRECTION_BATCH_CALLS_PER_CHECKPOINT = 2
 # Immutable public compatibility helper. The current book's literary workflow
 # revision remains pinned; this source-format adapter is versioned separately.
-PUBLIC_STRUCTURAL_HELPER_REVISION = "da992e0d2647a3f0a34e74faff624ec4cff01358"
+PUBLIC_STRUCTURAL_HELPER_REVISION = "d11a30b306a8bac236b73f25ae2f38e89745aab1"
 # Separate immutable public compatibility helper: does NOT change a book's
 # pinned literary revision or reviewer contract.
 PUBLIC_CORRECTION_HELPER_REVISION = "abe8cb030c2e792e2543fdbd2c0295cd9e629024"
@@ -911,6 +911,61 @@ def recoverable_epub_preflight(status: dict) -> bool:
                      error,
                  ) is not None)))
 
+def recoverable_structural_span_blocked(status: dict) -> bool:
+    """One-shot restart of a proven pre-model span-planning bug.
+
+    No model was called, no translation stage was persisted, and the canonical
+    book state must remain claim-free; arbitrary model failures stay blocked.
+    """
+    slug = status.get("book_slug")
+    source_sha = status.get("source_sha256")
+    workflow_sha = status.get("workflow_revision")
+    unit_id = status.get("blocked_unit_id")
+    return (
+        status.get("schema_version") == 1
+        and status.get("state") == "blocked"
+        and status.get("phase") == "model-blocked"
+        and status.get("last_error")
+            == "source paragraph exceeds bounded translator span limit"
+        and status.get("active") is None
+        and type(status.get("failures")) is int
+        and status["failures"] >= MAX_FAILURES
+        and type(status.get("structural_span_retries", 0)) is int
+        and status.get("structural_span_retries", 0) == 0
+        and status.get("model_calls_started", 0) == 0
+        and not status.get("structural_segment_progress")
+        and status.get("provider_retry") is None
+        and isinstance(slug, str)
+        and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug) is not None
+        and isinstance(source_sha, str)
+        and re.fullmatch(r"[0-9a-f]{64}", source_sha) is not None
+        and isinstance(workflow_sha, str) and SHA.fullmatch(workflow_sha) is not None
+        and isinstance(unit_id, str)
+        and re.fullmatch(r"chapter-[0-9]{6}", unit_id) is not None
+    )
+
+
+def approve_auto_structural_span_resume(status: dict) -> None:
+    """Persist a single audited, exact-error infrastructure recovery."""
+    if not recoverable_structural_span_blocked(status):
+        raise JobError("unsafe automatic structural-span recovery")
+    history = status.get("recoveries", [])
+    if not isinstance(history, list):
+        raise JobError("invalid recovery history")
+    history.append({
+        "action": "auto-retry-corrected-structural-preflight",
+        "started_at": clock(),
+        "previous_error": status["last_error"],
+        "helper_revision": PUBLIC_STRUCTURAL_HELPER_REVISION,
+    })
+    status.update({
+        "recoveries": history, "structural_span_retries": 1,
+        "state": "running", "phase": "auto-structural-preflight-resumed",
+        "failures": 0, "last_error": None,
+    })
+    status.pop("last_error_code", None)
+
+
 def auto_resume_requested(status: dict) -> bool:
     """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
     if (status.get("state") != "blocked"
@@ -981,7 +1036,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         try:
             if (state and state.get("state") in FINAL
                     and not auto_resume_requested(state)
-                    and not recoverable_epub_preflight(state)):
+                    and not recoverable_epub_preflight(state)
+                    and not recoverable_structural_span_blocked(state)):
                 continue
             if state and state.get("state") == "running" and not provider_retry_due(state):
                 continue
@@ -1639,22 +1695,46 @@ def bounded_source_plan(source: str, helper, *, limit: int = SOURCE_SPAN_CHAR_LI
             ordinal += 1
             parts.append({**part, "id": f"s{ordinal:05d}"})
             continue
+        # Source markers/links are already isolated by the pinned helper.
+        # A long prose paragraph may still exceed a model-call bound. Split
+        # only on original whitespace, preferring sentence boundaries, and
+        # persist each exact separator as an immutable literal. Never truncate,
+        # split inside a source token or lose a layout delimiter.
         tokens = re.split(r"(\n[ \t]*\n)", core)
+        pieces = []
+        for offset in range(0, len(tokens), 2):
+            paragraph = tokens[offset]
+            while len(paragraph) > limit:
+                spaces = [match for match in re.finditer(r"\s+", paragraph[:limit + 1])
+                          if 0 < match.start() and match.end() <= limit]
+                if not spaces:
+                    raise JobError("source token exceeds bounded translator span limit")
+                sentences = [match for match in spaces
+                             if match.start() >= limit // 2
+                             and paragraph[match.start() - 1] in ".!?…"]
+                split_at = sentences[-1] if sentences else spaces[-1]
+                pieces.append(("text", paragraph[:split_at.start()]))
+                pieces.append(("literal", split_at.group()))
+                paragraph = paragraph[split_at.end():]
+            if paragraph:
+                pieces.append(("text", paragraph))
+            if offset + 1 < len(tokens):
+                pieces.append(("literal", tokens[offset + 1]))
         grouped = []
         current = ""
         separator = ""
-        for offset in range(0, len(tokens), 2):
-            paragraph = tokens[offset]
-            following = tokens[offset + 1] if offset + 1 < len(tokens) else ""
-            if len(paragraph) > limit:
-                raise JobError("source paragraph exceeds bounded translator span limit")
-            if current and len(current) + len(separator) + len(paragraph) > limit:
+        for kind, value in pieces:
+            if kind == "literal":
+                separator += value
+                continue
+            if current and len(current) + len(separator) + len(value) > limit:
                 grouped.append(("text", current))
-                grouped.append(("literal", separator))
-                current = paragraph
+                if separator:
+                    grouped.append(("literal", separator))
+                current = value
             else:
-                current += separator + paragraph
-            separator = following
+                current += separator + value
+            separator = ""
         if current:
             grouped.append(("text", current))
         if separator:
@@ -3602,9 +3682,12 @@ def run(job_id: str, *, resume_blocked: bool = False,
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
     if (not resume_blocked and not resume_interrupted and status
-            and (auto_resume_requested(status) or recoverable_epub_preflight(status))):
+            and (auto_resume_requested(status)
+                 or recoverable_epub_preflight(status)
+                 or recoverable_structural_span_blocked(status))):
         resume_blocked = True
     preflight_resume = bool(resume_blocked and status and recoverable_epub_preflight(status))
+    structural_resume = bool(resume_blocked and status and recoverable_structural_span_blocked(status))
     if resume_blocked and resume_interrupted:
         raise JobError("choose only one recovery mode")
     if resume_blocked and (status is None or status.get("state") != "blocked"):
@@ -3716,7 +3799,10 @@ def run(job_id: str, *, resume_blocked: bool = False,
                            and deferred_review_has_pass(ledger, by_id[unit_id])
                            for unit_id in deferred_review_unit_ids(status)):
                     raise JobError("deferred review units still require a current PASS review")
-            approve_blocked_resume(status)
+            if structural_resume:
+                approve_auto_structural_span_resume(status)
+            else:
+                approve_blocked_resume(status)
             checkpoint(job_id, status, slug)
         elif resume_interrupted:
             if status.get("source_sha256") != request["source_sha256"]:

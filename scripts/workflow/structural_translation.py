@@ -15,7 +15,7 @@ LINK_RE = re.compile(
     r"(?P<image>!?)\[(?P<label>[^\]\n]*)\]\("
     r"(?P<destination><[^>\n]+>|[^)\s]+)(?P<title>\s+[^)\n]*)?\)"
 )
-EPUB_MARKER_RE = re.compile(r"<!--\s*bt-(?:anchor|block):[^>]*-->")
+EPUB_MARKER_RE = re.compile(r"<!--\s*bt-(?:anchor|block|inline|media):[^>]*-->")
 RESERVED_TOKEN_RE = re.compile(r"ZXBTLINK[0-9a-f]{10}N\d{4}(?:START|END)XZ")
 ID_RE = re.compile(r"^s[0-9]{5}$")
 SCHEMA_VERSION = 1
