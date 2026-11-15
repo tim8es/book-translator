@@ -173,9 +173,10 @@ class EpubBigTests(unittest.TestCase):
                 'rel="author">Original Name</a></div>',
             )
             chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
-            self.assertIn("by Original Name", chapters[0].content)
+            self.assertIn("Original Name", chapters[0].content)
+            self.assertIn("<!-- bt-inline:000001:start -->", chapters[0].content)
             self.assertEqual(epub_preserve.audit(source, chapters)["state"], "verified")
-            translated = chapters[0].content.replace("by Original Name", "Автор: Original Name")
+            translated = chapters[0].content.replace("by ", "Автор: ")
             data = epub_preserve.build(
                 source, [{"markdown": translated}],
                 expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
