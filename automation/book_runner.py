@@ -1850,13 +1850,13 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
     except (ValueError, ModelError) as exc:
         raise JobError("staged structural translation failed validation") from exc
     if migrating:
+        migrations = status.get("structural_helper_migrations", [])
+        if not isinstance(migrations, list):
+            raise JobError("invalid structural helper migration audit")
         # Exact old plan and accepted segments were checked before this write.
         stage["helper_revision"] = expected["helper_revision"]
         store_json(path, stage)
-        migrations = status.setdefault("structural_helper_migrations", [])
-        if not isinstance(migrations, list):
-            raise JobError("invalid structural helper migration audit")
-        migrations.append({
+        status.setdefault("structural_helper_migrations", []).append({
             "unit_id": chapter["unit_id"],
             "from_revision": preceding_helper,
             "to_revision": expected["helper_revision"],
