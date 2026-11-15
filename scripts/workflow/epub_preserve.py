@@ -601,8 +601,17 @@ def _inline_structure(node: ET.Element) -> tuple[
         if tag in _STYLED_INLINE:
             return True
         if tag in {"span", "em", "i", "strong", "b"}:
-            return any(_local(inner.tag) in _STYLED_INLINE | _MEDIA_INLINE
-                       for inner in part.iter() if inner is not part)
+            for inner in part.iter():
+                if inner is part:
+                    continue
+                inside = _local(inner.tag)
+                if inside in _STYLED_INLINE | _MEDIA_INLINE:
+                    return True
+                # Adjacent Markdown * and ** delimiters would otherwise form
+                # ambiguous *** runs and change verified source tokens.
+                if (tag in {"strong", "b"} and inside in {"em", "i"}) or (
+                        tag in {"em", "i"} and inside in {"strong", "b"}):
+                    return True
         return False
 
     def visit(parent: ET.Element) -> None:
