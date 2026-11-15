@@ -213,12 +213,28 @@ class EpubBigTests(unittest.TestCase):
             with self.assertRaises(epub_preserve.PreservedEpubError):
                 epub_preserve.analyze(source)
 
-    def test_partial_inline_big_fails_closed_instead_of_losing_style(self):
+    def test_partial_inline_big_preserves_scope_and_class(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "book.epub"
-            synthetic_epub(source, "<p>Before <big>large</big> after.</p>")
-            with self.assertRaisesRegex(epub_preserve.PreservedEpubError, "Inline <big>"):
-                epub_preserve.analyze(source)
+            synthetic_epub(source,
+                           '<p>Before <big class="large"><b>large</b></big> after.</p>')
+            chapter = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))[0]
+            self.assertIn("<!-- bt-inline:000001:start -->**large**"
+                          "<!-- bt-inline:000001:end -->", chapter.content)
+            self.assertEqual(epub_preserve.audit(source, [chapter])["state"], "verified")
+            translated = chapter.content.replace("Before ", "До ").replace("**large**", "**крупный**").replace(" after.", " после.")
+            output = epub_preserve.build(
+                source, [{"markdown": translated}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(output)) as archive:
+                root = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                big = root.find(f".//{{{XHTML}}}p/{{{XHTML}}}big")
+                self.assertEqual(big.get("class"), "large")
+                self.assertEqual(big.find(f"{{{XHTML}}}strong").text, "крупный")
+                self.assertEqual("".join(root.find(f".//{{{XHTML}}}p").itertext()),
+                                 "До крупный после.")
 
     def test_nontrivial_unknown_semantics_still_fail(self):
         with tempfile.TemporaryDirectory() as folder:
