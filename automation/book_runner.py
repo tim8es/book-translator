@@ -903,7 +903,7 @@ def recoverable_epub_preflight(status: dict) -> bool:
             and ((retries in fixed_errors
                   and error.startswith(prefix + fixed_errors[retries]))
                  or (retries == 2 and re.fullmatch(
-                     re.escape(prefix) + r"[^:\\n]+\\.xhtml: Unmapped prose in <div>\\n?",
+                     re.escape(prefix) + r"[^:\n]+\.xhtml: Unmapped prose in <div>\n?",
                      error,
                  ) is not None)))
 
