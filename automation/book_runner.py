@@ -937,7 +937,8 @@ def recoverable_structural_span_blocked(status: dict) -> bool:
         and status.get("provider_retry") is None
         and isinstance(slug, str)
         and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug) is not None
-        and isinstance(source_sha, str) and SHA.fullmatch(source_sha) is not None
+        and isinstance(source_sha, str)
+        and re.fullmatch(r"[0-9a-f]{64}", source_sha) is not None
         and isinstance(workflow_sha, str) and SHA.fullmatch(workflow_sha) is not None
         and isinstance(unit_id, str)
         and re.fullmatch(r"chapter-[0-9]{6}", unit_id) is not None
