@@ -88,6 +88,12 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   innermost text-bearing paragraphs are translated as separate blocks.
   Direct text or tails in a container with nested blocks still fail closed:
   every visible word must belong to exactly one mapped translation unit.
+- A prose-only `div` containing one inert HTTP(S), mailto or same-document
+  hyperlink may be translated as a whole block, including any direct text
+  preceding or following the link. Its `href`, `rel`, classes and original
+  link element remain source-bound; a changed inline label still needs an
+  unambiguous binding at final assembly. Multi-link, image-bearing or
+  structurally ambiguous `div` elements remain blocked.
 - A legacy XHTML `<big>` may wrap the complete text content of a prose
   paragraph, heading or simple leaf `div`. That single wrapper and its
   attributes are preserved around the translated content. A partial inline
