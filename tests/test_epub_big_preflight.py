@@ -261,6 +261,13 @@ class PreflightRecoveryTests(unittest.TestCase):
                           "ERROR: EPUB source-preserving extraction blocked: "
                           "OPS/part.xhtml: Unmapped prose in <div>\n",
         }))
+        self.assertTrue(book_runner.recoverable_epub_preflight({
+            **base,
+            "preflight_retries": 3,
+            "last_error": "JobError: canonical CLI rejected operation: "
+                          "ERROR: EPUB source-preserving extraction blocked: "
+                          "OPS/part.xhtml: Unsupported semantic element <sub>\n",
+        }))
         for updates in (
             {"preflight_retries": 1},
             {"book_slug": "existing-book"},
@@ -307,6 +314,17 @@ class PreflightRecoveryTests(unittest.TestCase):
                 self.assertEqual(book_runner.ready_jobs(),
                                  [{"job_id": self.JOB, "book_key": "intake-test"}])
                 status["preflight_retries"] = 3
+                status_file.write_text(json.dumps(status))
+                self.assertEqual(book_runner.ready_jobs(), [])
+                status["last_error"] = (
+                    "JobError: canonical CLI rejected operation: ERROR: "
+                    "EPUB source-preserving extraction blocked: "
+                    "OPS/part.xhtml: Unsupported semantic element <sub>"
+                )
+                status_file.write_text(json.dumps(status))
+                self.assertEqual(book_runner.ready_jobs(),
+                                 [{"job_id": self.JOB, "book_key": "intake-test"}])
+                status["preflight_retries"] = 4
                 status_file.write_text(json.dumps(status))
                 self.assertEqual(book_runner.ready_jobs(), [])
 
