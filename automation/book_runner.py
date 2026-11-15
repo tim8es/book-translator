@@ -3042,10 +3042,15 @@ def preliminary_context(engine: Path, slug: str, chapter: dict, role: str,
     The Translator / Corrector later calls context() with source-bound spans or
     reviewer-anchored patches; the original remains immutable on disk.
     """
-    book = ROOT / "books" / slug
-    source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
-    if role in {"translator", "corrector"} and len(source) > MAX_CHAPTER_CHARS:
-        return "", "", source
+    source_path = chapter.get("source_path")
+    if role in {"translator", "corrector"} and isinstance(source_path, str):
+        path = ROOT / "books" / slug / source_path
+        if path.is_file() and path.stat().st_size > MAX_CHAPTER_CHARS:
+            source = path.read_bytes().decode("utf-8")
+            if len(source) > MAX_CHAPTER_CHARS:
+                return "", "", source
+    # Delegate normal/invalid states to the canonical existing context
+    # validator. Do not introduce a separate error path for short units.
     return context(engine, slug, chapter, role, pending_style=pending_style,
                    force_full_review=force_full_review)
 
