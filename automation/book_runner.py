@@ -62,12 +62,12 @@ CORRECTION_BATCH_SIZE = 3
 CORRECTION_BATCH_CALLS_PER_CHECKPOINT = 2
 # Immutable public compatibility helper. The current book's literary workflow
 # revision remains pinned; this source-format adapter is versioned separately.
-PUBLIC_STRUCTURAL_HELPER_REVISION = "d11a30b306a8bac236b73f25ae2f38e89745aab1"
+PUBLIC_STRUCTURAL_HELPER_REVISION = "4c584fe5534871cd05aa851d9b7bdbfa696d0edd"
 # Separate immutable public compatibility helper: does NOT change a book's
 # pinned literary revision or reviewer contract.
 PUBLIC_CORRECTION_HELPER_REVISION = "abe8cb030c2e792e2543fdbd2c0295cd9e629024"
 STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT = 2
-STRUCTURAL_MODEL_SEGMENTS_PER_CALL = 3
+STRUCTURAL_MODEL_SEGMENTS_PER_CALL = 24
 DEFAULT_MODEL_CALL_LIMIT = 36
 # shortcut: focused review falls back to a full review above 30k chars; raise only if measured.
 MAX_FOCUSED_CONTEXT_CHARS = 30_000
@@ -1816,9 +1816,20 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
     if not path.exists():
         return path, expected
     stage = read_json(path)
+    # Only this immutable, pure batching-compatible helper may migrate the
+    # previously accepted segment stage. All source/plan/workflow hashes must
+    # match; no translation is rewritten, reaccepted or fabricated.
+    preceding_helper = "d11a30b306a8bac236b73f25ae2f38e89745aab1"
+    migrating = (
+        isinstance(stage, dict)
+        and stage.get("helper_revision") == preceding_helper
+        and expected["helper_revision"] == PUBLIC_STRUCTURAL_HELPER_REVISION
+        and expected["helper_revision"] == "4c584fe5534871cd05aa851d9b7bdbfa696d0edd"
+    )
     if (not isinstance(stage, dict) or set(stage) != set(expected)
             or any(stage.get(k) != v for k, v in expected.items()
-                   if k not in {"segments", "glossary", "style_guide"})
+                   if k not in {"segments", "glossary", "style_guide"}
+                   and not (migrating and k == "helper_revision"))
             or not isinstance(stage.get("segments"), dict)
             or not isinstance(stage.get("glossary"), list)
             or not isinstance(stage.get("style_guide"), list)
@@ -1838,6 +1849,20 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
         }, ensure_ascii=False))
     except (ValueError, ModelError) as exc:
         raise JobError("staged structural translation failed validation") from exc
+    if migrating:
+        migrations = status.get("structural_helper_migrations", [])
+        if not isinstance(migrations, list):
+            raise JobError("invalid structural helper migration audit")
+        # Exact old plan and accepted segments were checked before this write.
+        stage["helper_revision"] = expected["helper_revision"]
+        store_json(path, stage)
+        status.setdefault("structural_helper_migrations", []).append({
+            "unit_id": chapter["unit_id"],
+            "from_revision": preceding_helper,
+            "to_revision": expected["helper_revision"],
+            "source_sha256": plan["source_sha256"],
+            "persisted_segments": len(stage["segments"]),
+        })
     return path, stage
 
 

@@ -111,6 +111,7 @@ class PublicHelperBridgeTests(unittest.TestCase):
         def context(_engine, _slug, _chapter, _role, *, structural_segments):
             return "system", json.dumps(structural_segments), "source"
         with patch.object(worker, "ROOT", self.root), \
+             patch.object(worker, "STRUCTURAL_MODEL_SEGMENTS_PER_CALL", 3), \
              patch.object(worker, "context", side_effect=context), \
              patch.object(worker, "complete",
                           side_effect=complete or self.complete) as calls, \
@@ -201,7 +202,7 @@ class PublicHelperBridgeTests(unittest.TestCase):
         self.assertRegex(worker.PUBLIC_STRUCTURAL_HELPER_REVISION,
                          r"^[0-9a-f]{40}$")
         self.assertEqual(worker.STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT, 2)
-        self.assertEqual(worker.STRUCTURAL_MODEL_SEGMENTS_PER_CALL, 3)
+        self.assertEqual(worker.STRUCTURAL_MODEL_SEGMENTS_PER_CALL, 24)
 
 
 
