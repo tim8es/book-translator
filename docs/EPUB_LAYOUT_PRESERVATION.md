@@ -77,7 +77,7 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   with paragraph/heading blocks, inline text, raster art, a single-image SVG
   wrapper, and a simple legacy hyperlink TOC. Complex EPUB 3 navigation,
   footnotes, tables, scripting, hidden prose, relative links in body prose,
-  and artwork nested inside prose elements remain blocked.
+  and semantically ambiguous artwork inside links remain blocked.
 - Publisher-credit and social-profile paragraphs containing exactly one external linked icon and its label are treated as protected non-literary XHTML. The original link, icon, and label are retained untranslated; EPUB validation compares the entire source and output subtrees. Independent prose outside the linked icon is not exempt and still blocks extraction if mixed with artwork.
 - Artwork can contain **English text baked into pixels** (e.g., a chapter-name
   illustration). The pixels are not translated by this mode, and titles in
@@ -88,6 +88,16 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   innermost text-bearing paragraphs are translated as separate blocks.
   Direct text or tails in a container with nested blocks still fail closed:
   every visible word must belong to exactly one mapped translation unit.
+- A text-bearing paragraph may interleave original raster `<img>`, `<br>`,
+  and `<hr>` elements. Each inert element is represented by an ordered
+  `<!-- bt-media:NNNNNN -->` marker in the translation input. The marker
+  must remain unchanged; EPUB assembly restores the exact original element,
+  position, attributes, and image resource without asking the translator to
+  recreate artwork. A `<strong>`, `<em>`, or span that crosses protected
+  media uses paired `bt-inline` markers to preserve its original scope.
+  Missing, duplicated, or reordered markers block assembly and Auto acceptance.
+  Artwork inside hyperlinks and inline SVG requiring semantic reflow remain
+  blocked unless verified independently.
 - A prose-only `div` containing one inert HTTP(S), mailto or same-document
   hyperlink may be translated as a whole block, including any direct text
   preceding or following the link. Its `href`, `rel`, classes and original
