@@ -23,7 +23,12 @@ VALIDATOR = "epub-preserved-xhtml-v1"
 MODE = "original_xhtml_v1"
 _MARKER = re.compile(r"(?m)^<!-- bt-block:(\d{6}) -->\s*$")
 _PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre"}
-_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
+_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "small", "sub", "sup", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
+_STYLED_INLINE = {"big", "small", "sub", "sup"}
+_INLINE_TOKEN = re.compile(r"<!-- bt-inline:(\d{6}):(start|end) -->")
+_MEDIA_INLINE = {"br", "hr", "img", "wbr"}
+_MEDIA_TOKEN = re.compile(r"<!-- bt-media:(\d{6}) -->")
+_SOURCE_TOKEN = re.compile(r"<!-- bt-(?:inline:\d{6}:(?:start|end)|media:\d{6}) -->")
 
 class PreservedEpubError(ValueError):
     pass
@@ -183,7 +188,8 @@ def _leaf_div_text(node: ET.Element) -> bool:
             continue
         if _local(child.tag) not in {"span", "em", "i", "big"}:
             return False
-        if child.attrib and not (child is _whole_big_wrapper(node)):
+        if child.attrib and not (child is _whole_big_wrapper(node)
+                                 or _local(child.tag) in _STYLED_INLINE):
             return False
     return True
 
@@ -252,8 +258,8 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
         if id(node) in preserved:
             continue
         if _local(node.tag) in _PROSE or _leaf_div_text(node):
-            if any(_local(child.tag) in {"img", "image", "svg"} for child in node.iter() if child is not node):
-                raise PreservedEpubError("Inline artwork inside a prose block needs explicit mapping")
+            if any(_local(child.tag) in {"image", "svg"} for child in node.iter() if child is not node):
+                raise PreservedEpubError("Inline vector artwork inside prose requires explicit mapping")
             if any(_local(child.tag) in _PROSE for child in node.iter() if child is not node):
                 # Blockquotes and list items often contain child paragraphs.
                 # Their children are the translation units; the outer wrapper
@@ -264,13 +270,18 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             if text:
                 output.append((node, text))
     for block, _ in output:
-        big_nodes = [item for item in block.iter() if _local(item.tag) == "big"]
-        if big_nodes and (len(big_nodes) != 1
-                          or big_nodes[0] is not _whole_big_wrapper(block)):
-            raise PreservedEpubError(
-                "Inline <big> cannot be positioned safely in translated prose; "
-                "only a whole-block <big> wrapper is supported"
-            )
+        styled, media, _ = _inline_structure(block)
+        for part in styled + media:
+            if part in styled and not "".join(part.itertext()).strip():
+                # An empty formatting wrapper carrying only protected media
+                # is safe; otherwise it is an ambiguous empty style node.
+                if not any(_local(item.tag) in _MEDIA_INLINE for item in part.iter()):
+                    raise PreservedEpubError("Empty styled inline XHTML requires explicit mapping")
+            ancestor = parents.get(part)
+            while ancestor is not None and ancestor is not block:
+                if _local(ancestor.tag) == "a" and _local(part.tag) != "wbr":
+                    raise PreservedEpubError("Source inline media/style inside a link requires explicit mapping")
+                ancestor = parents.get(ancestor)
     # No text outside a mapped block may silently disappear; e.g. standalone div prose.
     mapped = {id(node) for node, _ in output}
     def walk(node, inside=False):
@@ -569,28 +580,99 @@ def _escaped_source(text: str) -> str:
     return "".join("\\" + ch if ch in "\\*`[]" else ch for ch in text)
 
 
-def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set[str]) -> str:
-    """Represent source italic spans as explicit Markdown emphasis."""
-    out = _escaped_source(node.text or "")
-    for child in node:
-        name = _local(child.tag)
-        content = _inline_source(child, italic_classes, drop_classes)
-        initial = "".join(child.itertext())
-        drop_initial = (name == "span" and _local(node.tag) in _PROSE
-                        and bool(set(child.get("class", "").split()) & drop_classes)
-                        and list(node) and list(node)[0] is child
-                        and (len(initial) == 1 and initial.isalpha()
-                             or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha()))
-        italic = not drop_initial and (name in {"em", "i"} or bool(set(child.get("class", "").split()) & italic_classes))
-        if italic and content.strip():
-            # Keep boundary whitespace outside Markdown emphasis: an inline
-            # <i>word </i>next must not become *word*next during extraction.
-            leading = content[:len(content) - len(content.lstrip())]
-            trailing = content[len(content.rstrip()):]
-            content = leading + "*" + content.strip() + "*" + trailing
-        out += content + _escaped_source(child.tail or "")
-    return out
+def _inline_structure(node: ET.Element) -> tuple[
+    list[ET.Element], list[ET.Element], list[tuple[str, int, ET.Element]]
+]:
+    """Inventory source-order styled spans and inert media/line breaks.
 
+    Formatting wrappers crossing a media marker are promoted to source-bound
+    spans; ordinary emphasis remains compact Markdown. XHTML and attributes
+    are never inferred from translated text.
+    """
+    whole_big = _whole_big_wrapper(node)
+    styles: list[ET.Element] = []
+    media: list[ET.Element] = []
+    events: list[tuple[str, int, ET.Element]] = []
+
+    def needs_boundary(part: ET.Element) -> bool:
+        if part is whole_big:
+            return False
+        tag = _local(part.tag)
+        if tag == "a":
+            return True
+        if tag in _STYLED_INLINE:
+            return True
+        if tag in {"span", "em", "i", "strong", "b"}:
+            for inner in part.iter():
+                if inner is part:
+                    continue
+                inside = _local(inner.tag)
+                if inside in _STYLED_INLINE | _MEDIA_INLINE | {"a"}:
+                    return True
+                # Adjacent Markdown * and ** delimiters would otherwise form
+                # ambiguous *** runs and change verified source tokens.
+                if (tag in {"strong", "b"} and inside in {"em", "i"}) or (
+                        tag in {"em", "i"} and inside in {"strong", "b"}):
+                    return True
+        return False
+
+    def visit(parent: ET.Element) -> None:
+        for child in parent:
+            tag = _local(child.tag)
+            if tag in _MEDIA_INLINE:
+                if list(child) or (child.text or "").strip():
+                    raise PreservedEpubError("Nonempty inline media requires explicit mapping")
+                media.append(child)
+                events.append(("media", len(media), child))
+                continue
+            marked = needs_boundary(child)
+            if marked:
+                styles.append(child)
+                serial = len(styles)
+                events.append(("start", serial, child))
+            visit(child)
+            if marked:
+                events.append(("end", serial, child))
+    visit(node)
+    return styles, media, events
+
+
+def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set[str]) -> str:
+    """Preserve XHTML style, graphic and linebreak locations during translation."""
+    styled, media, _ = _inline_structure(node)
+    styles = {id(part): f"{index:06d}" for index, part in enumerate(styled, 1)}
+    assets = {id(part): f"{index:06d}" for index, part in enumerate(media, 1)}
+
+    def walk(part: ET.Element) -> str:
+        out = _escaped_source(part.text or "")
+        for child in part:
+            if id(child) in assets:
+                content = f"<!-- bt-media:{assets[id(child)]} -->"
+            else:
+                name = _local(child.tag)
+                content = walk(child)
+                initial = "".join(child.itertext())
+                drop_initial = (name == "span" and _local(part.tag) in _PROSE
+                                and bool(set(child.get("class", "").split()) & drop_classes)
+                                and list(part) and list(part)[0] is child
+                                and (len(initial) == 1 and initial.isalpha()
+                                     or len(initial) == 2 and initial[0] in '“"‘\'' and initial[1].isalpha()))
+                italic = (not drop_initial and
+                          (name in {"em", "i"} or
+                           bool(set(child.get("class", "").split()) & italic_classes)))
+                strong = name in {"b", "strong"}
+                if id(child) not in styles and (italic or strong) and content.strip():
+                    leading = content[:len(content) - len(content.lstrip())]
+                    trailing = content[len(content.rstrip()):]
+                    delimiter = "**" if strong else "*"
+                    content = leading + delimiter + content.strip() + delimiter + trailing
+                if id(child) in styles:
+                    key = styles[id(child)]
+                    content = (f"<!-- bt-inline:{key}:start -->" + content
+                               + f"<!-- bt-inline:{key}:end -->")
+            out += content + _escaped_source(child.tail or "")
+        return out
+    return walk(node)
 
 _INLINE_MARKUP = re.compile(
     r"(?<!\\)(\*\*((?:\\.|[^*\\\n])+)\*\*|\*((?:\\.|[^*\\\n])+)\*)"
@@ -604,7 +686,10 @@ def _unescape_source_markdown(text: str) -> str:
 def _plain_markdown(text: str) -> str:
     # Remove generated emphasis while allowing escaped literal stars *inside*
     # an italic run: *text \*aside\** must reconstruct text *aside* exactly.
-    plain = _INLINE_MARKUP.sub(lambda match: match.group(2) or match.group(3), text)
+    plain = _INLINE_MARKUP.sub(
+        lambda match: match.group(2) or match.group(3),
+        _SOURCE_TOKEN.sub("", text),
+    )
     return _unescape_source_markdown(plain)
 
 
@@ -630,6 +715,42 @@ def _render_inline(node: ET.Element, content: str) -> None:
         pos = match.end()
     append(content[pos:])
 
+
+def _render_styled_inline(node: ET.Element, text: str,
+                          events: Sequence[tuple[str, int, ET.Element]]) -> None:
+    """Rebuild original inline XHTML from exact ordered source markers.
+
+    Both translated text and original markup are needed. Source image tags,
+    breaks and CSS classes are copied, not generated by the model.
+    """
+    expected = [
+        (f"<!-- bt-media:{index:06d} -->" if kind == "media"
+         else f"<!-- bt-inline:{index:06d}:{kind} -->")
+        for kind, index, _ in events
+    ]
+    markers = list(_SOURCE_TOKEN.finditer(text))
+    if [match.group(0) for match in markers] != expected:
+        raise PreservedEpubError("Translated styled inline or media markers are missing, reordered or duplicated")
+    stack = [node]
+    cursor = 0
+    for match, (kind, _, original) in zip(markers, events):
+        _append_inline(stack[-1], text[cursor:match.start()])
+        if kind == "start":
+            stack.append(ET.SubElement(stack[-1], original.tag, dict(original.attrib)))
+        elif kind == "end":
+            if len(stack) < 2:
+                raise PreservedEpubError("Unbalanced source XHTML inline style markers")
+            stack.pop()
+        elif kind == "media":
+            inert = deepcopy(original)
+            inert.tail = None
+            stack[-1].append(inert)
+        else:
+            raise PreservedEpubError("Invalid source XHTML inline marker")
+        cursor = match.end()
+    if len(stack) != 1:
+        raise PreservedEpubError("Unclosed source XHTML inline style marker")
+    _append_inline(stack[0], text[cursor:])
 
 def _append_inline(node: ET.Element, text: str) -> None:
     """Append translated inline text after existing preserved links or emphasis."""
@@ -669,7 +790,7 @@ def parse_blocks(markdown: str, *, expected: int, allow_source_escapes: bool = F
         value = markdown[match.end():end].strip()
         if not value:
             raise PreservedEpubError(f"Empty translated block {i+1}")
-        if "<!-- bt-" in value:
+        if "<!-- bt-" in _SOURCE_TOKEN.sub("", value):
             raise PreservedEpubError("Unrecognized nested workflow marker")
         if allow_source_escapes:
             value = _plain_markdown(value)
@@ -765,6 +886,41 @@ def build(
                                  or len(initial) == 2 and initial[0] in '“\"‘\'' and initial[1].isalpha())
                             else None)
                 links = [n for n in node.iter() if _local(n.tag) == "a"]
+                styles, media, inline_events = _inline_structure(node)
+                marker_links = [part for part in styles if _local(part.tag) == "a"]
+                if marker_links:
+                    if len(marker_links) != len(links):
+                        raise PreservedEpubError("Unmapped source hyperlink in styled paragraph")
+                    # Paired source-bound markers reconstruct the exact source
+                    # href/rel at its translated location, avoiding label guesses.
+                    # Backwards-compatible explicit link bindings are assertions
+                    # of the translated label, not permission to move a URL.
+                    for link_number, link in enumerate(links, 1):
+                        binding_key = f"{doc.path}#{block_number}:{link_number}"
+                        explicit = bindings.get(binding_key)
+                        if explicit is None:
+                            continue
+                        serial = next(index for index, item in enumerate(styles, 1)
+                                      if item is link)
+                        begin = f"<!-- bt-inline:{serial:06d}:start -->"
+                        finish = f"<!-- bt-inline:{serial:06d}:end -->"
+                        start = translated.find(begin)
+                        end = translated.find(finish, start + len(begin))
+                        if start < 0 or end < 0:
+                            raise PreservedEpubError(
+                                f"Hyperlink order or boundary changed: {doc.path}"
+                            )
+                        label = _plain_markdown(translated[start + len(begin):end])
+                        if label != explicit:
+                            raise PreservedEpubError(
+                                f"Hyperlink label was lost or ambiguous: {doc.path}"
+                            )
+                        used_bindings.add(binding_key)
+                    links = []
+                if (styles or media) and (links or drop_cap is not None):
+                    raise PreservedEpubError(
+                        "Styled inline with unmapped links or drop caps requires explicit mapping"
+                    )
                 # Markdown emphasis enclosing a hyperlink must be rendered
                 # across the link boundary, not as stray literal asterisks.
                 linked_content = translated
@@ -865,9 +1021,9 @@ def build(
                     # Its single, block-wide scope remains correct after rewording.
                     target = ET.SubElement(node, big_wrapper.tag, big_wrapper.attrib)
                     target.tail = big_suffix
-                    _render_inline(target, translated)
+                    _render_styled_inline(target, translated, inline_events)
                 else:
-                    _render_inline(node, translated)
+                    _render_styled_inline(node, translated, inline_events)
             replacements[doc.path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
         unused = set(bindings) - used_bindings
         if unused:

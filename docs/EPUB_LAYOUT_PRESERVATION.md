@@ -42,11 +42,13 @@ reconstructed as XHTML `<em>` after translation. Inline whitespace at emphasis
 and span boundaries stays outside Markdown markers to avoid joining source
 words. Independent source coverage verifies those word boundaries. Escaped literal
 Markdown punctuation inside italic text, including `*word*`, stays literal
-through source coverage and XHTML rendering. Link targets are preserved
-only if each original inline link label survives verbatim in its original order;
-otherwise assembly fails closed. Safe `<wbr>` word-break hints inside linked
-labels are preserved with the original link subtree, including when a prose
-block has multiple independent links. Word-breaks outside links remain blocked. The output OPF and translated XHTML declare the target language.
+through source coverage and XHTML rendering. Inline hyperlinks are represented by protected `bt-inline` start/end
+markers, allowing visible labels to be translated while the original URL,
+`rel`, and source attributes are copied back unchanged and in order. Missing,
+duplicated, or reordered link markers block assembly. Safe `<wbr>`
+word-break hints inside linked labels use source-bound media markers to keep
+their original positions, including in multi-link paragraphs. Word-breaks
+outside links remain blocked. The output OPF and translated XHTML declare the target language.
 
 ## Bounds and limitations
 
@@ -77,7 +79,7 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   with paragraph/heading blocks, inline text, raster art, a single-image SVG
   wrapper, and a simple legacy hyperlink TOC. Complex EPUB 3 navigation,
   footnotes, tables, scripting, hidden prose, relative links in body prose,
-  and artwork nested inside prose elements remain blocked.
+  and semantically ambiguous artwork inside links remain blocked.
 - Publisher-credit and social-profile paragraphs containing exactly one external linked icon and its label are treated as protected non-literary XHTML. The original link, icon, and label are retained untranslated; EPUB validation compares the entire source and output subtrees. Independent prose outside the linked icon is not exempt and still blocks extraction if mixed with artwork.
 - Artwork can contain **English text baked into pixels** (e.g., a chapter-name
   illustration). The pixels are not translated by this mode, and titles in
@@ -88,19 +90,37 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   innermost text-bearing paragraphs are translated as separate blocks.
   Direct text or tails in a container with nested blocks still fail closed:
   every visible word must belong to exactly one mapped translation unit.
+- A text-bearing paragraph may interleave original raster `<img>`, `<br>`,
+  and `<hr>` elements. Each inert element is represented by an ordered
+  `<!-- bt-media:NNNNNN -->` marker in the translation input. The marker
+  must remain unchanged; EPUB assembly restores the exact original element,
+  position, attributes, and image resource without asking the translator to
+  recreate artwork. A `<strong>`, `<em>`, or span that crosses protected
+  media uses paired `bt-inline` markers to preserve its original scope.
+  Missing, duplicated, or reordered markers block assembly and Auto acceptance.
+  Artwork inside hyperlinks and inline SVG requiring semantic reflow remain
+  blocked unless verified independently.
 - A prose-only `div` containing one inert HTTP(S), mailto or same-document
   hyperlink may be translated as a whole block, including any direct text
   preceding or following the link. Its `href`, `rel`, classes and original
   link element remain source-bound; a changed inline label still needs an
   unambiguous binding at final assembly. Multi-link, image-bearing or
   structurally ambiguous `div` elements remain blocked.
+- XHTML inline `<big>`, `<small>`, `<sub>`, and `<sup>` are represented by
+  protected, ordered `<!-- bt-inline:NNNNNN:start -->` and
+  `<!-- bt-inline:NNNNNN:end -->` boundaries inside the prose block.
+  Translate the visible words *between* each pair, but keep every boundary
+  verbatim and in the same order. The renderer reconstructs the original
+  tag and attributes (including CSS classes) around translated content.
+  The independent text audit ignores the technical markers but compares all
+  original text tokens. Nested styled inline elements and those embedded in
+  hyperlinks or drop-cap paragraphs remain blocking unless separately mapped.
 - A legacy XHTML `<big>` may wrap the complete text content of a prose
   paragraph, heading or simple leaf `div`. That single wrapper and its
   attributes are preserved around the translated content. A partial inline
-  `<big>` span, ambiguous nested wrappers, or unsupported surrounding markup
-  remain blocking: automatic realignment would silently change formatting.
-  A verified `<big>` around an entire prose block is also retained as part
-  of the original XHTML structure.
+  `<big>` uses the same protected boundaries as other styled inline text.
+  Nested styled wrappers and ambiguous mixed semantic markup still block,
+  rather than silently flattening source typography.
 - Body paragraph styles and raster placement are preserved, but arbitrary
   complex inline CSS cannot be reconstructed automatically for freely translated
   sentences. Only the explicitly supported emphasis and drop-cap cases are

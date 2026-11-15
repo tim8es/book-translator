@@ -173,9 +173,10 @@ class EpubBigTests(unittest.TestCase):
                 'rel="author">Original Name</a></div>',
             )
             chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
-            self.assertIn("by Original Name", chapters[0].content)
+            self.assertIn("Original Name", chapters[0].content)
+            self.assertIn("<!-- bt-inline:000001:start -->", chapters[0].content)
             self.assertEqual(epub_preserve.audit(source, chapters)["state"], "verified")
-            translated = chapters[0].content.replace("by Original Name", "Автор: Original Name")
+            translated = chapters[0].content.replace("by ", "Автор: ")
             data = epub_preserve.build(
                 source, [{"markdown": translated}],
                 expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -213,12 +214,28 @@ class EpubBigTests(unittest.TestCase):
             with self.assertRaises(epub_preserve.PreservedEpubError):
                 epub_preserve.analyze(source)
 
-    def test_partial_inline_big_fails_closed_instead_of_losing_style(self):
+    def test_partial_inline_big_preserves_scope_and_class(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "book.epub"
-            synthetic_epub(source, "<p>Before <big>large</big> after.</p>")
-            with self.assertRaisesRegex(epub_preserve.PreservedEpubError, "Inline <big>"):
-                epub_preserve.analyze(source)
+            synthetic_epub(source,
+                           '<p>Before <big class="large"><b>large</b></big> after.</p>')
+            chapter = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))[0]
+            self.assertIn("<!-- bt-inline:000001:start -->**large**"
+                          "<!-- bt-inline:000001:end -->", chapter.content)
+            self.assertEqual(epub_preserve.audit(source, [chapter])["state"], "verified")
+            translated = chapter.content.replace("Before ", "До ").replace("**large**", "**крупный**").replace(" after.", " после.")
+            output = epub_preserve.build(
+                source, [{"markdown": translated}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(output)) as archive:
+                root = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                big = root.find(f".//{{{XHTML}}}p/{{{XHTML}}}big")
+                self.assertEqual(big.get("class"), "large")
+                self.assertEqual(big.find(f"{{{XHTML}}}strong").text, "крупный")
+                self.assertEqual("".join(root.find(f".//{{{XHTML}}}p").itertext()),
+                                 "До крупный после.")
 
     def test_nontrivial_unknown_semantics_still_fail(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -260,6 +277,13 @@ class PreflightRecoveryTests(unittest.TestCase):
             "last_error": "JobError: canonical CLI rejected operation: "
                           "ERROR: EPUB source-preserving extraction blocked: "
                           "OPS/part.xhtml: Unmapped prose in <div>\n",
+        }))
+        self.assertTrue(book_runner.recoverable_epub_preflight({
+            **base,
+            "preflight_retries": 3,
+            "last_error": "JobError: canonical CLI rejected operation: "
+                          "ERROR: EPUB source-preserving extraction blocked: "
+                          "OPS/part.xhtml: Unsupported semantic element <sub>\n",
         }))
         for updates in (
             {"preflight_retries": 1},
@@ -307,6 +331,17 @@ class PreflightRecoveryTests(unittest.TestCase):
                 self.assertEqual(book_runner.ready_jobs(),
                                  [{"job_id": self.JOB, "book_key": "intake-test"}])
                 status["preflight_retries"] = 3
+                status_file.write_text(json.dumps(status))
+                self.assertEqual(book_runner.ready_jobs(), [])
+                status["last_error"] = (
+                    "JobError: canonical CLI rejected operation: ERROR: "
+                    "EPUB source-preserving extraction blocked: "
+                    "OPS/part.xhtml: Unsupported semantic element <sub>"
+                )
+                status_file.write_text(json.dumps(status))
+                self.assertEqual(book_runner.ready_jobs(),
+                                 [{"job_id": self.JOB, "book_key": "intake-test"}])
+                status["preflight_retries"] = 4
                 status_file.write_text(json.dumps(status))
                 self.assertEqual(book_runner.ready_jobs(), [])
 
