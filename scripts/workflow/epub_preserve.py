@@ -607,7 +607,7 @@ def _inline_structure(node: ET.Element) -> tuple[
                 if inner is part:
                     continue
                 inside = _local(inner.tag)
-                if inside in _STYLED_INLINE | _MEDIA_INLINE:
+                if inside in _STYLED_INLINE | _MEDIA_INLINE | {"a"}:
                     return True
                 # Adjacent Markdown * and ** delimiters would otherwise form
                 # ambiguous *** runs and change verified source tokens.
@@ -893,6 +893,29 @@ def build(
                         raise PreservedEpubError("Unmapped source hyperlink in styled paragraph")
                     # Paired source-bound markers reconstruct the exact source
                     # href/rel at its translated location, avoiding label guesses.
+                    # Backwards-compatible explicit link bindings are assertions
+                    # of the translated label, not permission to move a URL.
+                    for link_number, link in enumerate(links, 1):
+                        binding_key = f"{doc.path}#{block_number}:{link_number}"
+                        explicit = bindings.get(binding_key)
+                        if explicit is None:
+                            continue
+                        serial = next(index for index, item in enumerate(styles, 1)
+                                      if item is link)
+                        begin = f"<!-- bt-inline:{serial:06d}:start -->"
+                        finish = f"<!-- bt-inline:{serial:06d}:end -->"
+                        start = translated.find(begin)
+                        end = translated.find(finish, start + len(begin))
+                        if start < 0 or end < 0:
+                            raise PreservedEpubError(
+                                f"Hyperlink order or boundary changed: {doc.path}"
+                            )
+                        label = _plain_markdown(translated[start + len(begin):end])
+                        if label != explicit:
+                            raise PreservedEpubError(
+                                f"Hyperlink label was lost or ambiguous: {doc.path}"
+                            )
+                        used_bindings.add(binding_key)
                     links = []
                 if (styles or media) and (links or drop_cap is not None):
                     raise PreservedEpubError(
