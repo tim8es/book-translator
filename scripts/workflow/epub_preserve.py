@@ -590,6 +590,12 @@ def _inline_structure(node: ET.Element) -> tuple[
     are never inferred from translated text.
     """
     whole_big = _whole_big_wrapper(node)
+    # If linebreaks or source styling share a paragraph with links, use
+    # source-bound link scopes rather than guessing translated label offsets.
+    protect_links = any(
+        _local(part.tag) in _STYLED_INLINE | _MEDIA_INLINE
+        for part in node.iter() if part is not node
+    )
     styles: list[ET.Element] = []
     media: list[ET.Element] = []
     events: list[tuple[str, int, ET.Element]] = []
@@ -598,6 +604,8 @@ def _inline_structure(node: ET.Element) -> tuple[
         if part is whole_big:
             return False
         tag = _local(part.tag)
+        if tag == "a" and protect_links:
+            return True
         if tag in _STYLED_INLINE:
             return True
         if tag in {"span", "em", "i", "strong", "b"}:
@@ -885,9 +893,16 @@ def build(
                             else None)
                 links = [n for n in node.iter() if _local(n.tag) == "a"]
                 styles, media, inline_events = _inline_structure(node)
+                marker_links = [part for part in styles if _local(part.tag) == "a"]
+                if marker_links:
+                    if len(marker_links) != len(links):
+                        raise PreservedEpubError("Unmapped source hyperlink in styled paragraph")
+                    # Paired source-bound markers reconstruct the exact source
+                    # href/rel at its translated location, avoiding label guesses.
+                    links = []
                 if (styles or media) and (links or drop_cap is not None):
                     raise PreservedEpubError(
-                        "Styled inline with links or drop caps requires explicit mapping"
+                        "Styled inline with unmapped links or drop caps requires explicit mapping"
                     )
                 # Markdown emphasis enclosing a hyperlink must be rendered
                 # across the link boundary, not as stray literal asterisks.
