@@ -92,6 +92,12 @@ def clock() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def safe_book_slug(slug: object) -> bool:
+    """Allow canonical Unicode slugs; reject separators, traversal and controls."""
+    return (isinstance(slug, str)
+            and re.fullmatch(r"[^\\W_][\\w-]{0,99}", slug) is not None)
+
+
 def safe_id(value: str) -> str:
     if not ID.fullmatch(value or ""):
         raise JobError("job_id must be 32 lowercase hexadecimal characters")
@@ -923,7 +929,7 @@ def auto_resume_requested(status: dict) -> bool:
             or status.get("active") is not None):
         return False
     slug = status.get("book_slug")
-    if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+    if not safe_book_slug(slug):
         return False
     path = ROOT / "books" / slug / ".workflow" / "auto-control.json"
     if not path.exists():
@@ -946,7 +952,7 @@ def book_key(job_id: str) -> str:
     state = status_path(job_id)
     if state.exists():
         slug = read_json(state).get("book_slug")
-        if isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+        if safe_book_slug(slug):
             return slug
     request = request_for(job_id)
     # Before a workspace is initialized, identical source/language jobs share a lane.
@@ -1705,7 +1711,7 @@ def incomplete_structural_batch(selected: list[dict], translated: dict) -> list[
 
 
 def structural_stage_path(slug: str, unit_id: str) -> Path:
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug)
+    if (not safe_book_slug(slug)
             or not re.fullmatch(r"chapter-[0-9]{6}", unit_id)):
         raise JobError("unsafe structural translation staging identity")
     return (ROOT / "books" / slug / ".workflow" / "auto-structural-translation"
@@ -1916,7 +1922,7 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
 
 
 def correction_stage_path(slug: str, unit_id: str) -> Path:
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug)
+    if (not safe_book_slug(slug)
             or not re.fullmatch(r"chapter-[0-9]{6}", unit_id)):
         raise JobError("unsafe correction staging identity")
     return (ROOT / "books" / slug / ".workflow" / "auto-correction-batches"
