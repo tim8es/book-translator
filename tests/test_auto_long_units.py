@@ -109,6 +109,37 @@ class LongUnitContextTests(unittest.TestCase):
             with self.assertRaisesRegex(runner.JobError, "safe single-context"):
                 runner.context(self.root, "synthetic-book", self.chapter, "reviewer")
 
+    def test_unicode_book_slug_is_safe_for_staging_selection_and_resume(self):
+        slug, job_id = "без-названия", "f" * 32
+        self.assertTrue(runner.safe_book_slug(slug))
+        for unsafe in ("", ".", "..", "../escape", "a/b", "a\\\\b",
+                       "_private", "space name", "-" * 2, "a" * 101):
+            self.assertFalse(runner.safe_book_slug(unsafe), unsafe)
+        status = {
+            "book_slug": slug, "state": "blocked", "phase": "model-blocked",
+            "active": None, "updated_at": "2026-11-15T20:37:41+00:00",
+        }
+        control = self.root / "books" / slug / ".workflow" / "auto-control.json"
+        runner.store_json(control, {
+            "schema_version": 1, "mode": "auto",
+            "updated_at": "2026-11-16T00:00:00+00:00",
+        })
+        runner.store_json(self.root / "automation" / "status" / (job_id + ".json"), status)
+        runner.store_json(self.root / "intake" / "auto" / job_id / "request.json", {
+            "job_id": job_id, "source_sha256": "a" * 64,
+            "target_language": "ru",
+        })
+        with patch.object(runner, "ROOT", self.root):
+            self.assertTrue(runner.auto_resume_requested(status))
+            self.assertEqual(runner.book_key(job_id), slug)
+            self.assertEqual(runner.ready_jobs(), [{"job_id": job_id, "book_key": slug}])
+            self.assertEqual(runner.structural_stage_path(slug, "chapter-000002").name,
+                             "chapter-000002.json")
+            self.assertEqual(runner.correction_stage_path(slug, "chapter-000002").name,
+                             "chapter-000002.json")
+            with self.assertRaisesRegex(runner.JobError, "unsafe"):
+                runner.structural_stage_path("../escape", "chapter-000002")
+
     def test_normal_short_unit_still_uses_existing_direct_context(self):
         short = "One complete paragraph."
         (self.book / self.chapter["source_path"]).write_text(short, "utf-8")
