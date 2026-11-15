@@ -306,7 +306,7 @@ class PreserveTests(unittest.TestCase):
             b' and <a href="https://second.example">second.example</a> today.</p>')
         chapters = self.extracted()
         report = ep.audit(self.source, chapters)
-        self.assertIn('first.example', chapters[0].content)
+        self.assertIn('first.<!-- bt-media:000001 -->example', chapters[0].content)
         self.assertIn('second.example', chapters[0].content)
         translated = chapters[0].content.replace('Visit ', 'Посетите ').replace(' today.', ' сегодня.')
         result = ep.build(
@@ -331,8 +331,10 @@ class PreserveTests(unittest.TestCase):
         chapters = self.extracted()
         report = ep.audit(self.source, chapters)
         changed = chapters[0].content.replace(
-            'one.example then two.example', 'two.example затем one.example')
-        with self.assertRaisesRegex(ep.PreservedEpubError, 'Hyperlink order'):
+            '<!-- bt-inline:000001:start -->',
+            '<!-- bt-inline:000002:start -->',
+        )
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'markers'):
             ep.build(self.source, [{'markdown': changed}, {'markdown': chapters[1].content}],
                      expected_source_sha256=report['source_sha256'], language='ru')
 
@@ -399,7 +401,7 @@ class PreserveTests(unittest.TestCase):
 
     def test_inline_image_with_independent_prose_remains_blocked(self):
         self.install_linked_icon_credit(unlinked_text=True)
-        with self.assertRaisesRegex(ep.PreservedEpubError, 'Inline artwork inside a prose block'):
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'inside a link'):
             ep.analyze(self.source)
 
     def install_vellum_toc(self):
@@ -910,7 +912,7 @@ class PreserveTests(unittest.TestCase):
             self.assertEqual(link.get("href"), "https://example.org/order")
             self.assertEqual("".join(link.itertext()), "Закажите сейчас!")
 
-    def test_partial_link_needs_explicit_translated_label(self):
+    def test_partial_link_is_source_bound_and_optional_binding_is_verified(self):
         self.replace_xhtml(
             "OPS/intro.xhtml",
             b'<p class="intro"><span class="italic">Hello</span> world.</p>',
@@ -918,28 +920,33 @@ class PreserveTests(unittest.TestCase):
         )
         chapters = self.extracted()
         coverage = ep.audit(self.source, chapters)
-        translated = chapters[0].content.replace(
-            "Read more today.", "Читайте подробнее сегодня."
-        )
+        source_text = chapters[0].content
+        self.assertIn('<!-- bt-inline:000001:start -->more<!-- bt-inline:000001:end -->',
+                      source_text)
+        translated = (source_text.replace("Read ", "Читайте ")
+                      .replace("more", "подробнее")
+                      .replace(" today.", " сегодня."))
         options = {
             "source": self.source,
             "chapters": [{"markdown": translated}, {"markdown": chapters[1].content}],
             "expected_source_sha256": coverage["source_sha256"],
             "language": "ru",
         }
-        with self.assertRaisesRegex(ep.PreservedEpubError, "explicit label binding"):
-            ep.build(**options)
-        output = ep.build(
+        # The source URL stays in the original XHTML; the model only edits
+        # words within a protected link boundary.
+        output = ep.build(**options)
+        explicitly_checked = ep.build(
             **options,
             link_bindings={"OPS/intro.xhtml#1:1": "подробнее"},
         )
+        self.assertEqual(output, explicitly_checked)
         with zipfile.ZipFile(io.BytesIO(output)) as archive:
             paragraph = ET.fromstring(archive.read("OPS/intro.xhtml")).find(".//{*}p")
             link = paragraph.find("{*}a")
             self.assertEqual(link.get("href"), "https://example.org/more")
             self.assertEqual("".join(link.itertext()), "подробнее")
             self.assertEqual("".join(paragraph.itertext()), "Читайте подробнее сегодня.")
-        with self.assertRaisesRegex(ep.PreservedEpubError, "explicit label binding"):
+        with self.assertRaisesRegex(ep.PreservedEpubError, "did not match source links"):
             ep.build(
                 **options,
                 link_bindings={"OPS/intro.xhtml#2:1": "подробнее"},
@@ -949,6 +956,12 @@ class PreserveTests(unittest.TestCase):
                 **options,
                 link_bindings={"OPS/intro.xhtml#1:1": "nonexistent"},
             )
+        # The exact protected link boundary is the security contract.
+        broken = translated.replace("<!-- bt-inline:000001:start -->", "")
+        with self.assertRaisesRegex(ep.PreservedEpubError, "markers"):
+            ep.build(**{**options, "chapters": [
+                {"markdown": broken}, {"markdown": chapters[1].content}
+            ]})
 
     def test_translated_italic_link_has_no_literal_markdown_markers(self):
         self.replace_xhtml(
@@ -970,7 +983,7 @@ class PreserveTests(unittest.TestCase):
             self.assertEqual(link.get("href"), "https://example.org/promo")
             self.assertEqual("".join(link.itertext()), "Покупайте здесь")
             self.assertEqual("".join(paragraph.itertext()), "Покупайте здесь")
-            self.assertIsNotNone(paragraph.find("{*}em"))
+            self.assertIsNotNone(paragraph.find("{*}i"))
 
     def test_publisher_epub_with_late_compressed_mimetype_is_normalized(self):
         with zipfile.ZipFile(self.source) as archive:
