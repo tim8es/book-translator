@@ -138,6 +138,81 @@ class EpubBigTests(unittest.TestCase):
             with self.assertRaisesRegex(epub_preserve.PreservedEpubError, "Unmapped prose"):
                 epub_preserve.analyze(source)
 
+    def test_single_link_div_text_and_destination_are_preserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(
+                source,
+                '<div class="nav">» <a href="#target" rel="next">Continue</a></div>'
+                '<p id="target">Chapter text.</p>',
+            )
+            chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
+            self.assertEqual(chapters[0].content.count("<!-- bt-block:"), 2)
+            self.assertEqual(epub_preserve.audit(source, chapters)["state"], "verified")
+            translation = chapters[0].content.replace("Chapter text.", "Текст главы.")
+            out = epub_preserve.build(
+                source, [{"markdown": translation}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(out)) as archive:
+                page = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                nav = page.find(f".//{{{XHTML}}}div")
+                self.assertEqual(nav.text, "» ")
+                link = nav.find(f"{{{XHTML}}}a")
+                self.assertEqual(link.get("href"), "#target")
+                self.assertEqual(link.get("rel"), "next")
+                self.assertEqual(link.text, "Continue")
+
+    def test_source_author_byline_keeps_external_author_link(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(
+                source,
+                '<div class="byline">by <a href="https://example.org/writer" '
+                'rel="author">Original Name</a></div>',
+            )
+            chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
+            self.assertIn("by Original Name", chapters[0].content)
+            self.assertEqual(epub_preserve.audit(source, chapters)["state"], "verified")
+            translated = chapters[0].content.replace("by Original Name", "Автор: Original Name")
+            data = epub_preserve.build(
+                source, [{"markdown": translated}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                root = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                div = root.find(f".//{{{XHTML}}}div")
+                self.assertEqual(div.text, "Автор: ")
+                author = div.find(f"{{{XHTML}}}a")
+                self.assertEqual(author.text, "Original Name")
+                self.assertEqual(author.get("href"), "https://example.org/writer")
+                self.assertEqual(author.get("rel"), "author")
+
+    def test_leaf_div_preserves_classed_big_wrapper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(source, '<div><big class="huge">Title</big></div>')
+            chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
+            output = epub_preserve.build(
+                source, [{"markdown": chapters[0].content.replace("Title", "Название")}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(output)) as archive:
+                page = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                big = page.find(f".//{{{XHTML}}}div/{{{XHTML}}}big")
+                self.assertEqual(big.attrib, {"class": "huge"})
+                self.assertEqual(big.text, "Название")
+
+    def test_link_div_with_inline_image_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(source, '<div>→ <a href="#target"><img src="picture.png"/></a></div>')
+            with self.assertRaises(epub_preserve.PreservedEpubError):
+                epub_preserve.analyze(source)
+
     def test_partial_inline_big_fails_closed_instead_of_losing_style(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "book.epub"
@@ -177,7 +252,14 @@ class PreflightRecoveryTests(unittest.TestCase):
             "preflight_retries": 1,
             "last_error": "JobError: canonical CLI rejected operation: "
                           "ERROR: EPUB source-preserving extraction blocked: "
-                          "Nested prose blocks require explicit mapping\\n",
+                          "Nested prose blocks require explicit mapping\n",
+        }))
+        self.assertTrue(book_runner.recoverable_epub_preflight({
+            **base,
+            "preflight_retries": 2,
+            "last_error": "JobError: canonical CLI rejected operation: "
+                          "ERROR: EPUB source-preserving extraction blocked: "
+                          "OPS/part.xhtml: Unmapped prose in <div>\n",
         }))
         for updates in (
             {"preflight_retries": 1},
@@ -214,6 +296,17 @@ class PreflightRecoveryTests(unittest.TestCase):
                 self.assertEqual(book_runner.ready_jobs(),
                                  [{"job_id": self.JOB, "book_key": "intake-test"}])
                 status["preflight_retries"] = 2
+                status_file.write_text(json.dumps(status))
+                self.assertEqual(book_runner.ready_jobs(), [])
+                status["last_error"] = (
+                    "JobError: canonical CLI rejected operation: ERROR: "
+                    "EPUB source-preserving extraction blocked: "
+                    "source.xhtml: Unmapped prose in <div>"
+                )
+                status_file.write_text(json.dumps(status))
+                self.assertEqual(book_runner.ready_jobs(),
+                                 [{"job_id": self.JOB, "book_key": "intake-test"}])
+                status["preflight_retries"] = 3
                 status_file.write_text(json.dumps(status))
                 self.assertEqual(book_runner.ready_jobs(), [])
 

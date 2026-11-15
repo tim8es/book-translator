@@ -166,10 +166,24 @@ def _leaf_div_text(node: ET.Element) -> bool:
     """
     if _local(node.tag) != "div" or not "".join(node.itertext()).strip():
         return False
+    children = list(node)
+    # A standalone navigation/credit link within a prose-only div is safe
+    # when its destination remains source-bound and no artwork is nested.
+    # This is not a TOC exemption: its text is still extracted and reviewed.
+    if (len(children) == 1 and _local(children[0].tag) == "a"
+            and children[0].get("href", "").startswith(("https://", "http://", "mailto:", "#"))
+            and set(children[0].attrib) <= {"href", "rel", "id", "class", "title"}
+            and all(_local(part.tag) in {"span", "em", "i", "b", "strong"}
+                    and not part.attrib
+                    for part in children[0].iter() if part is not children[0])
+            and all(_local(part.tag) != "img" for part in children[0].iter())):
+        return True
     for child in node.iter():
         if child is node:
             continue
-        if _local(child.tag) not in {"span", "em", "i", "big"} or child.attrib:
+        if _local(child.tag) not in {"span", "em", "i", "big"}:
+            return False
+        if child.attrib and not (child is _whole_big_wrapper(node)):
             return False
     return True
 
