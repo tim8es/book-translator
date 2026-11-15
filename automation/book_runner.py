@@ -95,7 +95,7 @@ def clock() -> str:
 def safe_book_slug(slug: object) -> bool:
     """Allow canonical Unicode slugs; reject separators, traversal and controls."""
     return (isinstance(slug, str)
-            and re.fullmatch(r"[^\\W_][\\w-]{0,99}", slug) is not None)
+            and re.fullmatch(r"[^\W_][\w-]{0,99}", slug) is not None)
 
 
 def safe_id(value: str) -> str:
