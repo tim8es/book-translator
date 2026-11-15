@@ -66,7 +66,7 @@ STRUCTURAL_MODEL_SEGMENTS_PER_CALL = 3
 DEFAULT_MODEL_CALL_LIMIT = 36
 # shortcut: focused review falls back to a full review above 30k chars; raise only if measured.
 MAX_FOCUSED_CONTEXT_CHARS = 30_000
-EPUB_MARKER_RE = re.compile(r"<!--\s*bt-(?:anchor|block|inline):[^>]*-->")
+EPUB_MARKER_RE = re.compile(r"<!--\s*bt-(?:anchor|block|inline|media):[^>]*-->")
 EPUB_BLOCK_RE = re.compile(r"<!--\s*bt-block:[^>]*-->")
 MARKDOWN_LINK_RE = re.compile(
     r'(?P<image>!?)\[(?P<label>[^\]\n]*)\]\('
