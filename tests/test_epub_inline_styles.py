@@ -128,7 +128,8 @@ class InlineStylesTests(unittest.TestCase):
             translated = (chapter.content.replace("First", "Первый")
                           .replace("second", "второй")
                           .replace(" last", " последний")
-                          .replace("line", "строка"))
+                          .replace("<!-- bt-media:000003 -->line",
+                                   "<!-- bt-media:000003 -->строка"))
             book_runner.check_markers(chapter.content, translated)
             out = epub_preserve.build(
                 epub, [{"markdown": translated}],
