@@ -26,7 +26,7 @@ _PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote
 _ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "small", "sub", "sup", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
 _STYLED_INLINE = {"big", "small", "sub", "sup"}
 _INLINE_TOKEN = re.compile(r"<!-- bt-inline:(\d{6}):(start|end) -->")
-_MEDIA_INLINE = {"br", "hr", "img"}
+_MEDIA_INLINE = {"br", "hr", "img", "wbr"}
 _MEDIA_TOKEN = re.compile(r"<!-- bt-media:(\d{6}) -->")
 _SOURCE_TOKEN = re.compile(r"<!-- bt-(?:inline:\d{6}:(?:start|end)|media:\d{6}) -->")
 
@@ -279,7 +279,7 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
                     raise PreservedEpubError("Empty styled inline XHTML requires explicit mapping")
             ancestor = parents.get(part)
             while ancestor is not None and ancestor is not block:
-                if _local(ancestor.tag) == "a":
+                if _local(ancestor.tag) == "a" and _local(part.tag) != "wbr":
                     raise PreservedEpubError("Source inline media/style inside a link requires explicit mapping")
                 ancestor = parents.get(ancestor)
     # No text outside a mapped block may silently disappear; e.g. standalone div prose.
@@ -590,12 +590,6 @@ def _inline_structure(node: ET.Element) -> tuple[
     are never inferred from translated text.
     """
     whole_big = _whole_big_wrapper(node)
-    # If linebreaks or source styling share a paragraph with links, use
-    # source-bound link scopes rather than guessing translated label offsets.
-    protect_links = any(
-        _local(part.tag) in _STYLED_INLINE | _MEDIA_INLINE
-        for part in node.iter() if part is not node
-    )
     styles: list[ET.Element] = []
     media: list[ET.Element] = []
     events: list[tuple[str, int, ET.Element]] = []
@@ -604,7 +598,7 @@ def _inline_structure(node: ET.Element) -> tuple[
         if part is whole_big:
             return False
         tag = _local(part.tag)
-        if tag == "a" and protect_links:
+        if tag == "a":
             return True
         if tag in _STYLED_INLINE:
             return True
