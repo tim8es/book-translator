@@ -57,7 +57,7 @@ CORRECTION_BATCH_SIZE = 3
 CORRECTION_BATCH_CALLS_PER_CHECKPOINT = 2
 # Immutable public compatibility helper. The current book's literary workflow
 # revision remains pinned; this source-format adapter is versioned separately.
-PUBLIC_STRUCTURAL_HELPER_REVISION = "da992e0d2647a3f0a34e74faff624ec4cff01358"
+PUBLIC_STRUCTURAL_HELPER_REVISION = "d11a30b306a8bac236b73f25ae2f38e89745aab1"
 # Separate immutable public compatibility helper: does NOT change a book's
 # pinned literary revision or reviewer contract.
 PUBLIC_CORRECTION_HELPER_REVISION = "abe8cb030c2e792e2543fdbd2c0295cd9e629024"
@@ -1639,22 +1639,46 @@ def bounded_source_plan(source: str, helper, *, limit: int = SOURCE_SPAN_CHAR_LI
             ordinal += 1
             parts.append({**part, "id": f"s{ordinal:05d}"})
             continue
+        # Source markers/links are already isolated by the pinned helper.
+        # A long prose paragraph may still exceed a model-call bound. Split
+        # only on original whitespace, preferring sentence boundaries, and
+        # persist each exact separator as an immutable literal. Never truncate,
+        # split inside a source token or lose a layout delimiter.
         tokens = re.split(r"(\n[ \t]*\n)", core)
+        pieces = []
+        for offset in range(0, len(tokens), 2):
+            paragraph = tokens[offset]
+            while len(paragraph) > limit:
+                spaces = [match for match in re.finditer(r"\s+", paragraph[:limit + 1])
+                          if 0 < match.start() and match.end() <= limit]
+                if not spaces:
+                    raise JobError("source token exceeds bounded translator span limit")
+                sentences = [match for match in spaces
+                             if match.start() >= limit // 2
+                             and paragraph[match.start() - 1] in ".!?…"]
+                split_at = sentences[-1] if sentences else spaces[-1]
+                pieces.append(("text", paragraph[:split_at.start()]))
+                pieces.append(("literal", split_at.group()))
+                paragraph = paragraph[split_at.end():]
+            if paragraph:
+                pieces.append(("text", paragraph))
+            if offset + 1 < len(tokens):
+                pieces.append(("literal", tokens[offset + 1]))
         grouped = []
         current = ""
         separator = ""
-        for offset in range(0, len(tokens), 2):
-            paragraph = tokens[offset]
-            following = tokens[offset + 1] if offset + 1 < len(tokens) else ""
-            if len(paragraph) > limit:
-                raise JobError("source paragraph exceeds bounded translator span limit")
-            if current and len(current) + len(separator) + len(paragraph) > limit:
+        for kind, value in pieces:
+            if kind == "literal":
+                separator += value
+                continue
+            if current and len(current) + len(separator) + len(value) > limit:
                 grouped.append(("text", current))
-                grouped.append(("literal", separator))
-                current = paragraph
+                if separator:
+                    grouped.append(("literal", separator))
+                current = value
             else:
-                current += separator + paragraph
-            separator = following
+                current += separator + value
+            separator = ""
         if current:
             grouped.append(("text", current))
         if separator:
