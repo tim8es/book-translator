@@ -157,13 +157,24 @@ class InlineStylesTests(unittest.TestCase):
                                         "inside a link"):
                 epub_preserve.analyze(epub)
 
-    def test_source_with_nested_inline_style_is_rejected(self):
+    def test_nested_inline_styles_keep_original_scope(self):
         with tempfile.TemporaryDirectory() as directory:
             epub = Path(directory) / "book.epub"
-            source_book(epub, "<p><small>word<sup>2</sup></small></p>")
-            with self.assertRaisesRegex(epub_preserve.PreservedEpubError,
-                                        "Nested or linked styled inline"):
-                epub_preserve.analyze(epub)
+            source_book(epub, '<p><small class="quiet">word<sup>2</sup></small></p>')
+            chapter = chapter_for(epub)
+            self.assertEqual(epub_preserve.audit(epub, [chapter])["state"], "verified")
+            text = chapter.content.replace("word", "слово")
+            out = epub_preserve.build(
+                epub, [{"markdown": text}],
+                expected_source_sha256=hashlib.sha256(epub.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(out)) as zf:
+                root = ET.fromstring(zf.read("OPS/part.xhtml"))
+                small = root.find(f".//{{{XHTML}}}small")
+                self.assertEqual(small.get("class"), "quiet")
+                self.assertEqual(small.text, "слово")
+                self.assertEqual(small.find(f"{{{XHTML}}}sup").text, "2")
 
 
 if __name__ == "__main__":
