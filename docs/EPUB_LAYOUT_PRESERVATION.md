@@ -42,11 +42,13 @@ reconstructed as XHTML `<em>` after translation. Inline whitespace at emphasis
 and span boundaries stays outside Markdown markers to avoid joining source
 words. Independent source coverage verifies those word boundaries. Escaped literal
 Markdown punctuation inside italic text, including `*word*`, stays literal
-through source coverage and XHTML rendering. Link targets are preserved
-only if each original inline link label survives verbatim in its original order;
-otherwise assembly fails closed. Safe `<wbr>` word-break hints inside linked
-labels are preserved with the original link subtree, including when a prose
-block has multiple independent links. Word-breaks outside links remain blocked. The output OPF and translated XHTML declare the target language.
+through source coverage and XHTML rendering. Inline hyperlinks are represented by protected `bt-inline` start/end
+markers, allowing visible labels to be translated while the original URL,
+`rel`, and source attributes are copied back unchanged and in order. Missing,
+duplicated, or reordered link markers block assembly. Safe `<wbr>`
+word-break hints inside linked labels use source-bound media markers to keep
+their original positions, including in multi-link paragraphs. Word-breaks
+outside links remain blocked. The output OPF and translated XHTML declare the target language.
 
 ## Bounds and limitations
 
