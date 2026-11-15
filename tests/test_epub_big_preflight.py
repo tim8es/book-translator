@@ -164,6 +164,32 @@ class EpubBigTests(unittest.TestCase):
                 self.assertEqual(link.get("rel"), "next")
                 self.assertEqual(link.text, "Continue")
 
+    def test_source_author_byline_keeps_external_author_link(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "book.epub"
+            synthetic_epub(
+                source,
+                '<div class="byline">by <a href="https://example.org/writer" '
+                'rel="author">Original Name</a></div>',
+            )
+            chapters = epub_preserve.extract(source, lambda **kw: SimpleNamespace(**kw))
+            self.assertIn("by Original Name", chapters[0].content)
+            self.assertEqual(epub_preserve.audit(source, chapters)["state"], "verified")
+            translated = chapters[0].content.replace("by Original Name", "Автор: Original Name")
+            data = epub_preserve.build(
+                source, [{"markdown": translated}],
+                expected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                language="ru",
+            )
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                root = ET.fromstring(archive.read("OPS/chapter.xhtml"))
+                div = root.find(f".//{{{XHTML}}}div")
+                self.assertEqual(div.text, "Автор: ")
+                author = div.find(f"{{{XHTML}}}a")
+                self.assertEqual(author.text, "Original Name")
+                self.assertEqual(author.get("href"), "https://example.org/writer")
+                self.assertEqual(author.get("rel"), "author")
+
     def test_leaf_div_preserves_classed_big_wrapper(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "book.epub"
