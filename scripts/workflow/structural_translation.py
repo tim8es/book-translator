@@ -19,7 +19,11 @@ EPUB_MARKER_RE = re.compile(r"<!--\s*bt-(?:anchor|block|inline|media):[^>]*-->")
 RESERVED_TOKEN_RE = re.compile(r"ZXBTLINK[0-9a-f]{10}N\d{4}(?:START|END)XZ")
 ID_RE = re.compile(r"^s[0-9]{5}$")
 SCHEMA_VERSION = 1
-MAX_SEGMENTS_PER_MODEL_CALL = 3
+# Auto may request larger source-ID batches; preserve short defaults for
+# compatibility with existing callers and cap the combined text sent to a model.
+DEFAULT_SEGMENTS_PER_MODEL_CALL = 3
+MAX_SEGMENTS_PER_MODEL_CALL = 24
+MAX_SOURCE_CHARS_PER_MODEL_CALL = 3500
 
 
 class StructureError(ValueError):
@@ -112,7 +116,7 @@ def spans(translation_plan: dict) -> list[dict]:
 
 
 def next_spans(translation_plan: dict, completed: dict,
-               limit: int = MAX_SEGMENTS_PER_MODEL_CALL) -> list[dict]:
+               limit: int = DEFAULT_SEGMENTS_PER_MODEL_CALL) -> list[dict]:
     if type(limit) is not int or not 1 <= limit <= MAX_SEGMENTS_PER_MODEL_CALL:
         raise StructureError("invalid structural model batch size")
     available = spans(translation_plan)
@@ -122,7 +126,20 @@ def next_spans(translation_plan: dict, completed: dict,
                    or not isinstance(v, str) or not v.strip()
                    for k, v in completed.items())):
         raise StructureError("invalid persisted segment translations")
-    return [x for x in available if x["id"] not in completed][:limit]
+    selected = []
+    chars = 0
+    for item in available:
+        if item["id"] in completed:
+            continue
+        size = len(item["source"])
+        if selected and (len(selected) >= limit
+                         or chars + size > MAX_SOURCE_CHARS_PER_MODEL_CALL):
+            break
+        if size > MAX_SOURCE_CHARS_PER_MODEL_CALL:
+            raise StructureError("source segment exceeds model batch character budget")
+        selected.append(item)
+        chars += size
+    return selected
 
 
 
