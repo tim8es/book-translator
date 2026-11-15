@@ -85,8 +85,9 @@ class LongUnitContextTests(unittest.TestCase):
                 self.root, "synthetic-book", self.chapter, "translator",
                 structural_segments=spans[:3])
             self.assertEqual(original, self.source)
-            self.assertIn(spans[0]["source"], prompt)
-            self.assertNotIn(spans[-1]["source"], prompt)
+            # Segments travel as JSON, so embedded newlines are escaped.
+            self.assertIn("Passage 0.", prompt)
+            self.assertNotIn("Passage 169.", prompt)
             self.assertLess(len(system) + len(prompt), runner.MAX_CHAPTER_CHARS)
 
     def test_long_reviewer_has_complete_but_budgeted_evidence(self):
