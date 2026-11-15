@@ -241,7 +241,11 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             if any(_local(child.tag) in {"img", "image", "svg"} for child in node.iter() if child is not node):
                 raise PreservedEpubError("Inline artwork inside a prose block needs explicit mapping")
             if any(_local(child.tag) in _PROSE for child in node.iter() if child is not node):
-                raise PreservedEpubError("Nested prose blocks require explicit mapping")
+                # Blockquotes and list items often contain child paragraphs.
+                # Their children are the translation units; the outer wrapper
+                # stays in original XHTML. The unmapped-text walk below rejects
+                # direct prose or tails in the skipped container.
+                continue
             text = "".join(node.itertext()).strip()
             if text:
                 output.append((node, text))
@@ -503,7 +507,10 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
                 if media_type == "image/svg+xml":
                     _verify_static_svg(data, asset)
                 imgs.append({"path": asset, "sha256": _hash(data), "media_type": media_type})
-            blocks = _blocks(root)
+            try:
+                blocks = _blocks(root)
+            except PreservedEpubError as exc:
+                raise PreservedEpubError(f"{path}: {exc}") from exc
             if not blocks and not imgs:
                 raise PreservedEpubError(f"No text or artwork in spine XHTML: {path}")
             img_titles = [n.get("alt", "").strip() for n in body.iter() if _local(n.tag) == "img" and n.get("alt", "").strip()]

@@ -83,6 +83,11 @@ block has multiple independent links. Word-breaks outside links remain blocked. 
   illustration). The pixels are not translated by this mode, and titles in
   image-only source documents remain original-language. A separate image/text
   localization pipeline is required for fully localized visual typography.
+- Prose containers such as `<blockquote><p>...</p></blockquote>` and
+  `<li><p>...</p></li>` preserve their structural wrappers while the
+  innermost text-bearing paragraphs are translated as separate blocks.
+  Direct text or tails in a container with nested blocks still fail closed:
+  every visible word must belong to exactly one mapped translation unit.
 - A legacy XHTML `<big>` may wrap the complete text content of a prose
   paragraph, heading or simple leaf `div`. That single wrapper and its
   attributes are preserved around the translated content. A partial inline
