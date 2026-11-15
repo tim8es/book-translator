@@ -44,6 +44,11 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FINAL = {"done", "blocked"}
 MAX_SOURCE_BYTES = 15_000_000
 MAX_CHAPTER_CHARS = 70_000
+# Large source units use durable, source-identified translation spans.
+# A moderately larger full-unit review is admitted only under a second
+# prompt-size limit; oversized review requests still fail closed.
+MAX_REVIEW_SOURCE_CHARS = 90_000
+MAX_REVIEW_PROMPT_CHARS = 210_000
 MAX_CORRECTIONS = 3
 MAX_ACCEPTED_REVIEWS_PER_UNIT = 4
 MAX_CORRECTION_EXTENSIONS = 1
@@ -85,6 +90,12 @@ class BookIdentityError(JobError):
 
 def clock() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def safe_book_slug(slug: object) -> bool:
+    """Allow canonical Unicode slugs; reject separators, traversal and controls."""
+    return (isinstance(slug, str)
+            and re.fullmatch(r"[^\W_][\w-]{0,99}", slug) is not None)
 
 
 def safe_id(value: str) -> str:
@@ -973,7 +984,7 @@ def auto_resume_requested(status: dict) -> bool:
             or status.get("active") is not None):
         return False
     slug = status.get("book_slug")
-    if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+    if not safe_book_slug(slug):
         return False
     path = ROOT / "books" / slug / ".workflow" / "auto-control.json"
     if not path.exists():
@@ -996,7 +1007,7 @@ def book_key(job_id: str) -> str:
     state = status_path(job_id)
     if state.exists():
         slug = read_json(state).get("book_slug")
-        if isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+        if safe_book_slug(slug):
             return slug
     request = request_for(job_id)
     # Before a workspace is initialized, identical source/language jobs share a lane.
@@ -1780,7 +1791,7 @@ def incomplete_structural_batch(selected: list[dict], translated: dict) -> list[
 
 
 def structural_stage_path(slug: str, unit_id: str) -> Path:
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug)
+    if (not safe_book_slug(slug)
             or not re.fullmatch(r"chapter-[0-9]{6}", unit_id)):
         raise JobError("unsafe structural translation staging identity")
     return (ROOT / "books" / slug / ".workflow" / "auto-structural-translation"
@@ -1991,7 +2002,7 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
 
 
 def correction_stage_path(slug: str, unit_id: str) -> Path:
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug)
+    if (not safe_book_slug(slug)
             or not re.fullmatch(r"chapter-[0-9]{6}", unit_id)):
         raise JobError("unsafe correction staging identity")
     return (ROOT / "books" / slug / ".workflow" / "auto-correction-batches"
@@ -2784,7 +2795,12 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         engine, "reviewer" if role == "reviewer" else "translator")
     source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
     if len(source) > MAX_CHAPTER_CHARS:
-        raise JobError("chapter exceeds safe single-context limit; bounded chunking required")
+        bounded_translator = role == "translator" and structural_segments is not None
+        bounded_corrector = role == "corrector" and correction_findings is not None
+        bounded_reviewer = (role == "reviewer"
+                            and len(source) <= MAX_REVIEW_SOURCE_CHARS)
+        if not (bounded_translator or bounded_corrector or bounded_reviewer):
+            raise JobError("chapter exceeds safe single-context limit; bounded chunking required")
     marker_count = len(EPUB_MARKER_RE.findall(source))
     link_count = len(list(MARKDOWN_LINK_RE.finditer(source)))
     if structural_segments is not None:
@@ -3092,7 +3108,31 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                  "order and do not omit a link. The adapter restores the original link destinations "
                  "after translation, so keep every ZXBTLINK boundary token exactly in place. "
                  "Translate visible link labels only when the pinned role contract permits it.")
+    if (role == "reviewer" and len(source) > MAX_CHAPTER_CHARS
+            and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS):
+        raise JobError("complete reviewer prompt exceeds safe budget; bounded review required")
     return system, user, source
+
+
+def preliminary_context(engine: Path, slug: str, chapter: dict, role: str,
+                        *, pending_style: list[dict] | None = None,
+                        force_full_review: bool = False) -> tuple[str, str, str]:
+    """Avoid assembling an oversized full prompt before segmented execution.
+
+    The Translator / Corrector later calls context() with source-bound spans or
+    reviewer-anchored patches; the original remains immutable on disk.
+    """
+    source_path = chapter.get("source_path")
+    if role in {"translator", "corrector"} and isinstance(source_path, str):
+        path = ROOT / "books" / slug / source_path
+        if path.is_file() and path.stat().st_size > MAX_CHAPTER_CHARS:
+            source = path.read_bytes().decode("utf-8")
+            if len(source) > MAX_CHAPTER_CHARS:
+                return "", "", source
+    # Delegate normal/invalid states to the canonical existing context
+    # validator. Do not introduce a separate error path for short units.
+    return context(engine, slug, chapter, role, pending_style=pending_style,
+                   force_full_review=force_full_review)
 
 
 def check_markers(source: str, translation: str) -> None:
@@ -3337,10 +3377,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 raise JobError("invalid durable correction extension counter")
         force_full_review = (role == "reviewer"
                              and status.get("force_full_review_unit") == unit_id)
-        system, user, source = context(engine, slug, chapter,
-                                       "translator" if retranslate_incomplete else role,
-                                       pending_style=status.get("pending_style", []),
-                                       force_full_review=force_full_review)
+        system, user, source = preliminary_context(
+            engine, slug, chapter,
+            "translator" if retranslate_incomplete else role,
+            pending_style=status.get("pending_style", []),
+            force_full_review=force_full_review)
         structural_helper = None
         structural_plan = None
         if ((role == "translator" and not external_link_only(source)
