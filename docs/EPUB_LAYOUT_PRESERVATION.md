@@ -130,6 +130,23 @@ outside links remain blocked. The output OPF and translated XHTML declare the ta
 - Existing books retain their pinned runtime and extraction mode; upgrading a
   book requires the explicit workflow revision transition, not a silent switch.
 
+## Automatic translation batching
+
+The Auto adapter loads a separately pinned, pure structural helper to withhold
+XHTML block, inline, media and anchor markers and original hyperlinks from
+language-model inputs. For marker-dense source documents it may request up to
+24 source-ID-identified fragments in one response, capped at 3,500 original
+source characters per call. Default smaller helper calls remain compatible.
+Every fragment, literal separator, ordering marker and original source SHA
+stays bound to the exact corpus; the model cannot create its own markers.
+
+A prior Auto stage can adopt the newer batching-only helper **only** when its
+saved unit, source identity, literary workflow revision and full segment plan
+hash are unchanged, and every persisted translation still passes strict segment
+validation. The migration updates helper provenance, not accepted literary
+state. Unknown helper transitions remain blocked. This improves call efficiency
+but does not increase the per-job model-call spending limit.
+
 ## Acceptance tests
 
 A supported image-rich EPUB must pass:
