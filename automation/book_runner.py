@@ -911,6 +911,60 @@ def recoverable_epub_preflight(status: dict) -> bool:
                      error,
                  ) is not None)))
 
+def recoverable_structural_span_blocked(status: dict) -> bool:
+    """One-shot restart of a proven pre-model span-planning bug.
+
+    No model was called, no translation stage was persisted, and the canonical
+    book state must remain claim-free; arbitrary model failures stay blocked.
+    """
+    slug = status.get("book_slug")
+    source_sha = status.get("source_sha256")
+    workflow_sha = status.get("workflow_revision")
+    unit_id = status.get("blocked_unit_id")
+    return (
+        status.get("schema_version") == 1
+        and status.get("state") == "blocked"
+        and status.get("phase") == "model-blocked"
+        and status.get("last_error")
+            == "source paragraph exceeds bounded translator span limit"
+        and status.get("active") is None
+        and type(status.get("failures")) is int
+        and status["failures"] >= MAX_FAILURES
+        and type(status.get("structural_span_retries", 0)) is int
+        and status.get("structural_span_retries", 0) == 0
+        and status.get("model_calls_started", 0) == 0
+        and not status.get("structural_segment_progress")
+        and status.get("provider_retry") is None
+        and isinstance(slug, str)
+        and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug) is not None
+        and isinstance(source_sha, str) and SHA.fullmatch(source_sha) is not None
+        and isinstance(workflow_sha, str) and SHA.fullmatch(workflow_sha) is not None
+        and isinstance(unit_id, str)
+        and re.fullmatch(r"chapter-[0-9]{6}", unit_id) is not None
+    )
+
+
+def approve_auto_structural_span_resume(status: dict) -> None:
+    """Persist a single audited, exact-error infrastructure recovery."""
+    if not recoverable_structural_span_blocked(status):
+        raise JobError("unsafe automatic structural-span recovery")
+    history = status.get("recoveries", [])
+    if not isinstance(history, list):
+        raise JobError("invalid recovery history")
+    history.append({
+        "action": "auto-retry-corrected-structural-preflight",
+        "started_at": clock(),
+        "previous_error": status["last_error"],
+        "helper_revision": PUBLIC_STRUCTURAL_HELPER_REVISION,
+    })
+    status.update({
+        "recoveries": history, "structural_span_retries": 1,
+        "state": "running", "phase": "auto-structural-preflight-resumed",
+        "failures": 0, "last_error": None,
+    })
+    status.pop("last_error_code", None)
+
+
 def auto_resume_requested(status: dict) -> bool:
     """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
     if (status.get("state") != "blocked"
@@ -981,7 +1035,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         try:
             if (state and state.get("state") in FINAL
                     and not auto_resume_requested(state)
-                    and not recoverable_epub_preflight(state)):
+                    and not recoverable_epub_preflight(state)
+                    and not recoverable_structural_span_blocked(state)):
                 continue
             if state and state.get("state") == "running" and not provider_retry_due(state):
                 continue
@@ -3626,9 +3681,12 @@ def run(job_id: str, *, resume_blocked: bool = False,
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
     if (not resume_blocked and not resume_interrupted and status
-            and (auto_resume_requested(status) or recoverable_epub_preflight(status))):
+            and (auto_resume_requested(status)
+                 or recoverable_epub_preflight(status)
+                 or recoverable_structural_span_blocked(status))):
         resume_blocked = True
     preflight_resume = bool(resume_blocked and status and recoverable_epub_preflight(status))
+    structural_resume = bool(resume_blocked and status and recoverable_structural_span_blocked(status))
     if resume_blocked and resume_interrupted:
         raise JobError("choose only one recovery mode")
     if resume_blocked and (status is None or status.get("state") != "blocked"):
@@ -3740,7 +3798,10 @@ def run(job_id: str, *, resume_blocked: bool = False,
                            and deferred_review_has_pass(ledger, by_id[unit_id])
                            for unit_id in deferred_review_unit_ids(status)):
                     raise JobError("deferred review units still require a current PASS review")
-            approve_blocked_resume(status)
+            if structural_resume:
+                approve_auto_structural_span_resume(status)
+            else:
+                approve_blocked_resume(status)
             checkpoint(job_id, status, slug)
         elif resume_interrupted:
             if status.get("source_sha256") != request["source_sha256"]:
