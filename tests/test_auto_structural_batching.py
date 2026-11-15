@@ -38,8 +38,8 @@ class BoundedBatchTests(unittest.TestCase):
         self.assertLessEqual(sum(len(item["source"]) for item in remaining), 3500)
 
     def test_single_large_fragment_not_overpacked(self):
-        source = ("A very long prose sentence. " * 70 + "\n\n" +
-                  "Another longer prose sentence. " * 65)
+        source = (("A very long prose sentence. " * 70).rstrip() + "\n\n" +
+                  ("Another longer prose sentence. " * 65).rstrip())
         plan = book_runner.bounded_source_plan(source, helper)
         spans = helper.next_spans(plan, {}, limit=24)
         self.assertLessEqual(sum(len(x["source"]) for x in spans), 3500)
