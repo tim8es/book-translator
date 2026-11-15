@@ -226,14 +226,14 @@ class PreflightRecoveryTests(unittest.TestCase):
             "preflight_retries": 1,
             "last_error": "JobError: canonical CLI rejected operation: "
                           "ERROR: EPUB source-preserving extraction blocked: "
-                          "Nested prose blocks require explicit mapping\\n",
+                          "Nested prose blocks require explicit mapping\n",
         }))
         self.assertTrue(book_runner.recoverable_epub_preflight({
             **base,
             "preflight_retries": 2,
             "last_error": "JobError: canonical CLI rejected operation: "
                           "ERROR: EPUB source-preserving extraction blocked: "
-                          "OPS/part.xhtml: Unmapped prose in <div>\\n",
+                          "OPS/part.xhtml: Unmapped prose in <div>\n",
         }))
         for updates in (
             {"preflight_retries": 1},
