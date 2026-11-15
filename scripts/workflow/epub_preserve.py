@@ -24,7 +24,7 @@ MODE = "original_xhtml_v1"
 _MARKER = re.compile(r"(?m)^<!-- bt-block:(\d{6}) -->\s*$")
 _PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre"}
 _ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "small", "sub", "sup", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
-_STYLED_INLINE = {"small", "sub", "sup"}
+_STYLED_INLINE = {"big", "small", "sub", "sup"}
 _INLINE_TOKEN = re.compile(r"<!-- bt-inline:(\d{6}):(start|end) -->")
 
 class PreservedEpubError(ValueError):
@@ -185,7 +185,8 @@ def _leaf_div_text(node: ET.Element) -> bool:
             continue
         if _local(child.tag) not in {"span", "em", "i", "big"}:
             return False
-        if child.attrib and not (child is _whole_big_wrapper(node)):
+        if child.attrib and not (child is _whole_big_wrapper(node)
+                                 or _local(child.tag) in _STYLED_INLINE):
             return False
     return True
 
@@ -266,24 +267,18 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             if text:
                 output.append((node, text))
     for block, _ in output:
-        styled = [part for part in block.iter() if _local(part.tag) in _STYLED_INLINE]
+        styled = _styled_inline_nodes(block)
         for part in styled:
             if not "".join(part.itertext()).strip():
                 raise PreservedEpubError("Empty styled inline XHTML requires explicit mapping")
             ancestor = parents.get(part)
             while ancestor is not None and ancestor is not block:
-                if _local(ancestor.tag) in _STYLED_INLINE | {"a"}:
+                if (_local(ancestor.tag) in _STYLED_INLINE | {"a"}
+                        and ancestor is not _whole_big_wrapper(block)):
                     raise PreservedEpubError(
                         "Nested or linked styled inline XHTML requires explicit mapping"
                     )
                 ancestor = parents.get(ancestor)
-        big_nodes = [item for item in block.iter() if _local(item.tag) == "big"]
-        if big_nodes and (len(big_nodes) != 1
-                          or big_nodes[0] is not _whole_big_wrapper(block)):
-            raise PreservedEpubError(
-                "Inline <big> cannot be positioned safely in translated prose; "
-                "only a whole-block <big> wrapper is supported"
-            )
     # No text outside a mapped block may silently disappear; e.g. standalone div prose.
     mapped = {id(node) for node, _ in output}
     def walk(node, inside=False):
@@ -584,7 +579,9 @@ def _escaped_source(text: str) -> str:
 
 def _styled_inline_nodes(node: ET.Element) -> list[ET.Element]:
     """Source-order inline styles that require protected, editable boundaries."""
-    return [item for item in node.iter() if _local(item.tag) in _STYLED_INLINE]
+    whole_big = _whole_big_wrapper(node)
+    return [item for item in node.iter()
+            if _local(item.tag) in _STYLED_INLINE and item is not whole_big]
 
 
 def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set[str]) -> str:
@@ -611,10 +608,12 @@ def _inline_source(node: ET.Element, italic_classes: set[str], drop_classes: set
             italic = (not drop_initial and
                       (name in {"em", "i"} or
                        bool(set(child.get("class", "").split()) & italic_classes)))
-            if italic and content.strip():
+            strong = name in {"b", "strong"}
+            if (italic or strong) and content.strip():
                 leading = content[:len(content) - len(content.lstrip())]
                 trailing = content[len(content.rstrip()):]
-                content = leading + "*" + content.strip() + "*" + trailing
+                delimiter = "**" if strong else "*"
+                content = leading + delimiter + content.strip() + delimiter + trailing
             if id(child) in styles:
                 key = styles[id(child)]
                 content = (f"<!-- bt-inline:{key}:start -->" + content
