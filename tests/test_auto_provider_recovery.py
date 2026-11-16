@@ -434,7 +434,7 @@ class ProviderRecoveryTests(unittest.TestCase):
     def test_deferred_retry_signal_is_bound_to_current_generation_and_auto_mode(self):
         job_id = "b" * 32
         slug = "synthetic-book"
-        with tempfile.TemporaryDirectory() as directory, \\
+        with tempfile.TemporaryDirectory() as directory, \
              patch.object(worker, "ROOT", Path(directory)):
             store = worker.status_path(job_id)
             store.parent.mkdir(parents=True)
@@ -464,7 +464,7 @@ class ProviderRecoveryTests(unittest.TestCase):
     def test_deferred_retry_rejects_invalid_and_oversized_deadlines(self):
         with self.assertRaisesRegex(worker.JobError, "timezone-aware"):
             worker.provider_retry_signal("c" * 32, "2026-11-16T12:00:00")
-        with tempfile.TemporaryDirectory() as directory, \\
+        with tempfile.TemporaryDirectory() as directory, \
              patch.object(worker, "ROOT", Path(directory)):
             job_id, slug = "b" * 32, "synthetic-book"
             status = {**self.status, "book_slug": slug, "active": None}
