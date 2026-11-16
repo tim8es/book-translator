@@ -120,7 +120,7 @@ class AdaptiveRunnerTests(unittest.TestCase):
         stage_path = book / ".workflow/auto-correction-batches/chapter-000001.json"
         return root, chapter, review, status, patches, stage_path
 
-    def run(self, fixture):
+    def execute_correction(self, fixture):
         root, chapter, record, status, patches, stage_path = fixture
         stages = {"patches": [], "glossary": [], "style_guide": []}
         calls = []
@@ -144,7 +144,7 @@ class AdaptiveRunnerTests(unittest.TestCase):
     def test_critical_issue_isolated_and_original_remains_unchanged(self):
         with tempfile.TemporaryDirectory() as folder:
             fixture = self.fixture(folder, critical=True)
-            result, calls = self.run(fixture)
+            result, calls = self.execute_correction(fixture)
             self.assertIsNone(result)
             self.assertEqual(calls, [["fix-1"]])
             self.assertEqual(fixture[3]["model_calls_started"], 1)
@@ -158,7 +158,7 @@ class AdaptiveRunnerTests(unittest.TestCase):
     def test_simple_findings_group_without_skipping_independent_review(self):
         with tempfile.TemporaryDirectory() as folder:
             fixture = self.fixture(folder)
-            result, calls = self.run(fixture)
+            result, calls = self.execute_correction(fixture)
             self.assertEqual(calls, [["fix-1", "fix-2", "fix-3"]])
             self.assertEqual(fixture[3]["model_calls_started"], 1)
             self.assertIn("Начальный абзац", result[0])
