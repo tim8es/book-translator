@@ -32,6 +32,7 @@ from uuid import uuid4
 
 from omniroute import ModelError, TransientModelError, complete
 import review_chunks
+import correction_regression
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
@@ -2178,8 +2179,15 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
         if normalized != [patch]:
             raise JobError("staged correction target is not reviewer-bound")
         verified.extend(normalized)
-    # Fail closed on stage tampering, overlapping edits, or structure damage.
-    check_markers(source, apply_correction_patches(translation, verified))
+    # Recheck staged bytes on resume; a previous runtime may have accepted
+    # a candidate before the pre-acceptance regression guard existed.
+    staged_candidate = apply_correction_patches(translation, verified)
+    check_markers(source, staged_candidate)
+    try:
+        correction_regression.require_no_new_repetitions(
+            translation, staged_candidate)
+    except correction_regression.CorrectionRegression as exc:
+        raise JobError("staged correction has a repeated-text regression") from exc
     return path, stage
 
 
@@ -2221,6 +2229,13 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     unresolved = [finding for finding in quality["findings"] if not finding["resolved"]]
     if not unresolved or len({f["id"] for f in unresolved}) != len(unresolved):
         raise JobError("invalid correction batch finding set")
+    # Advisory classification only. Pinned literary rules still require
+    # independent resolution/review of every unresolved finding.
+    status["correction_finding_triage"] = {
+        "unit_id": chapter["unit_id"],
+        "review_record_id": record["record_id"],
+        "counts": correction_regression.triage_counts(unresolved),
+    }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
     for _ in range(CORRECTION_BATCH_CALLS_PER_CHECKPOINT):
@@ -2231,6 +2246,20 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         selected = pending[:CORRECTION_BATCH_SIZE]
         system, user, _ = context(
             engine, slug, chapter, "corrector", correction_findings=selected)
+        earlier = [item["finding_id"] for item in
+                   status.get("correction_regression_rejections", [])
+                   if isinstance(item, dict)
+                   and item.get("unit_id") == chapter["unit_id"]
+                   and item.get("review_record_id") == record["record_id"]
+                   and item.get("finding_id") in {f["id"] for f in selected}]
+        if earlier:
+            user += (
+                "\nPREVIOUS UNSAFE CORRECTION CANDIDATES: The proposed "
+                "replacements for these finding IDs introduced new duplicated "
+                "phrases and were not applied: "
+                + json.dumps(sorted(set(earlier))) +
+                ". Change the wording/strategy; do not repeat rejected text."
+            )
         prompt_context = {
             "role": "corrector",
             "workflow_revision": status["workflow_revision"],
@@ -2314,30 +2343,63 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                         + validation_error.code) from validation_error
         combined = list(stage["patches"])
         conflicting = []
+        regressed = []
         for patch in patches:
+            signature = correction_regression.patch_fingerprint(patch)
+            if any(isinstance(item, dict)
+                   and item.get("unit_id") == chapter["unit_id"]
+                   and item.get("review_record_id") == record["record_id"]
+                   and item.get("patch_sha256") == signature
+                   for item in status.get("correction_regression_rejections", [])):
+                raise ModelError("corrector repeated an unchanged rejected regression patch")
             try:
-                check_markers(source, apply_correction_patches(translation, combined + [patch]))
+                candidate = apply_correction_patches(translation, combined + [patch])
+                check_markers(source, candidate)
             except JobError as exc:
                 if str(exc) not in {
                         "correction patches overlap in the accepted translation",
                         "correction patch touches a protected EPUB marker or Markdown link boundary",
                 }:
                     raise
-                # Never loosen source-bound anchors or edit technical markers.
-                # Apply only disjoint, valid findings and request a new,
-                # independent review for the still-unresolved observation.
+                # Never loosen anchors or technical markers.
                 conflicting.append(patch["finding_id"])
+                continue
+            try:
+                correction_regression.require_no_new_repetitions(
+                    translation, candidate)
+            except correction_regression.CorrectionRegression as exc:
+                # Do not persist the candidate, its text, or its source excerpt.
+                # Persist a bounded hashed rejection to prevent identical retry.
+                rejected = status.setdefault("correction_regression_rejections", [])
+                if not isinstance(rejected, list):
+                    raise JobError("invalid correction regression audit state")
+                rejected.append({
+                    "unit_id": chapter["unit_id"],
+                    "review_record_id": record["record_id"],
+                    "finding_id": patch["finding_id"],
+                    "patch_sha256": signature,
+                    "reason": exc.code,
+                    "at": clock(),
+                })
+                status["correction_regression_rejections"] = rejected[-64:]
+                status["last_correction_regression"] = {
+                    "unit_id": chapter["unit_id"],
+                    "finding_id": patch["finding_id"],
+                    "reason": exc.code,
+                    "evidence": exc.evidence,
+                }
+                checkpoint(job_id, status, slug)
+                regressed.append(patch["finding_id"])
             else:
                 combined.append(patch)
         if not combined:
             if conflicting:
-                # A review quote may cover a protected XHTML boundary. The
-                # original translation is unchanged; do not invent a smaller
-                # review anchor or alter source-owned markers. After bounded
-                # model failures the canonical review must be deferred.
+                # A review quote may cover a protected XHTML boundary.
                 raise ModelError(
                     "reviewer-anchored corrections intersect protected EPUB markers"
                 )
+            if regressed:
+                raise ModelError("corrector candidate introduces new duplicated text")
             raise ModelError("corrector proposed no safely non-overlapping patches")
         updated_glossary = merge_unique_correction_decisions(stage["glossary"], glossary)
         updated_style = merge_unique_correction_decisions(stage["style_guide"], style)
@@ -2357,14 +2419,20 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 "review_record_id": record["record_id"],
                 "unapplied_finding_ids": conflicting,
             }
+        if regressed:
+            status["correction_regression_deferred"] = {
+                "unit_id": chapter["unit_id"],
+                "review_record_id": record["record_id"],
+                "unapplied_finding_ids": regressed,
+            }
         status["phase"] = "correction-batch-staged"
         checkpoint(job_id, status, slug)
-        if conflicting:
-            # Never merge competing replacements, mark conflicts fixed, or
-            # bypass canonical acceptance and independent source review.
+        if conflicting or regressed:
+            # Unsafe findings remain unresolved. Only accepted, disjoint
+            # changes proceed to a fresh independent full source review.
             partial = apply_correction_patches(translation, combined)
             if partial == translation:
-                raise ModelError("overlapping corrections produced no change")
+                raise ModelError("deferred corrections produced no change")
             return partial, stage["glossary"], stage["style_guide"]
     covered = {patch["finding_id"] for patch in stage["patches"]}
     if covered != {finding["id"] for finding in unresolved}:
@@ -2372,6 +2440,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         return None
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
+    correction_regression.require_no_new_repetitions(translation, translated)
     return translated, stage["glossary"], stage["style_guide"]
 
 
