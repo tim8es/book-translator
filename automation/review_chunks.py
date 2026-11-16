@@ -12,6 +12,8 @@ import re
 
 SCHEMA_VERSION = 1
 HELPER_REVISION = "review-chunks-v1"
+ALIGNMENT_REVISION = "review-chunks-markers-v1"
+BLOCK_MARKER = re.compile(r"<!--\\s*bt-block:(\\d+)\\s*-->")
 TARGET_CHARS = 12_000
 OVERLAP_CHARS = 1_800
 MAX_CHUNKS = 64
@@ -82,12 +84,89 @@ def plan(source: str, translation: str) -> dict:
     return result
 
 
+
+def _marker_cuts(source: str, translation: str) -> tuple[list[int], list[int]] | None:
+    """Find paired boundaries at exact protected EPUB block IDs.
+
+    Unlike independent target-length cuts, corresponding cores start/end on
+    the same source-owned block markers, even when target language expands.
+    No marker is ever inferred, invented, or removed. A mismatched sequence
+    fails closed rather than certifying potentially misaligned passages.
+    """
+    sm = list(BLOCK_MARKER.finditer(source))
+    tm = list(BLOCK_MARKER.finditer(translation))
+    if not sm and not tm:
+        return None
+    ids = [item.group(1) for item in sm]
+    if (not sm or not tm or ids != [item.group(1) for item in tm]
+            or len(ids) != len(set(ids))):
+        raise ValueError("source and translation EPUB block markers are not aligned")
+    if len(sm) < 2:
+        return None
+    src = [0] + [item.start() for item in sm[1:]] + [len(source)]
+    dst = [0] + [item.start() for item in tm[1:]] + [len(translation)]
+    masses = [max(src[i + 1] - src[i], dst[i + 1] - dst[i])
+              for i in range(len(sm))]
+    desired = min(len(sm), max(2, math.ceil(max(len(source), len(translation))
+                                          / TARGET_CHARS)))
+    if desired > MAX_CHUNKS:
+        raise ValueError("source exceeds bounded aligned review capacity")
+    cumul = [0]
+    for mass in masses:
+        cumul.append(cumul[-1] + mass)
+    indices = [0]
+    for part in range(1, desired):
+        remaining = desired - part
+        options = range(indices[-1] + 1, len(sm) - remaining + 1)
+        if not options:
+            raise ValueError("cannot safely align review block partitions")
+        target = cumul[-1] * part / desired
+        indices.append(min(options, key=lambda i: (abs(cumul[i] - target), i)))
+    indices.append(len(sm))
+    scuts, tcuts = [src[index] for index in indices], [dst[index] for index in indices]
+    if any(right <= left for left, right in zip(scuts, scuts[1:])) or any(
+            right <= left for left, right in zip(tcuts, tcuts[1:])):
+        raise ValueError("aligned review block partitions do not advance")
+    return scuts, tcuts
+
+
+def plan_aligned(source: str, translation: str) -> dict:
+    """Opt-in marker-aligned reviewer plan; legacy fallback when no markers.
+
+    This is a new helper revision for *new* checkpoints. Legacy checkpoints
+    remain on review-chunks-v1; no historical evidence is silently converted.
+    """
+    if not source.strip() or not translation.strip():
+        raise ValueError("review requires both complete source and translation")
+    pair = _marker_cuts(source, translation)
+    if pair is None:
+        return plan(source, translation)
+    sb, tb = pair
+    chunks = []
+    for i in range(len(sb) - 1):
+        sc, tc = [sb[i], sb[i + 1]], [tb[i], tb[i + 1]]
+        sw, tw = _window(source, *sc), _window(translation, *tc)
+        if (sw[0] > sc[0] or sw[1] < sc[1]
+                or tw[0] > tc[0] or tw[1] < tc[1]
+                or sw[1] - sw[0] + tw[1] - tw[0] > 42_000):
+            raise ValueError("aligned review chunk exceeds safe context budget")
+        chunks.append({"id": "chunk-%03d" % (i + 1), "source_core": sc,
+                       "translation_core": tc, "source_window": sw,
+                       "translation_window": tw})
+    result = {"schema_version": SCHEMA_VERSION,
+              "helper_revision": ALIGNMENT_REVISION,
+              "source_sha256": sha(source), "translation_sha256": sha(translation),
+              "chunks": chunks}
+    validate_plan(result, source, translation)
+    return result
+
+
 def validate_plan(value: dict, source: str, translation: str) -> None:
     if (not isinstance(value, dict) or set(value) != {
             "schema_version", "helper_revision", "source_sha256",
             "translation_sha256", "chunks"}
             or value["schema_version"] != SCHEMA_VERSION
-            or value["helper_revision"] != HELPER_REVISION
+            or value["helper_revision"] not in {HELPER_REVISION, ALIGNMENT_REVISION}
             or value["source_sha256"] != sha(source)
             or value["translation_sha256"] != sha(translation)
             or not isinstance(value["chunks"], list)
@@ -114,8 +193,17 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
         if offset != len(text):
             raise ValueError("review final chunk leaves unreviewed text")
     # Persisted plans must be deterministic, not user/model supplied.
-    for kind, text in (("source", source), ("translation", translation)):
-        cuts = _cuts(text, len(value["chunks"]))
+    if value["helper_revision"] == ALIGNMENT_REVISION:
+        aligned = _marker_cuts(source, translation)
+        if aligned is None or len(aligned[0]) != len(value["chunks"]) + 1:
+            raise ValueError("aligned review plan has lost marker boundaries")
+        source_cuts, target_cuts = aligned
+    else:
+        source_cuts = _cuts(source, len(value["chunks"]))
+        target_cuts = _cuts(translation, len(value["chunks"]))
+    for kind, text, cuts in (
+            ("source", source, source_cuts),
+            ("translation", translation, target_cuts)):
         for i, item in enumerate(value["chunks"]):
             if (item[kind + "_core"] != [cuts[i], cuts[i + 1]]
                     or item[kind + "_window"] != _window(text, cuts[i], cuts[i + 1])):
