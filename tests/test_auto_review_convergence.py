@@ -24,6 +24,7 @@ def record(index: int, score: int, *, source: str = "s", outcome: str = "CORRECT
                  "category": "meaning", "severity": "major" if j < score // 3 else "minor"}
                 for j in range(score // 3 + score % 3)]
     return {
+        "sequence": index,
         "record_id": f"{index:032x}",
         "unit_id": "chapter-000001",
         "source_sha256": digest(source),
