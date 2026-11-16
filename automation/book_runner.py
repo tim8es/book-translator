@@ -2355,8 +2355,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         if earlier:
             user += (
                 "\nPREVIOUS UNSAFE CORRECTION CANDIDATES: The proposed "
-                "replacements for these finding IDs introduced new duplicated "
-                "phrases and were not applied: "
+                "replacements for these finding IDs failed the repetition "
+                "or independent semantic preflight and were not applied: "
                 + json.dumps(sorted(set(earlier))) +
                 ". Change the wording/strategy; do not repeat rejected text."
             )
