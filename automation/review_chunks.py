@@ -13,7 +13,7 @@ import re
 SCHEMA_VERSION = 1
 HELPER_REVISION = "review-chunks-v1"
 ALIGNMENT_REVISION = "review-chunks-markers-v1"
-BLOCK_MARKER = re.compile(r"<!--\\s*bt-block:(\\d+)\\s*-->")
+BLOCK_MARKER = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 TARGET_CHARS = 12_000
 OVERLAP_CHARS = 1_800
 MAX_CHUNKS = 64
