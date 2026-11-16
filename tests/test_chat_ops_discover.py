@@ -44,6 +44,15 @@ class ChatOpsDiscoveryTests(unittest.TestCase):
             self.assertEqual(json.loads(lines["books"]),
                              ["__invalid__", "synthetic-a", "synthetic-b"])
 
+    def test_unicode_slug_is_scoped_not_an_invalid_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / ".chat-ops/requests"
+            directory.mkdir(parents=True)
+            (directory / ("a" * 32 + ".json")).write_text(
+                json.dumps({"book_slug": "без-названия"}), encoding="utf-8")
+            self.assertEqual(discovery.pending_books(root), ["без-названия"])
+
     def test_empty_queue_has_no_pending_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "outputs"

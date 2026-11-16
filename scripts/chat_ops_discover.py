@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")
-BOOK_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,99}\Z")
+BOOK_SLUG = re.compile(r"[^\W_][\w-]{0,99}\Z")
 
 
 def unique_pairs(pairs: list[tuple[str, object]]) -> dict:

@@ -65,6 +65,16 @@ class RequestTests(unittest.TestCase):
             (root / bridge.RESULTS / f"{1:032x}.json").write_text("{}", encoding="utf-8")
             self.assertEqual(bridge.pending(root, "book-one"), [])
 
+    def test_unicode_book_slug_passes_same_safe_canonical_rules(self):
+        payload = sample("resume-auto")
+        payload["book_slug"] = "без-названия"
+        self.assertEqual(bridge.validate(payload, RID)["book_slug"], "без-названия")
+        for unsafe in ("../bad", "_under", "-bad", "dir/child", "some.name", ""):
+            with self.subTest(slug=unsafe), self.assertRaisesRegex(
+                    bridge.RequestError, "unsafe book slug"):
+                payload["book_slug"] = unsafe
+                bridge.validate(payload, RID)
+
     def test_auto_mode_switch_does_not_edit_chapter_or_claims(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

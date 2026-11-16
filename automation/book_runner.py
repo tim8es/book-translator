@@ -1021,10 +1021,22 @@ def recoverable_protected_correction_blocked(status: dict) -> bool:
 
 
 def auto_resume_requested(status: dict) -> bool:
-    """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
-    if (status.get("state") != "blocked"
-            or status.get("phase") not in {"model-blocked", "correction-limit-reached", "attention-requires-operator"}
-            or status.get("active") is not None):
+    """A fresh operator resume-auto can reopen a supported durable checkpoint.
+
+    Unlike ordinary model failures, interrupted claims retain their exact
+    reviewer/translator session until the canonical --resume-interrupted gate
+    verifies ownership and lease expiry. Do not clear or fake claims here.
+    """
+    if status.get("state") != "blocked":
+        return False
+    phase, active = status.get("phase"), status.get("active")
+    if phase == "operator-intervention-required":
+        if not isinstance(active, dict) or active.get("role") not in (
+                "reviewer", "corrector", "translator"):
+            return False
+    elif (phase not in {"model-blocked", "correction-limit-reached",
+                       "attention-requires-operator"}
+          or active is not None):
         return False
     slug = status.get("book_slug")
     if not safe_book_slug(slug):
@@ -4217,12 +4229,20 @@ def run(job_id: str, *, resume_blocked: bool = False,
     request = request_for(job_id)
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
-    if (not resume_blocked and not resume_interrupted and status
-            and (auto_resume_requested(status)
-                 or recoverable_epub_preflight(status)
-                 or recoverable_structural_span_blocked(status)
-                 or recoverable_protected_correction_blocked(status))):
-        resume_blocked = True
+    if not resume_blocked and not resume_interrupted and status:
+        if auto_resume_requested(status):
+            # A newer explicit Auto handoff for an operator-blocked live claim
+            # is a request for the canonical interrupted-claim recovery path.
+            # It validates the lease, session, and frozen shared state before
+            # allowing another model call. Expired claims remain fail-closed.
+            if status.get("phase") == "operator-intervention-required":
+                resume_interrupted = True
+            else:
+                resume_blocked = True
+        elif (recoverable_epub_preflight(status)
+              or recoverable_structural_span_blocked(status)
+              or recoverable_protected_correction_blocked(status)):
+            resume_blocked = True
     preflight_resume = bool(resume_blocked and status and recoverable_epub_preflight(status))
     structural_resume = bool(resume_blocked and status and recoverable_structural_span_blocked(status))
     protected_correction_resume = bool(
@@ -4377,14 +4397,39 @@ def run(job_id: str, *, resume_blocked: bool = False,
                 raise JobError("interrupted canonical claim is missing")
             owned = read_json(claim_file)
             expires = datetime.fromisoformat(owned["expires_at"].replace("Z", "+00:00"))
-            if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
-                raise JobError("interrupted claim expired; canonical cleanup is required")
+            if expires.tzinfo is None:
+                raise JobError("interrupted claim expiry is missing timezone")
             canonical_state = json.loads(cli("status", slug, "--json"))
             claims = canonical_state.get("claims")
             if (not isinstance(canonical_state.get("errors"), list)
                     or canonical_state["errors"]
                     or not isinstance(claims, list)):
                 raise JobError("canonical status is not safe for interrupted recovery")
+            if expires <= datetime.now(timezone.utc):
+                # Only the EXACT previously owned expired claim can be cleaned
+                # through the book-pinned canonical contract. The queue remains
+                # hash-bound and all completed review chunks are untouched.
+                expected_role = "reviewer" if active["role"] == "reviewer" else "translator"
+                identity = {"unit_id": chapter["unit_id"], "role": expected_role,
+                            "session_id": active["session_id"]}
+                if (len(claims) != 1
+                        or any(owned.get(k) != v or claims[0].get(k) != v
+                               for k, v in identity.items())):
+                    raise JobError("expired interrupted claim identity mismatch")
+                cli("cleanup-claims", slug)
+                history = status.get("recoveries", [])
+                if not isinstance(history, list):
+                    raise JobError("invalid interrupted claim recovery history")
+                history.append({"action": "cleanup-expired-interrupted-claim",
+                                "approved_at": clock(),
+                                "previous_error": status.get("last_error"),
+                                "session_id": active["session_id"]})
+                status.update({"recoveries": history, "state": "running",
+                               "phase": "expired-claim-cleaned", "active": None,
+                               "failures": 0, "last_error": None})
+                status.pop("last_error_code", None)
+                checkpoint(job_id, status, slug)
+                return status
             approve_interrupted_resume(status, chapter, owned, claims)
             checkpoint(job_id, status, slug)
         if status is None:
