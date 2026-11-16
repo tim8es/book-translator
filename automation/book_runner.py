@@ -2440,7 +2440,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         return None
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
-    correction_regression.require_no_new_repetitions(translation, translated)
+    try:
+        correction_regression.require_no_new_repetitions(translation, translated)
+    except correction_regression.CorrectionRegression as exc:
+        # Do not leave a live claim stuck on an uncaught guard exception.
+        raise ModelError("final correction candidate introduces duplicated text") from exc
     return translated, stage["glossary"], stage["style_guide"]
 
 
