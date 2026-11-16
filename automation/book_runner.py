@@ -33,7 +33,8 @@ from omniroute import ModelError, TransientModelError, complete
 import review_chunks
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
                               parse_correction_patches, parse_translation, PatchAnchorMismatch, role_contracts,
-                              save_claim_bound_decisions, updated_glossary, model_glossary_context)
+                              save_claim_bound_decisions, updated_glossary, model_glossary_context,
+                              reviewer_glossary_proposals, paired_inline_name_glossary)
 
 # The shared runtime lives in the public repository but all mutable state
 # lives in the invoking book-state checkout (private or otherwise).
@@ -3113,7 +3114,7 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         else:
             user += " First-pass findings use resolves=null."
         user += (
-            " Return ONLY JSON with exactly keys evidence_version, outcome, checks, findings, style_guide. "
+            " Return ONLY JSON with exactly keys evidence_version, outcome, checks, findings, style_guide, glossary. "
             "Set evidence_version=2; outcome=PASS or CORRECTIONS_REQUIRED. checks has coverage, meaning, "
             "terminology, style, structure, each true only if checked. Each finding has exactly id, "
             "category, severity, detail, resolved, source_anchor, translation_anchor, resolves. "
@@ -3133,6 +3134,11 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
             "\"source_anchor\":{\"quote\":\"She might have known.\",\"occurrence\":0},"
             "\"translation_anchor\":{\"quote\":\"Она знала.\",\"occurrence\":0},\"resolves\":null}],"
             "\"style_guide\":[]}. Do not use the old three-field finding format. "
+            "glossary contains source-grounded recurring names, nicknames, organizations and " 
+            "domain terms (up to 40, exactly original, translation, type, notes). " 
+            "Copy attested source and target lexical forms; if names conflict " 
+            "report a terminology finding, not an arbitrary preference. " 
+            "Return [] only when no stable lexical decision is supported. " 
             "style_guide contains source-grounded entries with exactly source_pattern, "
             "translation_approach, evidence; [] is valid. Keep stable ids unique, report every unresolved "
             "issue, and never invent findings."
