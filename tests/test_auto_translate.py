@@ -885,6 +885,46 @@ class AutomatedBookTests(unittest.TestCase):
             self.assertEqual(status["active"]["session_id"], "session-1")
             self.assertEqual(process.call_count, 2)
             process.assert_any_call(job, "stable-title", status, engine)
+            # If the same operator request is processed after the lease
+            # expires, only the exact old claim is cleaned canonically.
+            expired = {**claim, "expires_at": "2020-01-01T00:00:00+00:00"}
+            worker.store_json(
+                book / ".workflow" / "claims" / (chapter["unit_id"] + ".json"),
+                expired)
+            with patch.object(worker, "ROOT", root), \
+                 patch.object(worker, "install_engine", return_value=(engine, revision)), \
+                 patch.object(worker, "verify"), \
+                 patch.object(worker, "chapter_data", return_value=({}, {}, [chapter])), \
+                 patch.object(worker, "cli") as cli, \
+                 patch.object(worker, "checkpoint") as checkpoint, \
+                 patch.object(worker, "process_claim") as process:
+                cli.side_effect = lambda *args: (
+                    json.dumps({"claims": [expired], "errors": []})
+                    if args[0] == "status" else "{}")
+                recovery = worker.run(job)
+            self.assertEqual(recovery["state"], "running")
+            self.assertEqual(recovery["phase"], "expired-claim-cleaned")
+            self.assertIsNone(recovery["active"])
+            self.assertEqual(recovery["recoveries"][-1]["action"],
+                             "cleanup-expired-interrupted-claim")
+            cli.assert_any_call("cleanup-claims", "stable-title")
+            process.assert_not_called()
+            checkpoint.assert_called_once()
+            # No automatic claim cleanup for a mismatched identity.
+            worker.store_json(
+                book / ".workflow" / "claims" / (chapter["unit_id"] + ".json"),
+                {**expired, "session_id": "other"})
+            with patch.object(worker, "ROOT", root), \
+                 patch.object(worker, "install_engine", return_value=(engine, revision)), \
+                 patch.object(worker, "verify"), \
+                 patch.object(worker, "chapter_data", return_value=({}, {}, [chapter])), \
+                 patch.object(worker, "cli") as cli, \
+                 patch.object(worker, "checkpoint") as checkpoint:
+                cli.return_value = json.dumps({"claims": [expired], "errors": []})
+                with self.assertRaisesRegex(worker.JobError, "identity mismatch"):
+                    worker.run(job)
+            cli.assert_called_once_with("status", "stable-title", "--json")
+            checkpoint.assert_not_called()
 
     def test_conflicting_glossary_proposal_is_rejected_without_changing_canonical_glossary(self):
         with tempfile.TemporaryDirectory() as folder:
