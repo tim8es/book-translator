@@ -4397,14 +4397,39 @@ def run(job_id: str, *, resume_blocked: bool = False,
                 raise JobError("interrupted canonical claim is missing")
             owned = read_json(claim_file)
             expires = datetime.fromisoformat(owned["expires_at"].replace("Z", "+00:00"))
-            if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
-                raise JobError("interrupted claim expired; canonical cleanup is required")
+            if expires.tzinfo is None:
+                raise JobError("interrupted claim expiry is missing timezone")
             canonical_state = json.loads(cli("status", slug, "--json"))
             claims = canonical_state.get("claims")
             if (not isinstance(canonical_state.get("errors"), list)
                     or canonical_state["errors"]
                     or not isinstance(claims, list)):
                 raise JobError("canonical status is not safe for interrupted recovery")
+            if expires <= datetime.now(timezone.utc):
+                # Only the EXACT previously owned expired claim can be cleaned
+                # through the book-pinned canonical contract. The queue remains
+                # hash-bound and all completed review chunks are untouched.
+                expected_role = "reviewer" if active["role"] == "reviewer" else "translator"
+                identity = {"unit_id": chapter["unit_id"], "role": expected_role,
+                            "session_id": active["session_id"]}
+                if (len(claims) != 1
+                        or any(owned.get(k) != v or claims[0].get(k) != v
+                               for k, v in identity.items())):
+                    raise JobError("expired interrupted claim identity mismatch")
+                cli("cleanup-claims", slug)
+                history = status.get("recoveries", [])
+                if not isinstance(history, list):
+                    raise JobError("invalid interrupted claim recovery history")
+                history.append({"action": "cleanup-expired-interrupted-claim",
+                                "approved_at": clock(),
+                                "previous_error": status.get("last_error"),
+                                "session_id": active["session_id"]})
+                status.update({"recoveries": history, "state": "running",
+                               "phase": "expired-claim-cleaned", "active": None,
+                               "failures": 0, "last_error": None})
+                status.pop("last_error_code", None)
+                checkpoint(job_id, status, slug)
+                return status
             approve_interrupted_resume(status, chapter, owned, claims)
             checkpoint(job_id, status, slug)
         if status is None:
