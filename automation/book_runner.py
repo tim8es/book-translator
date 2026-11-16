@@ -3813,16 +3813,21 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         review_context = "independent_session"
         chunked_review = False
         if role == "reviewer":
-            candidate_target = (ROOT / "books" / slug / chapter["translation_path"]).read_text("utf-8")
+            target_relative = chapter.get("translation_path")
+            target_path = (ROOT / "books" / slug / target_relative
+                           if isinstance(target_relative, str) and target_relative else None)
+            candidate_target = (target_path.read_text("utf-8")
+                                if target_path is not None and target_path.is_file() else None)
             protocol_failures = status.get("role_protocol_failures", {})
             if not isinstance(protocol_failures, dict):
                 raise JobError("invalid reviewer protocol counter state")
             scoped_count = protocol_failures.get(unit_id + ":reviewer", 0)
             if type(scoped_count) is not int or scoped_count < 0:
                 raise JobError("invalid reviewer protocol counter")
-            chunked_review = (status.get("review_chunk_fallback_unit") == unit_id
-                              or (len(source) <= MAX_DIRECT_REVIEW_CHARS
-                                  and should_chunk_review(source, candidate_target, scoped_count)))
+            chunked_review = (candidate_target is not None and
+                              (status.get("review_chunk_fallback_unit") == unit_id
+                               or (len(source) <= MAX_DIRECT_REVIEW_CHARS
+                                   and should_chunk_review(source, candidate_target, scoped_count))))
         if (role == "reviewer" and not chunked_review
                 and len(source) <= MAX_DIRECT_REVIEW_CHARS
                 and previous_quality.get("evidence_version") == 2 and not force_full_review):
