@@ -2259,6 +2259,14 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             else:
                 combined.append(patch)
         if not combined:
+            if conflicting:
+                # A review quote may cover a protected XHTML boundary. The
+                # original translation is unchanged; do not invent a smaller
+                # review anchor or alter source-owned markers. After bounded
+                # model failures the canonical review must be deferred.
+                raise ModelError(
+                    "reviewer-anchored corrections intersect protected EPUB markers"
+                )
             raise ModelError("corrector proposed no safely non-overlapping patches")
         updated_glossary = merge_unique_correction_decisions(stage["glossary"], glossary)
         updated_style = merge_unique_correction_decisions(stage["style_guide"], style)
@@ -3622,6 +3630,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # silently turned into benign model-format failures.
             helper = load_public_correction_helper(engine)
             recoverable_code = helper.failure_code(str(exc))
+            if str(exc) == "reviewer-anchored corrections intersect protected EPUB markers":
+                recoverable_code = "protected_review_anchor"
             if (recoverable_code is None
                     and str(exc).startswith("typed correction repair invalid: ")):
                 recoverable_code = "invalid_typed_repair"
