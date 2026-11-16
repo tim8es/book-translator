@@ -33,6 +33,7 @@ from uuid import uuid4
 from omniroute import ModelError, TransientModelError, complete
 import review_chunks
 import correction_regression
+import candidate_review
 import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
@@ -2202,6 +2203,104 @@ def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict]
     return updated
 
 
+
+def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
+                                         engine: Path, chapter: dict,
+                                         record: dict, source: str,
+                                         translation: str, patches: list[dict],
+                                         stage_path: Path) -> bool:
+    """Optional independent pre-acceptance veto, never literary PASS.
+
+    The exact pinned reviewer contract is used for a *new* model request.
+    This does not relax canonical source review or alter a book's revision.
+    Every model call is durably counted before dispatch. A rejected candidate
+    cannot mutate the accepted translation or silently reuse its staged patch.
+    """
+    try:
+        active = candidate_review.enabled()
+    except candidate_review.CandidateReviewError as exc:
+        raise JobError(str(exc)) from exc
+    if not active:
+        return True
+    if not patches:
+        raise JobError("semantic candidate preflight requires patches")
+    quality = record.get("quality_report")
+    if not isinstance(quality, dict):
+        raise JobError("semantic candidate preflight requires source-bound findings")
+    findings = [item for item in quality.get("findings", [])
+                if not item.get("resolved")]
+    try:
+        cases = candidate_review.cases(
+            source, translation, patches, findings, position=_anchor_position)
+        instructions, paths = role_contracts(engine, "reviewer")
+        system, user = candidate_review.build_prompt(cases, instructions)
+    except (candidate_review.CandidateReviewError, KeyError, TypeError) as exc:
+        # Do not accidentally include original excerpts in an error message.
+        raise ModelError("candidate semantic preflight input is invalid") from exc
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0:
+        raise JobError("invalid durable model call counter")
+    if count >= model_call_limit():
+        cli("release", slug, str(chapter["number"]),
+            "--session-id", status["active"]["session_id"])
+        status["active"] = None
+        status.update({"state": "blocked", "phase": "model-call-limit-reached",
+                       "last_error": "semantic candidate preflight call budget reached"})
+        checkpoint(job_id, status, slug)
+        return False
+    status["model_calls_started"] = count + 1
+    status["phase"] = "candidate-semantic-preflight-reserved"
+    status["prompt_context"] = {
+        "role": "reviewer", "execution_mode": "correction-candidate-veto",
+        "workflow_revision": status["workflow_revision"],
+        "loaded_contracts": paths,
+        "source_sha256": record["source_sha256"],
+        "translation_sha256": record["translation_sha256"],
+        "case_count": len(cases),
+        "system_chars": len(system), "user_chars": len(user),
+    }
+    checkpoint(job_id, status, slug)
+    answer = complete_for_job(status, "REVIEWER", system, user)
+    try:
+        rejected = candidate_review.parse_verdict(
+            answer, [item["finding_id"] for item in cases])
+    except candidate_review.CandidateReviewError as exc:
+        raise ModelError("candidate semantic preflight returned invalid evidence") from exc
+    proposed = apply_correction_patches(translation, patches)
+    candidate_hash = hashlib.sha256(proposed.encode("utf-8")).hexdigest()
+    status["last_semantic_preflight"] = {
+        "unit_id": chapter["unit_id"],
+        "review_record_id": record["record_id"],
+        "candidate_sha256": candidate_hash,
+        "model_call": status["model_calls_started"],
+        "decision": "veto" if rejected else "candidate_only_approved",
+        "rejected_count": len(rejected),
+    }
+    if rejected:
+        rejected_ids = set(rejected)
+        audit = status.setdefault("correction_regression_rejections", [])
+        if not isinstance(audit, list):
+            raise JobError("invalid correction regression audit state")
+        for patch in patches:
+            if patch["finding_id"] in rejected_ids:
+                audit.append({
+                    "unit_id": chapter["unit_id"],
+                    "review_record_id": record["record_id"],
+                    "finding_id": patch["finding_id"],
+                    "patch_sha256": correction_regression.patch_fingerprint(patch),
+                    "reason": "semantic-preflight-veto",
+                    "at": clock(),
+                })
+        status["correction_regression_rejections"] = audit[-64:]
+        # The old accepted translation stays byte-identical. Retire the
+        # staged candidate, so the next correction attempt must be new.
+        stage_path.unlink(missing_ok=True)
+        checkpoint(job_id, status, slug)
+        raise ModelError("independent preflight vetoed correction candidate")
+    checkpoint(job_id, status, slug)
+    return True
+
+
 def process_correction_batches(job_id: str, slug: str, status: dict, engine: Path,
                                chapter: dict, record: dict) -> tuple[str, list, list] | None:
     """Stage at most two small LLM calls per Actions checkpoint.
@@ -2434,6 +2533,10 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             partial = apply_correction_patches(translation, combined)
             if partial == translation:
                 raise ModelError("deferred corrections produced no change")
+            if not verify_semantic_correction_candidate(
+                    job_id, slug, status, engine, chapter, record, source,
+                    translation, stage["patches"], stage_path):
+                return None
             return partial, stage["glossary"], stage["style_guide"]
     covered = {patch["finding_id"] for patch in stage["patches"]}
     if covered != {finding["id"] for finding in unresolved}:
@@ -2446,6 +2549,10 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     except correction_regression.CorrectionRegression as exc:
         # Do not leave a live claim stuck on an uncaught guard exception.
         raise ModelError("final correction candidate introduces duplicated text") from exc
+    if not verify_semantic_correction_candidate(
+            job_id, slug, status, engine, chapter, record, source,
+            translation, stage["patches"], stage_path):
+        return None
     return translated, stage["glossary"], stage["style_guide"]
 
 
