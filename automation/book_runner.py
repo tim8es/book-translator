@@ -32,6 +32,11 @@ from uuid import uuid4
 
 from omniroute import ModelError, TransientModelError, complete
 import review_chunks
+import correction_regression
+import candidate_review
+import incremental_review
+import adaptive_budget
+import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
@@ -2178,8 +2183,15 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
         if normalized != [patch]:
             raise JobError("staged correction target is not reviewer-bound")
         verified.extend(normalized)
-    # Fail closed on stage tampering, overlapping edits, or structure damage.
-    check_markers(source, apply_correction_patches(translation, verified))
+    # Recheck staged bytes on resume; a previous runtime may have accepted
+    # a candidate before the pre-acceptance regression guard existed.
+    staged_candidate = apply_correction_patches(translation, verified)
+    check_markers(source, staged_candidate)
+    try:
+        correction_regression.require_no_new_repetitions(
+            translation, staged_candidate)
+    except correction_regression.CorrectionRegression as exc:
+        raise JobError("staged correction has a repeated-text regression") from exc
     return path, stage
 
 
@@ -2191,6 +2203,104 @@ def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict]
     if len(updated) > 40:
         raise ModelError("corrector proposed too many unique literary decisions")
     return updated
+
+
+
+def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
+                                         engine: Path, chapter: dict,
+                                         record: dict, source: str,
+                                         translation: str, patches: list[dict],
+                                         stage_path: Path) -> bool:
+    """Optional independent pre-acceptance veto, never literary PASS.
+
+    The exact pinned reviewer contract is used for a *new* model request.
+    This does not relax canonical source review or alter a book's revision.
+    Every model call is durably counted before dispatch. A rejected candidate
+    cannot mutate the accepted translation or silently reuse its staged patch.
+    """
+    try:
+        active = candidate_review.enabled()
+    except candidate_review.CandidateReviewError as exc:
+        raise JobError(str(exc)) from exc
+    if not active:
+        return True
+    if not patches:
+        raise JobError("semantic candidate preflight requires patches")
+    quality = record.get("quality_report")
+    if not isinstance(quality, dict):
+        raise JobError("semantic candidate preflight requires source-bound findings")
+    findings = [item for item in quality.get("findings", [])
+                if not item.get("resolved")]
+    try:
+        cases = candidate_review.cases(
+            source, translation, patches, findings, position=_anchor_position)
+        instructions, paths = role_contracts(engine, "reviewer")
+        system, user = candidate_review.build_prompt(cases, instructions)
+    except (candidate_review.CandidateReviewError, KeyError, TypeError) as exc:
+        # Do not accidentally include original excerpts in an error message.
+        raise ModelError("candidate semantic preflight input is invalid") from exc
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0:
+        raise JobError("invalid durable model call counter")
+    if count >= model_call_limit():
+        cli("release", slug, str(chapter["number"]),
+            "--session-id", status["active"]["session_id"])
+        status["active"] = None
+        status.update({"state": "blocked", "phase": "model-call-limit-reached",
+                       "last_error": "semantic candidate preflight call budget reached"})
+        checkpoint(job_id, status, slug)
+        return False
+    status["model_calls_started"] = count + 1
+    status["phase"] = "candidate-semantic-preflight-reserved"
+    status["prompt_context"] = {
+        "role": "reviewer", "execution_mode": "correction-candidate-veto",
+        "workflow_revision": status["workflow_revision"],
+        "loaded_contracts": paths,
+        "source_sha256": record["source_sha256"],
+        "translation_sha256": record["translation_sha256"],
+        "case_count": len(cases),
+        "system_chars": len(system), "user_chars": len(user),
+    }
+    checkpoint(job_id, status, slug)
+    answer = complete_for_job(status, "REVIEWER", system, user)
+    try:
+        rejected = candidate_review.parse_verdict(
+            answer, [item["finding_id"] for item in cases])
+    except candidate_review.CandidateReviewError as exc:
+        raise ModelError("candidate semantic preflight returned invalid evidence") from exc
+    proposed = apply_correction_patches(translation, patches)
+    candidate_hash = hashlib.sha256(proposed.encode("utf-8")).hexdigest()
+    status["last_semantic_preflight"] = {
+        "unit_id": chapter["unit_id"],
+        "review_record_id": record["record_id"],
+        "candidate_sha256": candidate_hash,
+        "model_call": status["model_calls_started"],
+        "decision": "veto" if rejected else "candidate_only_approved",
+        "rejected_count": len(rejected),
+    }
+    if rejected:
+        rejected_ids = set(rejected)
+        audit = status.setdefault("correction_regression_rejections", [])
+        if not isinstance(audit, list):
+            raise JobError("invalid correction regression audit state")
+        for patch in patches:
+            if patch["finding_id"] in rejected_ids:
+                audit.append({
+                    "unit_id": chapter["unit_id"],
+                    "review_record_id": record["record_id"],
+                    "finding_id": patch["finding_id"],
+                    "patch_sha256": correction_regression.patch_fingerprint(patch),
+                    "reason": "semantic-preflight-veto",
+                    "at": clock(),
+                })
+        status["correction_regression_rejections"] = audit[-64:]
+        # The old accepted translation stays byte-identical. Retire the
+        # staged candidate, so the next correction attempt must be new.
+        stage_path.unlink(missing_ok=True)
+        checkpoint(job_id, status, slug)
+        raise ModelError("independent preflight vetoed correction candidate")
+    checkpoint(job_id, status, slug)
+    return True
 
 
 def process_correction_batches(job_id: str, slug: str, status: dict, engine: Path,
@@ -2221,16 +2331,70 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     unresolved = [finding for finding in quality["findings"] if not finding["resolved"]]
     if not unresolved or len({f["id"] for f in unresolved}) != len(unresolved):
         raise JobError("invalid correction batch finding set")
+    # Advisory classification only. Pinned literary rules still require
+    # independent resolution/review of every unresolved finding.
+    status["correction_finding_triage"] = {
+        "unit_id": chapter["unit_id"],
+        "review_record_id": record["record_id"],
+        "counts": correction_regression.triage_counts(unresolved),
+    }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
-    for _ in range(CORRECTION_BATCH_CALLS_PER_CHECKPOINT):
+    already_staged = {patch["finding_id"] for patch in stage["patches"]}
+    initially_pending = [
+        item for item in unresolved if item["id"] not in already_staged]
+    try:
+        adaptive = adaptive_budget.enabled()
+        initial_budget = (adaptive_budget.plan(
+            initially_pending,
+            rejected=status.get("correction_regression_rejections", []),
+            unit_id=chapter["unit_id"], record_id=record["record_id"],
+            failures=status.get("failures", 0))
+            if adaptive and initially_pending else None)
+    except ValueError as exc:
+        raise JobError("invalid adaptive correction budget configuration") from exc
+    calls_this_checkpoint = (initial_budget["max_calls_per_checkpoint"]
+                             if initial_budget is not None
+                             else (0 if not initially_pending else
+                                   CORRECTION_BATCH_CALLS_PER_CHECKPOINT))
+    for _ in range(calls_this_checkpoint):
         completed = {patch["finding_id"] for patch in stage["patches"]}
         pending = [finding for finding in unresolved if finding["id"] not in completed]
         if not pending:
             break
-        selected = pending[:CORRECTION_BATCH_SIZE]
+        if adaptive:
+            try:
+                current_budget = adaptive_budget.plan(
+                    pending,
+                    rejected=status.get("correction_regression_rejections", []),
+                    unit_id=chapter["unit_id"], record_id=record["record_id"],
+                    failures=status.get("failures", 0))
+            except ValueError as exc:
+                raise JobError("invalid current correction budget evidence") from exc
+            selected = pending[:current_budget["group_size"]]
+            status["adaptive_correction_budget"] = {
+                **current_budget,
+                "unit_id": chapter["unit_id"],
+                "review_record_id": record["record_id"],
+            }
+        else:
+            selected = pending[:CORRECTION_BATCH_SIZE]
         system, user, _ = context(
             engine, slug, chapter, "corrector", correction_findings=selected)
+        earlier = [item["finding_id"] for item in
+                   status.get("correction_regression_rejections", [])
+                   if isinstance(item, dict)
+                   and item.get("unit_id") == chapter["unit_id"]
+                   and item.get("review_record_id") == record["record_id"]
+                   and item.get("finding_id") in {f["id"] for f in selected}]
+        if earlier:
+            user += (
+                "\nPREVIOUS UNSAFE CORRECTION CANDIDATES: The proposed "
+                "replacements for these finding IDs failed the repetition "
+                "or independent semantic preflight and were not applied: "
+                + json.dumps(sorted(set(earlier))) +
+                ". Change the wording/strategy; do not repeat rejected text."
+            )
         prompt_context = {
             "role": "corrector",
             "workflow_revision": status["workflow_revision"],
@@ -2314,30 +2478,63 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                         + validation_error.code) from validation_error
         combined = list(stage["patches"])
         conflicting = []
+        regressed = []
         for patch in patches:
+            signature = correction_regression.patch_fingerprint(patch)
+            if any(isinstance(item, dict)
+                   and item.get("unit_id") == chapter["unit_id"]
+                   and item.get("review_record_id") == record["record_id"]
+                   and item.get("patch_sha256") == signature
+                   for item in status.get("correction_regression_rejections", [])):
+                raise ModelError("corrector repeated an unchanged rejected regression patch")
             try:
-                check_markers(source, apply_correction_patches(translation, combined + [patch]))
+                candidate = apply_correction_patches(translation, combined + [patch])
+                check_markers(source, candidate)
             except JobError as exc:
                 if str(exc) not in {
                         "correction patches overlap in the accepted translation",
                         "correction patch touches a protected EPUB marker or Markdown link boundary",
                 }:
                     raise
-                # Never loosen source-bound anchors or edit technical markers.
-                # Apply only disjoint, valid findings and request a new,
-                # independent review for the still-unresolved observation.
+                # Never loosen anchors or technical markers.
                 conflicting.append(patch["finding_id"])
+                continue
+            try:
+                correction_regression.require_no_new_repetitions(
+                    translation, candidate)
+            except correction_regression.CorrectionRegression as exc:
+                # Do not persist the candidate, its text, or its source excerpt.
+                # Persist a bounded hashed rejection to prevent identical retry.
+                rejected = status.setdefault("correction_regression_rejections", [])
+                if not isinstance(rejected, list):
+                    raise JobError("invalid correction regression audit state")
+                rejected.append({
+                    "unit_id": chapter["unit_id"],
+                    "review_record_id": record["record_id"],
+                    "finding_id": patch["finding_id"],
+                    "patch_sha256": signature,
+                    "reason": exc.code,
+                    "at": clock(),
+                })
+                status["correction_regression_rejections"] = rejected[-64:]
+                status["last_correction_regression"] = {
+                    "unit_id": chapter["unit_id"],
+                    "finding_id": patch["finding_id"],
+                    "reason": exc.code,
+                    "evidence": exc.evidence,
+                }
+                checkpoint(job_id, status, slug)
+                regressed.append(patch["finding_id"])
             else:
                 combined.append(patch)
         if not combined:
             if conflicting:
-                # A review quote may cover a protected XHTML boundary. The
-                # original translation is unchanged; do not invent a smaller
-                # review anchor or alter source-owned markers. After bounded
-                # model failures the canonical review must be deferred.
+                # A review quote may cover a protected XHTML boundary.
                 raise ModelError(
                     "reviewer-anchored corrections intersect protected EPUB markers"
                 )
+            if regressed:
+                raise ModelError("corrector candidate introduces new duplicated text")
             raise ModelError("corrector proposed no safely non-overlapping patches")
         updated_glossary = merge_unique_correction_decisions(stage["glossary"], glossary)
         updated_style = merge_unique_correction_decisions(stage["style_guide"], style)
@@ -2357,14 +2554,24 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 "review_record_id": record["record_id"],
                 "unapplied_finding_ids": conflicting,
             }
+        if regressed:
+            status["correction_regression_deferred"] = {
+                "unit_id": chapter["unit_id"],
+                "review_record_id": record["record_id"],
+                "unapplied_finding_ids": regressed,
+            }
         status["phase"] = "correction-batch-staged"
         checkpoint(job_id, status, slug)
-        if conflicting:
-            # Never merge competing replacements, mark conflicts fixed, or
-            # bypass canonical acceptance and independent source review.
+        if conflicting or regressed:
+            # Unsafe findings remain unresolved. Only accepted, disjoint
+            # changes proceed to a fresh independent full source review.
             partial = apply_correction_patches(translation, combined)
             if partial == translation:
-                raise ModelError("overlapping corrections produced no change")
+                raise ModelError("deferred corrections produced no change")
+            if not verify_semantic_correction_candidate(
+                    job_id, slug, status, engine, chapter, record, source,
+                    translation, stage["patches"], stage_path):
+                return None
             return partial, stage["glossary"], stage["style_guide"]
     covered = {patch["finding_id"] for patch in stage["patches"]}
     if covered != {finding["id"] for finding in unresolved}:
@@ -2372,6 +2579,15 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         return None
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
+    try:
+        correction_regression.require_no_new_repetitions(translation, translated)
+    except correction_regression.CorrectionRegression as exc:
+        # Do not leave a live claim stuck on an uncaught guard exception.
+        raise ModelError("final correction candidate introduces duplicated text") from exc
+    if not verify_semantic_correction_candidate(
+            job_id, slug, status, engine, chapter, record, source,
+            translation, stage["patches"], stage_path):
+        return None
     return translated, stage["glossary"], stage["style_guide"]
 
 
@@ -2632,6 +2848,41 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
             or correction_progressed(ledger, chapter))
 
 
+def defer_stalled_review(slug: str, status: dict, ledger: dict,
+                         chapter: dict) -> bool:
+    """Escalate repeated rejected reviews instead of paying for another loop.
+
+    A stall is *not* a verdict on literary quality. Current source/translation
+    hashes and the exact latest rejected review remain authoritative.
+    """
+    unit_id = chapter["unit_id"]
+    # Operator-authorized additional rounds remain an explicit override.
+    if (operator_unit_limit(status, "review", unit_id, MAX_ACCEPTED_REVIEWS_PER_UNIT)
+            > MAX_ACCEPTED_REVIEWS_PER_UNIT
+            or operator_unit_limit(status, "correction", unit_id, MAX_CORRECTIONS)
+            > MAX_CORRECTIONS):
+        return False
+    report = review_convergence.stalled_rejected_reviews(ledger, chapter)
+    if report is None:
+        return False
+    # The actual current ledger, not remembered failure counters, is used.
+    record = latest_record(ledger, chapter)
+    if not record or record.get("record_id") != report["review_record_ids"][-1]:
+        return False
+    if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
+        cli("defer-review", slug, str(chapter["number"]),
+            "--reason", "operator-attention")
+    else:
+        defer_review_unit(status, unit_id)
+    history = status.setdefault("review_stagnation_audit", [])
+    if not isinstance(history, list):
+        raise JobError("invalid review stagnation audit")
+    history.append({"unit_id": unit_id, "at": clock(), **report})
+    status["review_stagnation_audit"] = history[-64:]
+    status["last_review_stagnation"] = {"unit_id": unit_id, **report}
+    return True
+
+
 def approved_unit_ids(slug: str, chapters: list) -> set[str]:
     if not re.fullmatch(r"[\w-]{1,120}", slug):
         raise JobError("invalid book slug for user approval")
@@ -2726,6 +2977,9 @@ def next_operation(slug: str, status: dict) -> tuple[str, dict | None]:
             # translation with a newly accepted glossary revision.
             if status.get("memory_recheck_unit") == chapter["unit_id"]:
                 return "reviewer", chapter
+            if defer_stalled_review(slug, status, ledger, chapter):
+                deferred.add(chapter["unit_id"])
+                continue
             record = latest_record(ledger, chapter)
             report = record.get("quality_report", {}) if record else {}
             if (status.get("force_full_review_unit") == chapter["unit_id"]
@@ -2875,6 +3129,9 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             if not chapter:
                 raise JobError("canonical attention selection returned unknown unit")
             record = latest_record(ledger, chapter)
+            if (status.get("memory_recheck_unit") != chapter["unit_id"]
+                    and defer_stalled_review(slug, status, ledger, chapter)):
+                continue
             if (accepted_review_count(ledger, chapter) < operator_unit_limit(
                     status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
                     and correction_allowed(status, ledger, chapter)):
@@ -2915,6 +3172,10 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             and report.get("evidence_version") != 2):
         return "reviewer", chapter
     if operation == "correct_translation":
+        if (status.get("memory_recheck_unit") != unit_id
+                and not (pinned_scripts_dir() / "workflow" / "attention.py").exists()
+                and defer_stalled_review(slug, status, ledger, chapter)):
+            return next_operation(slug, status)
         if accepted_review_count(ledger, chapter) >= operator_unit_limit(
                     status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
             if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
@@ -2973,6 +3234,39 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         "not casually propose conflicting renderings. If a recorded rendering "
         "conflicts with the source or target-language grammar, report a glossary "
         "decision issue with evidence rather than forcing a literal replacement.")
+    if role == "translator":
+        system += (
+            "\n\nSINGLE-PASS FIDELITY CHECK BEFORE SUBMITTING (internal "
+            "verification, not a separate review or extra model call): "
+            "First map the assigned source's events, speakers, subjects, "
+            "negations, quantities, chronology, modal verbs, ambiguities and "
+            "recurring names; keep those facts consistent throughout the output. "
+            "Then draft the complete target text in source order. Before "
+            "returning your final JSON, silently compare every source "
+            "paragraph/sentence with your translation for omissions, added "
+            "meaning, swapped referents, shifted certainty, repeated or lost "
+            "dialogue, unnatural target-language morphology and inconsistent "
+            "glossary forms. Repair only source-supported mistakes in your "
+            "own draft. Preserve intentional source repetition and ambiguity. "
+            "Do not output the checklist, analysis, or a separate QA report; "
+            "return only the original pinned translator response schema."
+        )
+    if role == "reviewer":
+        system += (
+            "\n\nUSEFUL INDEPENDENT REVIEW: On a first review, sweep the "
+            "complete supplied source sequentially and compare each "
+            "corresponding translated passage before listing findings. "
+            "Do not spend cycles on alternate acceptable word choices, "
+            "optional polish or personal stylistic preferences. Report an "
+            "unresolved issue only when a concrete source/target discrepancy "
+            "or verifiable target-language error warrants correction; cite "
+            "precise current anchors and explain the required change. "
+            "Distinguish deliberately repeated source language from added "
+            "accidental repetition. On follow-ups, verify all previous "
+            "findings, then check the modified passages for new regressions. "
+            "Do not invent issues just to fill the findings list or return "
+            "PASS without doing every required check."
+        )
     if structural_segments is not None:
         system += ("\n\nSTRUCTURAL TRANSLATION EXECUTION MODE: The public canonical "
                    "helper has removed all links, image addresses, and EPUB "
@@ -3586,6 +3880,11 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "For a recurring terminology discrepancy, check all occurrences "
         "in the assigned source CORE, with a separately anchored finding "
         "for every distinct discrepancy; never canonize a disputed spelling. "
+        "Use the assigned full source core systematically on first review "
+        "rather than finding a small subset of obvious issues. Require a "
+        "concrete source discrepancy or demonstrable target-language mistake; "
+        "do not turn acceptable stylistic variants into blocking issues. "
+        "First reconcile old findings before adding genuinely new ones. "
         "Never claim checks for passages you did not compare.")
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
@@ -3600,17 +3899,97 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     book = ROOT / "books" / slug
     source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
     translation = (book / chapter["translation_path"]).read_bytes().decode("utf-8")
-    try:
-        plan = review_chunks.plan(source, translation)
-    except ValueError as exc:
-        raise JobError("cannot safely partition independent review: " + str(exc)) from exc
     stage_path = review_chunk_stage_path(slug, chapter["unit_id"])
     stage = read_json(stage_path) if stage_path.is_file() else None
+    prior_plan = stage.get("plan") if isinstance(stage, dict) else None
+    prior_revision = (prior_plan.get("helper_revision")
+                      if isinstance(prior_plan, dict) else None)
+    # Keep an in-flight stage on its original planner, even if opt-in settings
+    # change. Neither setting changes a book's canonical literary revision.
+    if prior_revision not in {None, review_chunks.HELPER_REVISION,
+                             review_chunks.ALIGNMENT_REVISION}:
+        raise JobError("unsupported durable reviewer helper revision")
+    alignment_mode = os.environ.get("BOOK_TRANSLATOR_MARKER_ALIGNMENT", "off")
+    incremental_mode = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW", "off")
+    if alignment_mode not in {"on", "off"} or incremental_mode not in {"on", "off"}:
+        raise JobError("review alignment/incremental flags must be on or off")
+    marker_plan = (prior_revision == review_chunks.ALIGNMENT_REVISION
+                   or (prior_revision is None and
+                       (alignment_mode == "on" or incremental_mode == "on")))
+    try:
+        plan = (review_chunks.plan_aligned(source, translation) if marker_plan
+                else review_chunks.plan(source, translation))
+    except ValueError as exc:
+        raise JobError("cannot safely partition independent review: " + str(exc)) from exc
+    binding = None
+    if ((stage is not None and isinstance(stage, dict)
+         and stage.get("schema_version") == incremental_review.STAGE_VERSION)
+            or (stage is None and incremental_mode == "on"
+                and plan["helper_revision"] == review_chunks.ALIGNMENT_REVISION)):
+        try:
+            reviewer_contract, _ = role_contracts(engine, "reviewer")
+            binding = incremental_review.binding(
+                previous.get("record_id") if isinstance(previous, dict) else None,
+                fingerprint(book / "glossary.md"),
+                fingerprint(book / "style-guide.md"),
+                review_chunks.sha(reviewer_contract))
+        except ValueError as exc:
+            raise JobError("invalid incremental reviewer context binding") from exc
     if stage is None:
-        stage = review_chunks.new_stage(
-            plan, chapter["unit_id"], status["workflow_revision"])
+        stage = (incremental_review.new_stage(
+            plan, chapter["unit_id"], status["workflow_revision"], binding)
+            if binding is not None else review_chunks.new_stage(
+                plan, chapter["unit_id"], status["workflow_revision"]))
+    elif stage.get("schema_version") == incremental_review.STAGE_VERSION:
+        try:
+            incremental_review.validate_shape(
+                stage, chapter["unit_id"], status["workflow_revision"])
+            changed = stage["plan"] != plan or stage["binding"] != binding
+            if changed:
+                old_hash = stage["plan"]["translation_sha256"]
+                if (old_hash != plan["translation_sha256"]
+                        and stage["binding"] != binding
+                        and stage["accepted_review_record_id"] is None):
+                    # Changed prior records or literary memory cannot re-use
+                    # partial review findings from a different context.
+                    resumed, reused = incremental_review.rebase(
+                        stage, plan, source, translation, binding, previous,
+                        chapter["unit_id"], status["workflow_revision"])
+                elif old_hash != plan["translation_sha256"]:
+                    resumed, reused = incremental_review.rebase(
+                        stage, plan, source, translation, binding, previous,
+                        chapter["unit_id"], status["workflow_revision"])
+                else:
+                    resumed = incremental_review.new_stage(
+                        plan, chapter["unit_id"], status["workflow_revision"],
+                        binding)
+                    reused = 0
+                stage = resumed
+                audits = status.setdefault("review_incremental_rebases", [])
+                if not isinstance(audits, list):
+                    raise JobError("invalid reviewer reuse audit")
+                audits.append({
+                    "unit_id": chapter["unit_id"],
+                    "old_translation_sha256": old_hash,
+                    "translation_sha256": plan["translation_sha256"],
+                    "reused_clean_chunks": reused,
+                    "total_chunks": len(plan["chunks"]),
+                    "at": clock()})
+                status["review_incremental_rebases"] = audits[-40:]
+            elif stage["accepted_review_record_id"] is not None:
+                # An already recorded review cannot be replayed as a new PASS
+                # on an identical text without a fresh reviewer execution.
+                stage = incremental_review.new_stage(
+                    plan, chapter["unit_id"], status["workflow_revision"],
+                    binding)
+            incremental_review.validate_current(
+                stage, plan, source, translation, binding,
+                chapter["unit_id"], status["workflow_revision"])
+        except ValueError as exc:
+            raise JobError("invalid durable incremental reviewer checkpoint") from exc
     else:
-        # A changed accepted translation invalidates all earlier partial review.
+        # v1 checkpoints never gain incremental semantics without a new
+        # clean start; changed translations invalidate all their partial work.
         old_plan = stage.get("plan") if isinstance(stage, dict) else None
         if (isinstance(old_plan, dict)
                 and old_plan.get("source_sha256") == plan["source_sha256"]
@@ -3621,11 +4000,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 "unit_id": chapter["unit_id"],
                 "reason": "accepted-translation-hash-changed",
                 "at": clock()})
-    try:
-        review_chunks.validate_stage(
-            stage, plan, chapter["unit_id"], status["workflow_revision"])
-    except ValueError as exc:
-        raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
+        try:
+            review_chunks.validate_stage(
+                stage, plan, chapter["unit_id"], status["workflow_revision"])
+        except ValueError as exc:
+            raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
     from workflow.review_anchors import verify_evidence_anchors
     # Re-validate persisted evidence on every continuation, not just when first
     # received. A malicious or stale checkpoint cannot authorize a review.
@@ -3683,7 +4062,9 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             "system_chars": len(system), "user_chars": len(user),
             "review_context": "independent_session",
             "execution_mode": "bounded-review-chunks",
-            "review_helper_revision": review_chunks.HELPER_REVISION,
+            "review_helper_revision": plan["helper_revision"],
+            "incremental_stage_version": stage["schema_version"],
+            "reused_clean_chunks": len(stage.get("reused", {})),
             "chunk_id": next_part["id"], "chunk_count": len(plan["chunks"]),
         }
         status["model_calls_started"] = count + 1
@@ -3713,6 +4094,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         stage["completed"][next_part["id"]] = {
             "outcome": outcome, "report": report, "style": style,
             "glossary": reviewer_glossary}
+        if stage["schema_version"] == incremental_review.STAGE_VERSION:
+            incremental_review.record_chunk(stage, next_part, source, translation)
         # A successful independent part clears stale transport recovery; the
         # next part must not inherit an earlier part's retry/fallback history.
         status.pop("provider_retry", None)
@@ -3736,6 +4119,10 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         # Do not do a second model call in the same Action.
         return None
+    if (stage["schema_version"] == incremental_review.STAGE_VERSION
+            and stage["reused"]
+            and len(stage["reused"]) >= len(stage["completed"])):
+        raise JobError("incremental reviewer has no independently rechecked changed part")
     try:
         combined = review_chunks.combine(stage)
     except (ValueError, KeyError, TypeError) as exc:
@@ -3749,6 +4136,68 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         source=source, translation=translation.encode("utf-8"),
         previous_record=previous, claim=owned)
     return (*checked, reviewer_glossary_proposals(combined_json))
+
+
+
+def archive_incremental_reviewer_stage(slug: str, chapter: dict,
+                                       status: dict, report: dict) -> bool:
+    """Keep an exact completed rejected review solely for future clean reuse.
+
+    A recorded, current canonical reviewer record must independently match the
+    complete staged report and source/translation bytes. Missing or mismatched
+    ledger evidence causes ordinary stage cleanup, never a synthetic PASS.
+    """
+    path = review_chunk_stage_path(slug, chapter["unit_id"])
+    if not path.is_file():
+        return False
+    stage = read_json(path)
+    if not isinstance(stage, dict) or stage.get("schema_version") != 2:
+        return False
+    try:
+        incremental_review.validate_shape(
+            stage, chapter["unit_id"], status["workflow_revision"])
+        book = ROOT / "books" / slug
+        source = (book / chapter["source_path"]).read_text("utf-8")
+        target = (book / chapter["translation_path"]).read_text("utf-8")
+        review_chunks.validate_plan(stage["plan"], source, target)
+        if len(stage["completed"]) != len(stage["plan"]["chunks"]):
+            return False
+        for part in stage["plan"]["chunks"]:
+            if stage["windows"][part["id"]] != incremental_review.window_hashes(
+                    part, source, target):
+                return False
+        combined = review_chunks.combine(stage)
+        _, ledger, latest_chapters = chapter_data(slug)
+        current = next((item for item in latest_chapters
+                        if item["unit_id"] == chapter["unit_id"]), None)
+        recent = latest_record(ledger, current) if current else None
+        if (not isinstance(recent, dict) or not recent.get("record_id")
+                or recent.get("outcome") != "CORRECTIONS_REQUIRED"
+                or recent.get("source_sha256") != stage["plan"]["source_sha256"]
+                or recent.get("translation_sha256") != stage["plan"]["translation_sha256"]
+                or combined["outcome"] != recent["outcome"]
+                or combined["checks"] != recent.get("quality_report", {}).get("checks")
+                or combined["findings"] != recent.get("quality_report", {}).get("findings")
+                or combined["checks"] != report.get("checks")
+                or combined["findings"] != report.get("findings")):
+            return False
+        stage["accepted_review_record_id"] = recent["record_id"]
+        incremental_review.validate_shape(
+            stage, chapter["unit_id"], status["workflow_revision"])
+        store_json(path, stage)
+        status["review_incremental_archive"] = {
+            "unit_id": chapter["unit_id"],
+            "review_record_id": recent["record_id"],
+            "translation_sha256": stage["plan"]["translation_sha256"],
+            "clean_chunks": sum(
+                part["outcome"] == "PASS" and not part["report"]["findings"]
+                for part in stage["completed"].values()),
+        }
+        return True
+    except (ValueError, KeyError, TypeError, OSError):
+        # The optimized archive is optional. Do not compromise a canonical
+        # rejected review that has already been recorded successfully.
+        return False
 
 
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
@@ -4167,7 +4616,13 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         status.pop("_memory_only_change", None)
     if role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS
                               or status.get("review_chunk_fallback_unit") == unit_id):
-        review_chunk_stage_path(slug, unit_id).unlink(missing_ok=True)
+        # An archived v2 stage is not acceptance evidence; only clean,
+        # content-identical windows may be reused after the next correction.
+        archived = (outcome == "CORRECTIONS_REQUIRED"
+                    and archive_incremental_reviewer_stage(
+                        slug, chapter, status, report))
+        if not archived:
+            review_chunk_stage_path(slug, unit_id).unlink(missing_ok=True)
         status.pop("review_chunk_progress", None)
         status.pop("review_chunk_fallback_unit", None)
     cli("release", slug, str(chapter["number"]), "--session-id", active["session_id"])
