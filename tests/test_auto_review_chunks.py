@@ -93,6 +93,40 @@ class ReviewChunkPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checks"):
             chunks.combine(stage)
 
+    def test_previous_finding_uses_source_core_and_combined_ids_are_canonical(self):
+        first = self.plan["chunks"][0]
+        prior_finding = {"id": "meaning-1", "category": "meaning",
+                         "severity": "major", "detail": "Synthetic issue",
+                         "resolved": False,
+                         "source_anchor": {"quote": "English paragraph 00000", "occurrence": 0},
+                         "translation_anchor": {"quote": "Russian paragraph 00000", "occurrence": 0},
+                         "resolves": None}
+        previous = {"record_id": "a"*32, "quality_report": {
+            "evidence_version": 2, "findings": [prior_finding]}}
+        assigned = chunks.find_previous_for_chunk(previous, first, self.source)
+        self.assertEqual([item["id"] for item in assigned], ["meaning-1"])
+        self.assertEqual(chunks.find_previous_for_chunk(
+            previous, self.plan["chunks"][1], self.source), [])
+        followup = {**prior_finding, "id": "rechecked-1", "resolved": True,
+                    "resolves": {"record_id": "a"*32, "finding_id": "meaning-1"}}
+        stage = chunks.new_stage(self.plan, "chapter-000002", "f"*40)
+        for part in self.plan["chunks"]:
+            stage["completed"][part["id"]] = {
+                "outcome": "PASS",
+                "report": {"evidence_version": 2,
+                           "context": "independent_session",
+                           "checks": dict.fromkeys(("coverage", "meaning",
+                                                     "terminology", "style", "structure"), True),
+                           "findings": [followup] if part["id"] == first["id"] else []},
+                "style": []}
+        combined = chunks.combine(stage)
+        self.assertEqual(combined["outcome"], "PASS")
+        self.assertEqual(combined["findings"][0]["id"], "chunk-001-rechecked-1")
+        # The real pinned v2 parser, not just a synthetic schema, accepts it.
+        outcome, report, _ = runner.parse_literary_review(json.dumps(combined))
+        self.assertEqual(outcome, "PASS")
+        self.assertEqual(report["findings"][0]["resolves"]["record_id"], "a"*32)
+
     def test_finding_must_be_anchored_to_assigned_core(self):
         first = self.plan["chunks"][0]
         second = self.plan["chunks"][1]
