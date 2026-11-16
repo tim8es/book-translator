@@ -211,6 +211,18 @@ class ReviewChunkWorkerTests(unittest.TestCase):
         self.assertEqual(len(seen), expected)
         self.assertEqual(self.status["model_calls_started"], expected)
 
+    def test_valid_review_part_resets_stale_failure_streak_without_promotion(self):
+        self.status["failures"] = 2
+        with patch.object(runner, "complete_for_job", return_value=check_report()):
+            self.assertIsNone(self.run_one())
+        self.assertEqual(self.status["failures"], 0)
+        self.assertEqual(self.status["phase"], "review-chunk-staged")
+        self.assertIsNotNone(self.status["active"])
+        self.assertEqual(self.chapter["status"], "translated")
+        stage = runner.read_json(
+            runner.review_chunk_stage_path(self.slug, "chapter-000002"))
+        self.assertEqual(len(stage["completed"]), 1)
+
     def test_timeout_preserves_previous_checkpoint_not_fabricated_pass(self):
         responses = [check_report(), TransientModelError(
             "model transport timeout or connection failure", code="transport")]
