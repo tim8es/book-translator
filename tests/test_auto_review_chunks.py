@@ -159,7 +159,7 @@ class ReviewChunkWorkerTests(unittest.TestCase):
 
     def test_resume_uses_prior_completed_parts_and_only_aggregates_at_end(self):
         seen = []
-        def complete(role, system, prompt):
+        def complete(status, role, system, prompt):
             self.assertEqual(role, "REVIEWER")
             self.assertIn("Pinned reviewer contract", system)
             self.assertIn("core_to_review", prompt)
