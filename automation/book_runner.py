@@ -3474,7 +3474,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "source and translation anchors. No old findings means resolves:null. "
         "Never mark a prior finding resolved without verified repair. "
         "Return ONLY JSON object with exactly these keys: "
-        "evidence_version, outcome, checks, findings, style_guide. "
+        "evidence_version, outcome, checks, findings, style_guide, glossary. "
         "evidence_version=2; outcome=PASS or CORRECTIONS_REQUIRED. "
         "checks has exactly coverage,meaning,terminology,style,structure "
         "with each true only if actually performed for this source core. "
@@ -3489,6 +3489,9 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "outcome=CORRECTIONS_REQUIRED. "
         "style_guide is [] or source-grounded entries with exactly "
         "source_pattern,translation_approach,evidence. "
+        "glossary is [] or source-grounded recurring names and terms "
+        "with exactly original,translation,type,notes. Never invent names, "
+        "resolve disputed spellings by guessing, or force literal inflection. "
         "Never claim checks for passages you did not compare.")
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
@@ -3537,12 +3540,17 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         if stored is None:
             continue
         try:
-            outcome, report, style = parse_literary_review(
-                json.dumps({"evidence_version": 2, "outcome": stored["outcome"],
-                            "checks": stored["report"]["checks"],
-                            "findings": stored["report"]["findings"],
-                            "style_guide": stored["style"]}, ensure_ascii=False))
-            if report != stored["report"] or style != stored["style"]:
+            payload = {"evidence_version": 2, "outcome": stored["outcome"],
+                       "checks": stored["report"]["checks"],
+                       "findings": stored["report"]["findings"],
+                       "style_guide": stored["style"]}
+            if "glossary" in stored:
+                payload["glossary"] = stored["glossary"]
+            serialized = json.dumps(payload, ensure_ascii=False)
+            outcome, report, style = parse_literary_review(serialized)
+            glossary = reviewer_glossary_proposals(serialized)
+            if (report != stored["report"] or style != stored["style"]
+                    or glossary != stored.get("glossary", [])):
                 raise ValueError("stored reviewer report changed during checkpoint")
             verify_evidence_anchors(report, source.encode("utf-8"),
                                     translation.encode("utf-8"))
@@ -3590,6 +3598,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         outcome, report, style = parse_literary_review(answer)
+        reviewer_glossary = reviewer_glossary_proposals(answer)
         if report.get("evidence_version") != 2:
             raise ModelError("automatic reviewer must return anchored v2 evidence")
         try:
@@ -3608,7 +3617,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         except (ValueError, KeyError, TypeError) as exc:
             raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
         stage["completed"][next_part["id"]] = {
-            "outcome": outcome, "report": report, "style": style}
+            "outcome": outcome, "report": report, "style": style,
+            "glossary": reviewer_glossary}
         # A successful independent part clears stale transport recovery; the
         # next part must not inherit an earlier part's retry/fallback history.
         status.pop("provider_retry", None)
@@ -3635,11 +3645,12 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     # The pinned workflow's full-unit validator has the FINAL word on source
     # anchors and complete previous-review lineage. No chapter-level PASS
     # is recorded from an individual model response.
-    return checked_reviewer_response(
-        json.dumps(combined, ensure_ascii=False),
-        review_context="independent_session",
+    combined_json = json.dumps(combined, ensure_ascii=False)
+    checked = checked_reviewer_response(
+        combined_json, review_context="independent_session",
         source=source, translation=translation.encode("utf-8"),
         previous_record=previous, claim=owned)
+    return (*checked, reviewer_glossary_proposals(combined_json))
 
 
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
