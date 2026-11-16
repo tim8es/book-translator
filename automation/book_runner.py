@@ -2415,8 +2415,21 @@ def defer_failed_reviewer_unit(slug: str, chapter: dict, record: dict | None,
         "route": route,
         "at": clock(),
     })
-    status.update({"state": "running", "phase": "model-unit-deferred",
-                   "failures": 0})
+    if (route == "hash-bound-adapter"
+            and (pinned_scripts_dir() / "workflow" / "attention.py").is_file()):
+        # Canonical vNext refuses a defer-review without a *current*, fully
+        # rejected report. Its resume planner cannot see our hash-bound
+        # compatibility queue; leave the unit visibly blocked for independent
+        # operator review instead of re-dispatching it forever.
+        status.update({
+            "state": "blocked", "phase": "review-deferred-requires-operator",
+            "blocked_unit_id": chapter["unit_id"], "failures": 0,
+            "last_error": "Reviewer protocol retries exhausted; current translation "
+                          "has no complete independent review evidence",
+        })
+    else:
+        status.update({"state": "running", "phase": "model-unit-deferred",
+                       "failures": 0})
     return True
 
 
@@ -4044,16 +4057,18 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 slug, chapter, status, recoverable_code):
             checkpoint(job_id, status, slug)
             return
-        if defer_protocol_failed_unit(
-                slug, chapter, previous_record, status, recoverable_code):
-            # Report the deferred issue and let canonical resume select the
-            # next independent unit. Never fabricate an acceptance/PASS.
+        if (role == "corrector" and defer_protocol_failed_unit(
+                slug, chapter, previous_record, status, recoverable_code)):
+            # The correction-only deferral requires an exact, *current*
+            # rejected review. A reviewer still checking a new translation
+            # must never pass an older rejected report into this route.
             checkpoint(job_id, status, slug)
             return
         if (role == "reviewer" and defer_failed_reviewer_unit(
                 slug, chapter, previous_record, status, recoverable_code)):
-            # Missing current review evidence is tracked as a hash-bound
-            # pending unit, never a fabricated CORRECTIONS_REQUIRED/PASS.
+            # Reviewer isolation accepts the current artifact hash even when
+            # full review evidence is not yet available. Claim was released
+            # above; retain completed bounded chunks without inventing PASS.
             checkpoint(job_id, status, slug)
             return
         status["state"] = "blocked" if status["failures"] >= MAX_FAILURES else "running"
