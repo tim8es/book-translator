@@ -3501,7 +3501,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
 def process_review_chunks(job_id: str, slug: str, status: dict,
                           engine: Path, chapter: dict,
                           previous: dict | None,
-                          owned: dict) -> tuple[str, dict, list[dict]] | None:
+                          owned: dict) -> tuple[str, dict, list[dict], list[dict]] | None:
     """One paid call per checkpoint; a full chapter PASS requires every part."""
     book = ROOT / "books" / slug
     source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
@@ -4013,7 +4013,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             ROOT / "books" / slug, unit_id, active["session_id"],
             "glossary", proposed_glossary)
         status["memory_glossary_saved"] = status.get("memory_glossary_saved", 0) + saved
-        status["pending_style"] = proposed_style
+        status["pending_style"] = merge_unique_correction_decisions(
+            status.get("pending_style", []), proposed_style)
         if structural_plan is not None:
             structural_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("structural_segment_progress", None)
