@@ -132,6 +132,33 @@ class BookJobMonitorTests(unittest.TestCase):
         })
         self.assertIsNone(monitor.inspect(self.root, JOB, NOW, False))
 
+    def test_provider_backoff_overdue_is_stalled_without_two_hour_delay(self):
+        deadline = NOW - timedelta(minutes=16)
+        write_json(self.status_file, {
+            "job_id": JOB, "state": "running", "phase": "provider-backoff",
+            "updated_at": (NOW - timedelta(minutes=17)).isoformat(),
+            "provider_retry": {"not_before": deadline.isoformat()},
+        })
+        event = monitor.inspect(self.root, JOB, NOW, False)
+        self.assertEqual(event["type"], "stalled")
+        self.assertIn("retry deadline passed", event["reason"].lower())
+        self.assertEqual(event["phase"], "provider-backoff")
+        write_json(self.status_file, {
+            "job_id": JOB, "state": "running", "phase": "provider-backoff",
+            "updated_at": (NOW - timedelta(minutes=6)).isoformat(),
+            "provider_retry": {
+                "not_before": (NOW - timedelta(minutes=5)).isoformat()},
+        })
+        self.assertIsNone(monitor.inspect(self.root, JOB, NOW, False))
+
+    def test_missing_provider_backoff_deadline_is_integrity_failure(self):
+        write_json(self.status_file, {
+            "job_id": JOB, "state": "running", "phase": "provider-backoff",
+            "updated_at": NOW.isoformat(),
+        })
+        event = monitor.inspect(self.root, JOB, NOW, False)
+        self.assertEqual(event["type"], "integrity_failed")
+
     def test_malformed_state_generates_integrity_event(self):
         self.status_file.parent.mkdir(parents=True)
         self.status_file.write_text("{broken", encoding="utf-8")
