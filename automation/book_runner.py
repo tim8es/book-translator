@@ -3196,7 +3196,9 @@ def preliminary_context(engine: Path, slug: str, chapter: dict, role: str,
     source_path = chapter.get("source_path")
     if role in {"translator", "corrector", "reviewer"} and isinstance(source_path, str):
         path = ROOT / "books" / slug / source_path
-        if path.is_file() and path.stat().st_size > MAX_CHAPTER_CHARS:
+        size_threshold = (MAX_DIRECT_REVIEW_CHARS if role == "reviewer"
+                          else MAX_CHAPTER_CHARS)
+        if path.is_file() and path.stat().st_size > size_threshold:
             source = path.read_bytes().decode("utf-8")
             if (len(source) > MAX_CHAPTER_CHARS and role in {"translator", "corrector"}) or (role == "reviewer" and len(source) > MAX_DIRECT_REVIEW_CHARS):
                 return "", "", source
@@ -3472,7 +3474,8 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "with each true only if actually performed for this source core. "
         "Every finding has exactly id,category,severity,detail,resolved,"
         "source_anchor,translation_anchor,resolves. id must be locally "
-        "unique, lower-case alphanumeric/hyphen, without chunk prefix; "
+        "unique, lower-case alphanumeric/hyphen, at most 20 characters, "
+        "without chunk prefix; "
         "categories omission|addition|meaning|modality|referent|terminology|"
         "register|voice|style|structure; severity minor|major|critical. "
         "Anchors: {quote:string,occurrence:0}, translation anchor may "
@@ -3600,6 +3603,15 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
         stage["completed"][next_part["id"]] = {
             "outcome": outcome, "report": report, "style": style}
+        # A successful independent part clears stale transport recovery; the
+        # next part must not inherit an earlier part's retry/fallback history.
+        status.pop("provider_retry", None)
+        status.pop("last_error", None)
+        status.pop("last_error_code", None)
+        status.pop("provider_model_route", None)
+        status.pop("blocked_unit_id", None)
+        status.setdefault("role_protocol_failures", {}).pop(
+            chapter["unit_id"] + ":reviewer", None)
         store_json(stage_path, stage)
         status["review_chunk_progress"] = {
             "unit_id": chapter["unit_id"],
