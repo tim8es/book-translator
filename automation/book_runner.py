@@ -1021,10 +1021,22 @@ def recoverable_protected_correction_blocked(status: dict) -> bool:
 
 
 def auto_resume_requested(status: dict) -> bool:
-    """A newer explicit ChatOps resume-auto can authorize model-blocked recovery."""
-    if (status.get("state") != "blocked"
-            or status.get("phase") not in {"model-blocked", "correction-limit-reached", "attention-requires-operator"}
-            or status.get("active") is not None):
+    """A fresh operator resume-auto can reopen a supported durable checkpoint.
+
+    Unlike ordinary model failures, interrupted claims retain their exact
+    reviewer/translator session until the canonical --resume-interrupted gate
+    verifies ownership and lease expiry. Do not clear or fake claims here.
+    """
+    if status.get("state") != "blocked":
+        return False
+    phase, active = status.get("phase"), status.get("active")
+    if phase == "operator-intervention-required":
+        if not isinstance(active, dict) or active.get("role") not in (
+                "reviewer", "corrector", "translator"):
+            return False
+    elif (phase not in {"model-blocked", "correction-limit-reached",
+                       "attention-requires-operator"}
+          or active is not None):
         return False
     slug = status.get("book_slug")
     if not safe_book_slug(slug):
@@ -4217,12 +4229,20 @@ def run(job_id: str, *, resume_blocked: bool = False,
     request = request_for(job_id)
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
-    if (not resume_blocked and not resume_interrupted and status
-            and (auto_resume_requested(status)
-                 or recoverable_epub_preflight(status)
-                 or recoverable_structural_span_blocked(status)
-                 or recoverable_protected_correction_blocked(status))):
-        resume_blocked = True
+    if not resume_blocked and not resume_interrupted and status:
+        if auto_resume_requested(status):
+            # A newer explicit Auto handoff for an operator-blocked live claim
+            # is a request for the canonical interrupted-claim recovery path.
+            # It validates the lease, session, and frozen shared state before
+            # allowing another model call. Expired claims remain fail-closed.
+            if status.get("phase") == "operator-intervention-required":
+                resume_interrupted = True
+            else:
+                resume_blocked = True
+        elif (recoverable_epub_preflight(status)
+              or recoverable_structural_span_blocked(status)
+              or recoverable_protected_correction_blocked(status)):
+            resume_blocked = True
     preflight_resume = bool(resume_blocked and status and recoverable_epub_preflight(status))
     structural_resume = bool(resume_blocked and status and recoverable_structural_span_blocked(status))
     protected_correction_resume = bool(
