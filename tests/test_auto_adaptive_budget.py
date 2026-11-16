@@ -120,9 +120,10 @@ class AdaptiveRunnerTests(unittest.TestCase):
         stage_path = book / ".workflow/auto-correction-batches/chapter-000001.json"
         return root, chapter, review, status, patches, stage_path
 
-    def execute_correction(self, fixture):
+    def execute_correction(self, fixture, stages=None):
         root, chapter, record, status, patches, stage_path = fixture
-        stages = {"patches": [], "glossary": [], "style_guide": []}
+        if stages is None:
+            stages = {"patches": [], "glossary": [], "style_guide": []}
         calls = []
         def parsed(answer, selected, **kw):
             calls.append([item["id"] for item in selected])
@@ -154,6 +155,21 @@ class AdaptiveRunnerTests(unittest.TestCase):
             self.assertEqual(len(stage["patches"]), 1)
             self.assertIn("Первый абзац",
                           (fixture[0]/"books/synthetic/translated/unit.md").read_text("utf-8"))
+
+    def test_fully_staged_resume_uses_zero_additional_provider_calls(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fixture = self.fixture(folder)
+            staged = {
+                "patches": list(fixture[4].values()),
+                "glossary": [], "style_guide": [],
+            }
+            result, calls = self.execute_correction(fixture, staged)
+            self.assertEqual(calls, [])
+            self.assertEqual(fixture[3]["model_calls_started"], 0)
+            self.assertIn("Начальный абзац", result[0])
+            self.assertIn("Первый абзац",
+                          (fixture[0] / "books/synthetic/translated/unit.md"
+                           ).read_text("utf-8"))
 
     def test_simple_findings_group_without_skipping_independent_review(self):
         with tempfile.TemporaryDirectory() as folder:
