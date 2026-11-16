@@ -83,6 +83,24 @@ class CandidateReviewProtocolTests(unittest.TestCase):
                 "decisions": [{"finding_id": "x", "verdict": "approve", "risk": "none"},
                               {"finding_id": "y", "verdict": "approve", "risk": "none"}],
             }),
+            json.dumps({
+                "schema_version": True,
+                "checks": dict.fromkeys(candidate_review.CHECKS, True),
+                "decisions": [{"finding_id": "x", "verdict": "approve", "risk": "none"},
+                              {"finding_id": "y", "verdict": "approve", "risk": "none"}],
+            }),
+            json.dumps({
+                "schema_version": 1,
+                "checks": dict.fromkeys(candidate_review.CHECKS, True),
+                "decisions": [{"finding_id": "x", "verdict": [], "risk": "none"},
+                              {"finding_id": "y", "verdict": "approve", "risk": "none"}],
+            }),
+            json.dumps({
+                "schema_version": 1,
+                "checks": dict.fromkeys(candidate_review.CHECKS, True),
+                "decisions": [{"finding_id": "x", "verdict": "approve", "risk": {}},
+                              {"finding_id": "y", "verdict": "approve", "risk": "none"}],
+            }),
         ]
         for value in variants:
             with self.subTest(value=value[:100]):
