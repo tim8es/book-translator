@@ -34,6 +34,7 @@ from omniroute import ModelError, TransientModelError, complete
 import review_chunks
 import correction_regression
 import candidate_review
+import incremental_review
 import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
@@ -3869,26 +3870,92 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     prior_plan = stage.get("plan") if isinstance(stage, dict) else None
     prior_revision = (prior_plan.get("helper_revision")
                       if isinstance(prior_plan, dict) else None)
-    # A durable in-flight stage keeps its own helper revision even if the
-    # runtime flag changes. Existing literary workflow pins are untouched.
+    # Keep an in-flight stage on its original planner, even if opt-in settings
+    # change. Neither setting changes a book's canonical literary revision.
     if prior_revision not in {None, review_chunks.HELPER_REVISION,
                              review_chunks.ALIGNMENT_REVISION}:
         raise JobError("unsupported durable reviewer helper revision")
     alignment_mode = os.environ.get("BOOK_TRANSLATOR_MARKER_ALIGNMENT", "off")
-    if alignment_mode not in {"on", "off"}:
-        raise JobError("BOOK_TRANSLATOR_MARKER_ALIGNMENT must be on or off")
+    incremental_mode = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW", "off")
+    if alignment_mode not in {"on", "off"} or incremental_mode not in {"on", "off"}:
+        raise JobError("review alignment/incremental flags must be on or off")
     marker_plan = (prior_revision == review_chunks.ALIGNMENT_REVISION
-                   or (prior_revision is None and alignment_mode == "on"))
+                   or (prior_revision is None and
+                       (alignment_mode == "on" or incremental_mode == "on")))
     try:
         plan = (review_chunks.plan_aligned(source, translation) if marker_plan
                 else review_chunks.plan(source, translation))
     except ValueError as exc:
         raise JobError("cannot safely partition independent review: " + str(exc)) from exc
+    binding = None
+    if ((stage is not None and isinstance(stage, dict)
+         and stage.get("schema_version") == incremental_review.STAGE_VERSION)
+            or (stage is None and incremental_mode == "on"
+                and plan["helper_revision"] == review_chunks.ALIGNMENT_REVISION)):
+        try:
+            reviewer_contract, _ = role_contracts(engine, "reviewer")
+            binding = incremental_review.binding(
+                previous.get("record_id") if isinstance(previous, dict) else None,
+                fingerprint(book / "glossary.md"),
+                fingerprint(book / "style-guide.md"),
+                review_chunks.sha(reviewer_contract))
+        except ValueError as exc:
+            raise JobError("invalid incremental reviewer context binding") from exc
     if stage is None:
-        stage = review_chunks.new_stage(
-            plan, chapter["unit_id"], status["workflow_revision"])
+        stage = (incremental_review.new_stage(
+            plan, chapter["unit_id"], status["workflow_revision"], binding)
+            if binding is not None else review_chunks.new_stage(
+                plan, chapter["unit_id"], status["workflow_revision"]))
+    elif stage.get("schema_version") == incremental_review.STAGE_VERSION:
+        try:
+            incremental_review.validate_shape(
+                stage, chapter["unit_id"], status["workflow_revision"])
+            changed = stage["plan"] != plan or stage["binding"] != binding
+            if changed:
+                old_hash = stage["plan"]["translation_sha256"]
+                if (old_hash != plan["translation_sha256"]
+                        and stage["binding"] != binding
+                        and stage["accepted_review_record_id"] is None):
+                    # Changed prior records or literary memory cannot re-use
+                    # partial review findings from a different context.
+                    resumed, reused = incremental_review.rebase(
+                        stage, plan, source, translation, binding, previous,
+                        chapter["unit_id"], status["workflow_revision"])
+                elif old_hash != plan["translation_sha256"]:
+                    resumed, reused = incremental_review.rebase(
+                        stage, plan, source, translation, binding, previous,
+                        chapter["unit_id"], status["workflow_revision"])
+                else:
+                    resumed = incremental_review.new_stage(
+                        plan, chapter["unit_id"], status["workflow_revision"],
+                        binding)
+                    reused = 0
+                stage = resumed
+                audits = status.setdefault("review_incremental_rebases", [])
+                if not isinstance(audits, list):
+                    raise JobError("invalid reviewer reuse audit")
+                audits.append({
+                    "unit_id": chapter["unit_id"],
+                    "old_translation_sha256": old_hash,
+                    "translation_sha256": plan["translation_sha256"],
+                    "reused_clean_chunks": reused,
+                    "total_chunks": len(plan["chunks"]),
+                    "at": clock()})
+                status["review_incremental_rebases"] = audits[-40:]
+            elif stage["accepted_review_record_id"] is not None:
+                # An already recorded review cannot be replayed as a new PASS
+                # on an identical text without a fresh reviewer execution.
+                stage = incremental_review.new_stage(
+                    plan, chapter["unit_id"], status["workflow_revision"],
+                    binding)
+            incremental_review.validate_current(
+                stage, plan, source, translation, binding,
+                chapter["unit_id"], status["workflow_revision"])
+        except ValueError as exc:
+            raise JobError("invalid durable incremental reviewer checkpoint") from exc
     else:
-        # A changed accepted translation invalidates all earlier partial review.
+        # v1 checkpoints never gain incremental semantics without a new
+        # clean start; changed translations invalidate all their partial work.
         old_plan = stage.get("plan") if isinstance(stage, dict) else None
         if (isinstance(old_plan, dict)
                 and old_plan.get("source_sha256") == plan["source_sha256"]
@@ -3899,11 +3966,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 "unit_id": chapter["unit_id"],
                 "reason": "accepted-translation-hash-changed",
                 "at": clock()})
-    try:
-        review_chunks.validate_stage(
-            stage, plan, chapter["unit_id"], status["workflow_revision"])
-    except ValueError as exc:
-        raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
+        try:
+            review_chunks.validate_stage(
+                stage, plan, chapter["unit_id"], status["workflow_revision"])
+        except ValueError as exc:
+            raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
     from workflow.review_anchors import verify_evidence_anchors
     # Re-validate persisted evidence on every continuation, not just when first
     # received. A malicious or stale checkpoint cannot authorize a review.
@@ -3961,7 +4028,9 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             "system_chars": len(system), "user_chars": len(user),
             "review_context": "independent_session",
             "execution_mode": "bounded-review-chunks",
-            "review_helper_revision": review_chunks.HELPER_REVISION,
+            "review_helper_revision": plan["helper_revision"],
+            "incremental_stage_version": stage["schema_version"],
+            "reused_clean_chunks": len(stage.get("reused", {})),
             "chunk_id": next_part["id"], "chunk_count": len(plan["chunks"]),
         }
         status["model_calls_started"] = count + 1
@@ -3991,6 +4060,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         stage["completed"][next_part["id"]] = {
             "outcome": outcome, "report": report, "style": style,
             "glossary": reviewer_glossary}
+        if stage["schema_version"] == incremental_review.STAGE_VERSION:
+            incremental_review.record_chunk(stage, next_part, source, translation)
         # A successful independent part clears stale transport recovery; the
         # next part must not inherit an earlier part's retry/fallback history.
         status.pop("provider_retry", None)
@@ -4014,6 +4085,10 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         # Do not do a second model call in the same Action.
         return None
+    if (stage["schema_version"] == incremental_review.STAGE_VERSION
+            and stage["reused"]
+            and len(stage["reused"]) >= len(stage["completed"])):
+        raise JobError("incremental reviewer has no independently rechecked changed part")
     try:
         combined = review_chunks.combine(stage)
     except (ValueError, KeyError, TypeError) as exc:
