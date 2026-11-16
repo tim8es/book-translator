@@ -87,9 +87,14 @@ class MarkerAlignmentPureTests(unittest.TestCase):
         legacy = chunks.plan(self.source, self.translation)
         self.assertEqual(legacy["helper_revision"], chunks.HELPER_REVISION)
         chunks.validate_plan(legacy, self.source, self.translation)
+        plain_source = "\n\n".join(
+            "Source paragraph %d. " % i + "synthetic words " * 80
+            for i in range(30))
+        plain_target = "\n\n".join(
+            "Перевод абзаца %d. " % i + "тестовые слова " * 80
+            for i in range(30))
         self.assertEqual(
-            chunks.plan_aligned("First.\n\nSecond.\n\nThird.",
-                                "Первое.\n\nВторое.\n\nТретье.")["helper_revision"],
+            chunks.plan_aligned(plain_source, plain_target)["helper_revision"],
             chunks.HELPER_REVISION)
 
 
