@@ -88,6 +88,21 @@ to operator attention. It never fabricates a PASS to escape a review loop.
 Review the operator-attention queue separately instead of increasing
 iteration limits without evidence of progress.
 
+### Optional stable EPUB block alignment
+
+`BOOK_TRANSLATOR_MARKER_ALIGNMENT=on` enables deterministic paired review
+chunks at original `bt-block` boundaries when the same unique markers are
+present in the source and translation. Mismatched marker sequences block this
+path; no marker can be guessed. Without markers, the existing paragraph
+partitioner is used. Default: `off`. New checkpoints record a distinct
+helper revision (`review-chunks-markers-v1`); existing `review-chunks-v1`
+checkpoints continue with their original partitioner even when the flag
+changes. All complete source/translation cores still require independent
+review, and **every changed accepted translation invalidates prior partial
+chunk evidence**. This is stable alignment, not yet incremental PASS reuse
+or a reduction in reviewer calls. Never turn it on mid-run solely to
+reuse stale review evidence.
+
 There are two independent modes:
 
 - ChatOps uses the public Chat executor and its own pinned execution revision.
