@@ -35,6 +35,7 @@ import review_chunks
 import correction_regression
 import candidate_review
 import incremental_review
+import adaptive_budget
 import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
@@ -2339,12 +2340,39 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
-    for _ in range(CORRECTION_BATCH_CALLS_PER_CHECKPOINT):
+    try:
+        adaptive = adaptive_budget.enabled()
+        initial_budget = (adaptive_budget.plan(
+            unresolved,
+            rejected=status.get("correction_regression_rejections", []),
+            unit_id=chapter["unit_id"], record_id=record["record_id"],
+            failures=status.get("failures", 0)) if adaptive else None)
+    except ValueError as exc:
+        raise JobError("invalid adaptive correction budget configuration") from exc
+    calls_this_checkpoint = (initial_budget["max_calls_per_checkpoint"] if adaptive
+                             else CORRECTION_BATCH_CALLS_PER_CHECKPOINT)
+    for _ in range(calls_this_checkpoint):
         completed = {patch["finding_id"] for patch in stage["patches"]}
         pending = [finding for finding in unresolved if finding["id"] not in completed]
         if not pending:
             break
-        selected = pending[:CORRECTION_BATCH_SIZE]
+        if adaptive:
+            try:
+                current_budget = adaptive_budget.plan(
+                    pending,
+                    rejected=status.get("correction_regression_rejections", []),
+                    unit_id=chapter["unit_id"], record_id=record["record_id"],
+                    failures=status.get("failures", 0))
+            except ValueError as exc:
+                raise JobError("invalid current correction budget evidence") from exc
+            selected = pending[:current_budget["group_size"]]
+            status["adaptive_correction_budget"] = {
+                **current_budget,
+                "unit_id": chapter["unit_id"],
+                "review_record_id": record["record_id"],
+            }
+        else:
+            selected = pending[:CORRECTION_BATCH_SIZE]
         system, user, _ = context(
             engine, slug, chapter, "corrector", correction_findings=selected)
         earlier = [item["finding_id"] for item in
