@@ -23,7 +23,8 @@ class PureCorrectionRegressionTests(unittest.TestCase):
         after = before + " Он медленно закрыл окно, а затем взглянул на дверь."
         issues = guard.new_repetitions(before, after)
         self.assertTrue(issues)
-        self.assertTrue(all("fingerprint" in item for item in issues))
+        self.assertTrue(all(set(item) == {
+            "tokens", "previous", "candidate", "adjacent"} for item in issues))
         self.assertNotIn("окно", repr(issues))
         with self.assertRaises(guard.CorrectionRegression) as error:
             guard.require_no_new_repetitions(before, after)
