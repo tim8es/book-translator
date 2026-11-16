@@ -121,13 +121,13 @@ class CorrectionBatchGuardTests(unittest.TestCase):
 
     def process(self, fixture, patches):
         root, chapter, record, status, stage, stage_path, *_ = fixture
-        with patch.object(auto, "ROOT", root), \\
+        with patch.object(auto, "ROOT", root), \
              patch.object(auto, "load_correction_stage", return_value=(
-                 stage_path, stage)), \\
-             patch.object(auto, "context", return_value=("sys", "user", "")), \\
-             patch.object(auto, "role_contracts", return_value=("sys", ["AGENTS.md"])), \\
-             patch.object(auto, "checkpoint"), \\
-             patch.object(auto, "complete_for_job", return_value="{}"), \\
+                 stage_path, stage)), \
+             patch.object(auto, "context", return_value=("sys", "user", "")), \
+             patch.object(auto, "role_contracts", return_value=("sys", ["AGENTS.md"])), \
+             patch.object(auto, "checkpoint"), \
+             patch.object(auto, "complete_for_job", return_value="{}"), \
              patch.object(auto, "parse_correction_patches",
                           return_value=(patches, [], [])):
             return auto.process_correction_batches(
