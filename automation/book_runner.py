@@ -3987,11 +3987,20 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 status.get("glossary_conflicts_rejected", 0) + conflicts)
             status["glossary_proposals_deferred"] = (
                 status.get("glossary_proposals_deferred", 0) + overflow)
-            saved = save_claim_bound_decisions(
-                book, unit_id, active["session_id"],
-                "style_guide", reviewed_style)
-            status["memory_style_saved"] = status.get("memory_style_saved", 0) + saved
-            status["pending_style"] = []
+            # Canonical proposals freeze *both* shared-memory revisions per
+            # worker claim. A glossary write invalidates a second style CAS.
+            # Preserve style evidence for the next eligible reviewer claim.
+            reviewed_style = merge_unique_correction_decisions(
+                status.get("pending_style", []), reviewed_style)
+            if saved_glossary:
+                status["pending_style"] = reviewed_style
+            else:
+                saved = save_claim_bound_decisions(
+                    book, unit_id, active["session_id"],
+                    "style_guide", reviewed_style)
+                status["memory_style_saved"] = (
+                    status.get("memory_style_saved", 0) + saved)
+                status["pending_style"] = []
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         if role == "corrector" and patch_mode:
