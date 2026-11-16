@@ -132,7 +132,9 @@ def validate_stage(stage: dict, plan_value: dict, unit_id: str, revision: str) -
         raise ValueError("review checkpoint is stale or malformed")
     ids = {part["id"] for part in plan_value["chunks"]}
     if any(key not in ids or not isinstance(value, dict)
-           or set(value) != {"outcome", "report", "style"}
+           or set(value) not in ({"outcome", "report", "style"},
+                                 {"outcome", "report", "style", "glossary"})
+           or ("glossary" in value and not isinstance(value["glossary"], list))
            for key, value in stage["completed"].items()):
         raise ValueError("review checkpoint has unexpected evidence")
 
@@ -198,7 +200,7 @@ def combine(stage: dict) -> dict:
     chunks = stage["plan"]["chunks"]
     if set(stage["completed"]) != {p["id"] for p in chunks}:
         raise ValueError("full reviewer coverage has not been established")
-    all_findings, all_style = [], []
+    all_findings, all_style, all_glossary = [], [], []
     seen_prior = set()
     for part in chunks:
         stored = stage["completed"][part["id"]]
@@ -224,6 +226,11 @@ def combine(stage: dict) -> dict:
         for item in stored["style"]:
             if item not in all_style:
                 all_style.append(item)
+        for item in stored.get("glossary", []):
+            if item not in all_glossary:
+                all_glossary.append(item)
+    if len(all_glossary) > 40:
+        raise ValueError("aggregated glossary exceeds bounded reviewer memory")
     if len(all_findings) > 100:
         raise ValueError("aggregated review exceeds canonical findings limit")
     unresolved = any(not f["resolved"] for f in all_findings)
@@ -231,7 +238,10 @@ def combine(stage: dict) -> dict:
     if any(stage["completed"][part["id"]]["outcome"] == "CORRECTIONS_REQUIRED"
            for part in chunks) and not unresolved:
         raise ValueError("chunk requests corrections without unresolved evidence")
-    return {"evidence_version": 2, "outcome": outcome,
-            "checks": dict.fromkeys(
-                ("coverage", "meaning", "terminology", "style", "structure"), True),
-            "findings": all_findings, "style_guide": all_style}
+    result = {"evidence_version": 2, "outcome": outcome,
+              "checks": dict.fromkeys(
+                  ("coverage", "meaning", "terminology", "style", "structure"), True),
+              "findings": all_findings, "style_guide": all_style}
+    if all_glossary:
+        result["glossary"] = all_glossary
+    return result

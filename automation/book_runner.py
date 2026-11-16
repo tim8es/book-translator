@@ -34,7 +34,8 @@ from omniroute import ModelError, TransientModelError, complete
 import review_chunks
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
                               parse_correction_patches, parse_translation, PatchAnchorMismatch, role_contracts,
-                              save_claim_bound_decisions, updated_glossary, model_glossary_context)
+                              save_claim_bound_decisions, updated_glossary, model_glossary_context,
+                              reviewer_glossary_proposals, paired_inline_name_glossary)
 
 # The shared runtime lives in the public repository but all mutable state
 # lives in the invoking book-state checkout (private or otherwise).
@@ -3165,7 +3166,7 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         else:
             user += " First-pass findings use resolves=null."
         user += (
-            " Return ONLY JSON with exactly keys evidence_version, outcome, checks, findings, style_guide. "
+            " Return ONLY JSON with exactly keys evidence_version, outcome, checks, findings, style_guide, glossary. "
             "Set evidence_version=2; outcome=PASS or CORRECTIONS_REQUIRED. checks has coverage, meaning, "
             "terminology, style, structure, each true only if checked. Each finding has exactly id, "
             "category, severity, detail, resolved, source_anchor, translation_anchor, resolves. "
@@ -3185,6 +3186,11 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
             "\"source_anchor\":{\"quote\":\"She might have known.\",\"occurrence\":0},"
             "\"translation_anchor\":{\"quote\":\"Она знала.\",\"occurrence\":0},\"resolves\":null}],"
             "\"style_guide\":[]}. Do not use the old three-field finding format. "
+            "glossary contains source-grounded recurring names, nicknames, organizations and " 
+            "domain terms (up to 40, exactly original, translation, type, notes). " 
+            "Copy attested source and target lexical forms; if names conflict " 
+            "report a terminology finding, not an arbitrary preference. " 
+            "Return [] only when no stable lexical decision is supported. " 
             "style_guide contains source-grounded entries with exactly source_pattern, "
             "translation_approach, evidence; [] is valid. Keep stable ids unique, report every unresolved "
             "issue, and never invent findings."
@@ -3520,7 +3526,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "source and translation anchors. No old findings means resolves:null. "
         "Never mark a prior finding resolved without verified repair. "
         "Return ONLY JSON object with exactly these keys: "
-        "evidence_version, outcome, checks, findings, style_guide. "
+        "evidence_version, outcome, checks, findings, style_guide, glossary. "
         "evidence_version=2; outcome=PASS or CORRECTIONS_REQUIRED. "
         "checks has exactly coverage,meaning,terminology,style,structure "
         "with each true only if actually performed for this source core. "
@@ -3535,6 +3541,9 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "outcome=CORRECTIONS_REQUIRED. "
         "style_guide is [] or source-grounded entries with exactly "
         "source_pattern,translation_approach,evidence. "
+        "glossary is [] or source-grounded recurring names and terms "
+        "with exactly original,translation,type,notes. Never invent names, "
+        "resolve disputed spellings by guessing, or force literal inflection. "
         "Never claim checks for passages you did not compare.")
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
@@ -3544,7 +3553,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
 def process_review_chunks(job_id: str, slug: str, status: dict,
                           engine: Path, chapter: dict,
                           previous: dict | None,
-                          owned: dict) -> tuple[str, dict, list[dict]] | None:
+                          owned: dict) -> tuple[str, dict, list[dict], list[dict]] | None:
     """One paid call per checkpoint; a full chapter PASS requires every part."""
     book = ROOT / "books" / slug
     source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
@@ -3583,12 +3592,17 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         if stored is None:
             continue
         try:
-            outcome, report, style = parse_literary_review(
-                json.dumps({"evidence_version": 2, "outcome": stored["outcome"],
-                            "checks": stored["report"]["checks"],
-                            "findings": stored["report"]["findings"],
-                            "style_guide": stored["style"]}, ensure_ascii=False))
-            if report != stored["report"] or style != stored["style"]:
+            payload = {"evidence_version": 2, "outcome": stored["outcome"],
+                       "checks": stored["report"]["checks"],
+                       "findings": stored["report"]["findings"],
+                       "style_guide": stored["style"]}
+            if "glossary" in stored:
+                payload["glossary"] = stored["glossary"]
+            serialized = json.dumps(payload, ensure_ascii=False)
+            outcome, report, style = parse_literary_review(serialized)
+            glossary = reviewer_glossary_proposals(serialized)
+            if (report != stored["report"] or style != stored["style"]
+                    or glossary != stored.get("glossary", [])):
                 raise ValueError("stored reviewer report changed during checkpoint")
             verify_evidence_anchors(report, source.encode("utf-8"),
                                     translation.encode("utf-8"))
@@ -3636,6 +3650,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         outcome, report, style = parse_literary_review(answer)
+        reviewer_glossary = reviewer_glossary_proposals(answer)
         if report.get("evidence_version") != 2:
             raise ModelError("automatic reviewer must return anchored v2 evidence")
         try:
@@ -3654,7 +3669,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         except (ValueError, KeyError, TypeError) as exc:
             raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
         stage["completed"][next_part["id"]] = {
-            "outcome": outcome, "report": report, "style": style}
+            "outcome": outcome, "report": report, "style": style,
+            "glossary": reviewer_glossary}
         # A successful independent part clears stale transport recovery; the
         # next part must not inherit an earlier part's retry/fallback history.
         status.pop("provider_retry", None)
@@ -3681,11 +3697,12 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     # The pinned workflow's full-unit validator has the FINAL word on source
     # anchors and complete previous-review lineage. No chapter-level PASS
     # is recorded from an individual model response.
-    return checked_reviewer_response(
-        json.dumps(combined, ensure_ascii=False),
-        review_context="independent_session",
+    combined_json = json.dumps(combined, ensure_ascii=False)
+    checked = checked_reviewer_response(
+        combined_json, review_context="independent_session",
         source=source, translation=translation.encode("utf-8"),
         previous_record=previous, claim=owned)
+    return (*checked, reviewer_glossary_proposals(combined_json))
 
 
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
@@ -3709,6 +3726,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     structural_plan = None
     structural_helper = None
     review_context = "independent_session"
+    reviewed_glossary: list[dict] = []
     # Fully validate the model response before changing canonical artifacts.
     # Model/format failures are safe to checkpoint as retries. CLI failures
     # after mutation remain fail-closed and must be examined separately.
@@ -3821,7 +3839,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 job_id, slug, status, engine, chapter, previous_record, owned)
             if reviewed is None:
                 return
-            outcome, report, reviewed_style = reviewed
+            outcome, report, reviewed_style, reviewed_glossary = reviewed
             prompt_context = status["prompt_context"]
         elif preserve_links:
             prompt_context["execution_mode"] = "deterministic_external_link_preservation"
@@ -3855,6 +3873,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         answer, review_context=review_context, source=source,
                         translation=translation_bytes, previous_record=previous_record,
                         claim=owned)
+                    reviewed_glossary = reviewer_glossary_proposals(answer)
                 except ModelError as exc:
                     # Provider/transport failures happen outside this parse/verify
                     # block and never trigger an extra paid call. Repair only a
@@ -3872,6 +3891,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         repaired, review_context=review_context, source=source,
                         translation=translation_bytes, previous_record=previous_record,
                         claim=owned)
+                    reviewed_glossary = reviewer_glossary_proposals(repaired)
             else:
                 translated, proposed_glossary, proposed_style = parse_translation(answer)
         if role != "reviewer":
@@ -3999,12 +4019,40 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         if status.get("force_full_review_unit") == unit_id:
             status.pop("force_full_review_unit", None)
         if outcome == "PASS":
+            book = ROOT / "books" / slug
+            accepted_text = (book / chapter["translation_path"]).read_text("utf-8")
+            source_text = (book / chapter["source_path"]).read_text("utf-8")
+            candidates = merge_unique_correction_decisions(
+                reviewed_glossary, paired_inline_name_glossary(source_text, accepted_text))
+            overflow = max(0, len(candidates) - 40)
+            candidates, ungrounded = filter_ungrounded_glossary_proposals(
+                candidates[:40], source_text, accepted_text)
+            candidates, conflicts = filter_conflicting_glossary_proposals(book, candidates)
             cli("accept-review", slug, str(chapter["number"]))
-            saved = save_claim_bound_decisions(
-                ROOT / "books" / slug, unit_id, active["session_id"],
-                "style_guide", reviewed_style)
-            status["memory_style_saved"] = status.get("memory_style_saved", 0) + saved
-            status["pending_style"] = []
+            saved_glossary = save_claim_bound_decisions(
+                book, unit_id, active["session_id"], "glossary", candidates)
+            status["memory_glossary_saved"] = (
+                status.get("memory_glossary_saved", 0) + saved_glossary)
+            status["glossary_evidence_rejected"] = (
+                status.get("glossary_evidence_rejected", 0) + ungrounded)
+            status["glossary_conflicts_rejected"] = (
+                status.get("glossary_conflicts_rejected", 0) + conflicts)
+            status["glossary_proposals_deferred"] = (
+                status.get("glossary_proposals_deferred", 0) + overflow)
+            # Canonical proposals freeze *both* shared-memory revisions per
+            # worker claim. A glossary write invalidates a second style CAS.
+            # Preserve style evidence for the next eligible reviewer claim.
+            reviewed_style = merge_unique_correction_decisions(
+                status.get("pending_style", []), reviewed_style)
+            if saved_glossary:
+                status["pending_style"] = reviewed_style
+            else:
+                saved = save_claim_bound_decisions(
+                    book, unit_id, active["session_id"],
+                    "style_guide", reviewed_style)
+                status["memory_style_saved"] = (
+                    status.get("memory_style_saved", 0) + saved)
+                status["pending_style"] = []
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         if role == "corrector" and patch_mode:
@@ -4017,7 +4065,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             ROOT / "books" / slug, unit_id, active["session_id"],
             "glossary", proposed_glossary)
         status["memory_glossary_saved"] = status.get("memory_glossary_saved", 0) + saved
-        status["pending_style"] = proposed_style
+        status["pending_style"] = merge_unique_correction_decisions(
+            status.get("pending_style", []), proposed_style)
         if structural_plan is not None:
             structural_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("structural_segment_progress", None)

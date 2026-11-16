@@ -93,10 +93,12 @@ def parse_literary_review(
         raise ModelError("reviewer must return JSON") from exc
     if not isinstance(data, dict) or data.get("outcome") not in {"PASS", "CORRECTIONS_REQUIRED"}:
         raise ModelError("reviewer response has invalid literary memory schema")
-    if set(data) == {"outcome", "checks", "findings", "style_guide"}:
+    if set(data) in ({"outcome", "checks", "findings", "style_guide"},
+                       {"outcome", "checks", "findings", "style_guide", "glossary"}):
         core = {key: data[key] for key in ("outcome", "checks", "findings")}
         outcome, report = parse_review(json.dumps(core, ensure_ascii=False))
-    elif set(data) == {"evidence_version", "outcome", "checks", "findings", "style_guide"}:
+    elif set(data) in ({"evidence_version", "outcome", "checks", "findings", "style_guide"},
+                        {"evidence_version", "outcome", "checks", "findings", "style_guide", "glossary"}):
         if type(data["evidence_version"]) is not int or data["evidence_version"] != 2:
             raise ModelError("unsupported reviewer evidence version")
         if context not in {"independent_session", "bounded_context"}:
@@ -115,7 +117,20 @@ def parse_literary_review(
     else:
         raise ModelError("reviewer response has invalid literary memory schema")
     style = _entries(data["style_guide"], _STYLE_KEYS, "style_guide")
+    if "glossary" in data:
+        _entries(data["glossary"], _NAME_KEYS, "glossary")
     return outcome, report, style
+
+
+def reviewer_glossary_proposals(text: str) -> list[dict]:
+    """Parse optional lexical decisions without altering canonical review evidence."""
+    try:
+        data = _json_payload(text)
+    except ValueError as exc:
+        raise ModelError("reviewer must return JSON") from exc
+    if not isinstance(data, dict):
+        raise ModelError("reviewer response has invalid literary memory schema")
+    return _entries(data.get("glossary", []), _NAME_KEYS, "glossary")
 
 
 def _insertion_anchor(value: object) -> dict:
@@ -289,6 +304,53 @@ def full_shared_context(book: Path) -> tuple[str, str]:
     if max(len(glossary), len(guide)) > MAX_SHARED_CHARS:
         raise ValueError("literary memory exceeds prompt budget; refuse silent truncation")
     return glossary, guide
+
+
+def paired_inline_name_glossary(source: str, translation: str) -> list[dict]:
+    """Find exact pairs of linked proper names, not guessed prose mappings.
+
+    Callers must require accepted, currently reviewed source/translation bytes
+    before turning these conservative candidates into canonical decisions.
+    """
+    block = re.compile(r"<!-- bt-block:\d+ -->\s*([\s\S]*?)(?=<!-- bt-block:\d+ -->|\Z)")
+    inline = re.compile(
+        r"<!-- bt-inline:(\d+):start -->([^<\n]{1,150})"
+        r"<!-- bt-inline:\1:end -->"
+    )
+    sources = block.findall(source)
+    targets = block.findall(translation)
+    if not sources or len(sources) != len(targets):
+        return []
+    candidates: dict[str, dict] = {}
+    ambiguous: set[str] = set()
+    for src, tgt in zip(sources, targets):
+        originals, renderings = inline.findall(src), inline.findall(tgt)
+        if [key for key, _ in originals] != [key for key, _ in renderings]:
+            continue
+        for (_, raw), (_, translated) in zip(originals, renderings):
+            # Linked metadata may append a non-lexical context descriptor.
+            raw = re.sub(r"\s+\([^()]{1,80}\)$", "", raw.strip())
+            translated = re.sub(r"\s+\([^()]{1,80}\)$", "", translated.strip())
+            words = [raw.split(), translated.split()]
+            if any(not 2 <= len(tokens) <= 3 for tokens in words):
+                continue
+            if any(not all(
+                token[0].isupper() and all(ch.isalpha() or ch in "-'’"
+                                            for ch in token)
+                for token in tokens) for tokens in words):
+                continue
+            if raw == translated:
+                continue
+            key = raw.casefold()
+            row = {"original": raw, "translation": translated,
+                   "type": "linked proper name",
+                   "notes": "Paired source and target EPUB name link; inflect in context."}
+            if key in candidates and candidates[key]["translation"] != translated:
+                ambiguous.add(key)
+            else:
+                candidates[key] = row
+    return [item for key, item in candidates.items()
+            if key not in ambiguous][:MAX_ITEMS]
 
 
 def _cell(value: str) -> str:
