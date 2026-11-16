@@ -6,6 +6,7 @@ partial patches and canonical review deferral.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -104,6 +105,107 @@ class ProtectedReviewerPatchTests(unittest.TestCase):
                 "operation": "replace",
                 "replacement": "не менять",
             }])
+
+
+class ProtectedReviewerBatchTests(unittest.TestCase):
+    def fixture(self, directory):
+        root = Path(directory)
+        slug = "fixture"
+        book = root / "books" / slug
+        (book / "extracted").mkdir(parents=True)
+        (book / "translated").mkdir()
+        (book / "glossary.md").write_text("terms\n", encoding="utf-8")
+        (book / "style-guide.md").write_text("style\n", encoding="utf-8")
+        original = (
+            "<!-- bt-block:000001 -->\n"
+            "First term <!-- bt-inline:000001:start -->Second"
+            "<!-- bt-inline:000001:end --> Third\n"
+        )
+        (book / "extracted" / "001.md").write_text(original, encoding="utf-8")
+        (book / "translated" / "001.md").write_text(original, encoding="utf-8")
+        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        chapter = {
+            "number": 1, "unit_id": "chapter-000001",
+            "source_path": "extracted/001.md",
+            "translation_path": "translated/001.md",
+            "status": "translated",
+            "translation_acceptance": {
+                "source_sha256": digest, "translation_sha256": digest,
+            },
+        }
+        status = {
+            "state": "running", "phase": "claimed",
+            "active": {"chapter": 1, "role": "corrector", "session_id": "test"},
+            "workflow_revision": "a" * 40,
+            "model_calls_started": 0,
+        }
+        findings = [
+            {"id": "safe-1", "resolved": False},
+            {"id": "protected-1", "resolved": False},
+        ]
+        record = {
+            "record_id": "review-1", "source_sha256": digest,
+            "translation_sha256": digest, "outcome": "CORRECTIONS_REQUIRED",
+            "quality_report": {"evidence_version": 2, "findings": findings},
+        }
+        safe = {
+            "finding_id": "safe-1", "operation": "replace",
+            "target_anchor": {"quote": "First term", "occurrence": 0},
+            "replacement": "Первый термин",
+        }
+        protected = {
+            "finding_id": "protected-1", "operation": "replace",
+            "target_anchor": {
+                "quote": "Second<!-- bt-inline:000001:end --> Third",
+                "occurrence": 0,
+            }, "replacement": "Заменённый маркер",
+        }
+        stage = {
+            "patches": [], "glossary": [], "style_guide": [],
+        }
+        stage_path = book / ".workflow" / "auto-correction-batches" / "chapter-000001.json"
+        return root, slug, chapter, status, record, stage, stage_path, safe, protected
+
+    def execute(self, fixture, patches):
+        root, slug, chapter, status, record, stage, stage_path, *_ = fixture
+        with patch.object(auto, "ROOT", root), \
+             patch.object(auto, "load_correction_stage",
+                          return_value=(stage_path, stage)), \
+             patch.object(auto, "context", return_value=("sys", "user", "")), \
+             patch.object(auto, "role_contracts",
+                          return_value=("test", ["AGENTS.md"])), \
+             patch.object(auto, "checkpoint"), \
+             patch.object(auto, "complete_for_job", return_value="{}"), \
+             patch.object(auto, "parse_correction_patches",
+                          return_value=(patches, [], [])):
+            return auto.process_correction_batches(
+                "f" * 32, slug, status, root, chapter, record)
+
+    def test_safe_patch_applied_with_marker_crossing_finding_still_unresolved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self.fixture(directory)
+            _, _, _, status, _, _, stage_path, safe, protected = fixture
+            result = self.execute(fixture, [safe, protected])
+            self.assertIsNotNone(result)
+            self.assertIn("Первый термин", result[0])
+            self.assertIn("<!-- bt-inline:000001:end -->", result[0])
+            self.assertNotIn("Заменённый маркер", result[0])
+            self.assertEqual(status["correction_overlap_deferred"]["unapplied_finding_ids"],
+                             ["protected-1"])
+            staged = json.loads(stage_path.read_text(encoding="utf-8"))
+            self.assertEqual([p["finding_id"] for p in staged["patches"]],
+                             ["safe-1"])
+
+    def test_only_protected_patch_fails_without_changing_literary_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self.fixture(directory)
+            root, slug, chapter, _, _, _, stage_path, _, protected = fixture
+            artifact = root / "books" / slug / chapter["translation_path"]
+            original = artifact.read_bytes()
+            with self.assertRaisesRegex(auto.ModelError, "intersect protected EPUB"):
+                self.execute(fixture, [protected])
+            self.assertEqual(artifact.read_bytes(), original)
+            self.assertFalse(stage_path.exists())
 
 
 if __name__ == "__main__":
