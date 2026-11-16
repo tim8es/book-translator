@@ -78,8 +78,6 @@ def new_repetitions(before: str, candidate: str) -> list[dict]:
             "previous": prior,
             "candidate": count,
             "adjacent": adjacent,
-            "fingerprint": hashlib.sha256(
-                " ".join(phrase).encode("utf-8")).hexdigest(),
         })
         if len(result) >= 8:
             break
