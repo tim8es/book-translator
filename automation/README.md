@@ -49,6 +49,45 @@ compatibility entrypoint keeps existing job commands and test imports valid.
 Do not use mutable `main` for execution. Upgrade the runtime only by
 changing the reviewed private lock and validating private integration tests.
 
+## Correction quality gates
+
+The shared Auto runtime always rejects newly introduced repeated phrases and
+revalidates staged patch bytes before canonical acceptance. Rejections persist
+only the finding identity, reason code and patch SHA-256, not book excerpts.
+The correction triage is **advisory**: its `required` and `adjudicate` labels
+never waive a pinned review finding or permit a chapter PASS.
+
+An additional independent, source-grounded **candidate veto** can be tested
+on a controlled private integration environment:
+
+```sh
+BOOK_TRANSLATOR_SEMANTIC_PREFLIGHT=on
+```
+
+Default: `off`. Only `on` and `off` are valid; other values fail closed.
+When enabled, the runtime reserves an additional `REVIEWER` model invocation
+before accepting each correction candidate (including partial safe batches).
+The reviewer receives bounded original/before/after passages for every
+source-bound finding and returns a strictly validated, per-finding decision.
+Any rejected patch invalidates the staged candidate and requires a new
+correction attempt. Missing/invalid evidence or model-call-budget exhaustion
+never authorizes writing a corrected chapter. This model decision is a
+**pre-acceptance filter only**; it is not an independent full chapter review,
+nor does it create ledger PASS evidence. The current translated artifact
+still requires a fresh canonical independent Reviewer PASS.
+
+The feature is intentionally opt-in: enabling it can consume an extra paid
+call per candidate and can reject otherwise acceptable edits. It must be
+validated on synthetic and permissioned private examples before changing
+the book-state repository's locked runtime. Do not silently turn it on for
+existing running books or update their pinned literary workflow revision.
+
+The runtime also records severity-weighted stagnation for consecutive,
+independently rejected, hash-bound chapter revisions and may defer the unit
+to operator attention. It never fabricates a PASS to escape a review loop.
+Review the operator-attention queue separately instead of increasing
+iteration limits without evidence of progress.
+
 There are two independent modes:
 
 - ChatOps uses the public Chat executor and its own pinned execution revision.
