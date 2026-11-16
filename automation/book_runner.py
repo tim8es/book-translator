@@ -2340,17 +2340,23 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
+    already_staged = {patch["finding_id"] for patch in stage["patches"]}
+    initially_pending = [
+        item for item in unresolved if item["id"] not in already_staged]
     try:
         adaptive = adaptive_budget.enabled()
         initial_budget = (adaptive_budget.plan(
-            unresolved,
+            initially_pending,
             rejected=status.get("correction_regression_rejections", []),
             unit_id=chapter["unit_id"], record_id=record["record_id"],
-            failures=status.get("failures", 0)) if adaptive else None)
+            failures=status.get("failures", 0))
+            if adaptive and initially_pending else None)
     except ValueError as exc:
         raise JobError("invalid adaptive correction budget configuration") from exc
-    calls_this_checkpoint = (initial_budget["max_calls_per_checkpoint"] if adaptive
-                             else CORRECTION_BATCH_CALLS_PER_CHECKPOINT)
+    calls_this_checkpoint = (initial_budget["max_calls_per_checkpoint"]
+                             if initial_budget is not None
+                             else (0 if not initially_pending else
+                                   CORRECTION_BATCH_CALLS_PER_CHECKPOINT))
     for _ in range(calls_this_checkpoint):
         completed = {patch["finding_id"] for patch in stage["patches"]}
         pending = [finding for finding in unresolved if finding["id"] not in completed]
