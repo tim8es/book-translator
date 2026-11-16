@@ -133,6 +133,37 @@ class ReviewRoutingTests(unittest.TestCase):
         self.assertIsNone(runner.reviewer_model_output_code(
             TransientModelError("provider transport", code="transport")))
 
+    def test_protocol_error_is_diagnosed_without_accepting_a_review(self):
+        # This is a failed independent review, not a failed translation.
+        self.status["role_protocol_failures"] = {}
+        evidence_error = ModelError(
+            "reviewer evidence is invalid: findings[3].translation_anchor: "
+            "quoted passage occurrence 0 is absent from the current artifact"
+        )
+        with patch.object(runner, "ROOT", self.root), \
+             patch.object(runner, "chapter_data",
+                          return_value=({}, {"records": []}, [self.chapter])), \
+             patch.object(runner, "preliminary_context",
+                          return_value=("pinned system", "prompt", self.source)), \
+             patch.object(runner, "role_contracts",
+                          return_value=("pinned reviewer", ["AGENTS.md"])), \
+             patch.object(runner, "complete_for_job", side_effect=evidence_error), \
+             patch.object(runner, "checkpoint"), \
+             patch.object(runner, "cli") as cli:
+            runner.process_claim("c" * 32, "test-book", self.status, self.root)
+        self.assertEqual(self.status["last_error_code"], "review_evidence_invalid")
+        self.assertEqual(self.status["last_review_failure"]["kind"], "anchor_absent")
+        self.assertEqual(self.status["last_review_failure"]["finding_index"], 3)
+        self.assertEqual(self.status["last_review_failure"]["field"], "translation_anchor")
+        self.assertEqual(self.status["review_failure_counts"],
+                         {"chapter-000001:anchor_absent": 1})
+        self.assertEqual(self.status["phase"], "model-retry")
+        self.assertEqual(self.status["failures"], 1)
+        self.assertIsNone(self.status["active"])
+        self.assertEqual(self.status["model_calls_started"], 1)
+        self.assertFalse(any(call.args[0] in {"review-record", "accept-review"}
+                             for call in cli.call_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()
