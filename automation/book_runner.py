@@ -32,6 +32,8 @@ from uuid import uuid4
 
 from omniroute import ModelError, TransientModelError, complete
 import review_chunks
+from review_diagnostics import (review_advisories, reviewer_failure_detail,
+                                should_chunk_review)
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
                               parse_correction_patches, parse_translation, PatchAnchorMismatch, role_contracts,
                               save_claim_bound_decisions, updated_glossary, model_glossary_context,
@@ -3193,7 +3195,11 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
             "Return [] only when no stable lexical decision is supported. " 
             "style_guide contains source-grounded entries with exactly source_pattern, "
             "translation_approach, evidence; [] is valid. Keep stable ids unique, report every unresolved "
-            "issue, and never invent findings."
+            "issue, and never invent findings. "
+            "When a recurring name has multiple inconsistent spellings, "
+            "inspect all its occurrences in this unit; report each distinct "
+            "source-grounded discrepancy with its own precise current anchors, "
+            "rather than repeatedly reporting only the first occurrence."
         )
     else:
         if structural_segments is not None:
@@ -3237,6 +3243,14 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                  "order and do not omit a link. The adapter restores the original link destinations "
                  "after translation, so keep every ZXBTLINK boundary token exactly in place. "
                  "Translate visible link labels only when the pinned role contract permits it.")
+    if role == "reviewer":
+        advisories = review_advisories(source, translation_raw, glossary)
+        if advisories["warnings"]:
+            user += ("\nDETERMINISTIC PRE-REVIEW ADVISORIES (not findings, not PASS evidence):\n"
+                     + json.dumps(advisories, ensure_ascii=False)
+                     + "\nCheck each candidate against the original and contextual "
+                       "target-language morphology. Do not blindly change a "
+                       "translation or accept a warning as proof of an error.")
     if (role == "reviewer" and len(source) > MAX_CHAPTER_CHARS
             and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS):
         raise JobError("complete reviewer prompt exceeds safe budget; bounded review required")
@@ -3418,7 +3432,7 @@ def retry_reviewer_anchor_evidence(
         user +
         "\n\nREJECTED REVIEW — " + heading + " REPAIR (ONE ATTEMPT):\n"
         "Return ONLY a valid JSON object with exactly evidence_version, outcome, "
-        "checks, findings, style_guide. evidence_version must equal 2; "
+        "checks, findings, style_guide, glossary. evidence_version must equal 2; "
         "outcome must be PASS or CORRECTIONS_REQUIRED. Each finding must carry "
         "id, category, severity, detail, resolved, source_anchor, "
         "translation_anchor, resolves; checks must contain all five categories.\n"
@@ -3544,6 +3558,9 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "glossary is [] or source-grounded recurring names and terms "
         "with exactly original,translation,type,notes. Never invent names, "
         "resolve disputed spellings by guessing, or force literal inflection. "
+        "For a recurring terminology discrepancy, check all occurrences "
+        "in the assigned source CORE, with a separately anchored finding "
+        "for every distinct discrepancy; never canonize a disputed spelling. "
         "Never claim checks for passages you did not compare.")
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
@@ -3794,7 +3811,20 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                     + json.dumps({"finding_id": prior_mismatch["finding_id"]},
                                  ensure_ascii=False))
         review_context = "independent_session"
-        if (role == "reviewer" and len(source) <= MAX_DIRECT_REVIEW_CHARS
+        chunked_review = False
+        if role == "reviewer":
+            candidate_target = (ROOT / "books" / slug / chapter["translation_path"]).read_text("utf-8")
+            protocol_failures = status.get("role_protocol_failures", {})
+            if not isinstance(protocol_failures, dict):
+                raise JobError("invalid reviewer protocol counter state")
+            scoped_count = protocol_failures.get(unit_id + ":reviewer", 0)
+            if type(scoped_count) is not int or scoped_count < 0:
+                raise JobError("invalid reviewer protocol counter")
+            chunked_review = (status.get("review_chunk_fallback_unit") == unit_id
+                              or (len(source) <= MAX_DIRECT_REVIEW_CHARS
+                                  and should_chunk_review(source, candidate_target, scoped_count)))
+        if (role == "reviewer" and not chunked_review
+                and len(source) <= MAX_DIRECT_REVIEW_CHARS
                 and previous_quality.get("evidence_version") == 2 and not force_full_review):
             current_translation = (ROOT / "books" / slug / chapter["translation_path"]
                                    ).read_bytes().decode("utf-8")
@@ -3834,7 +3864,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 return
             translated, proposed_glossary, proposed_style = batched
             prompt_context = status["prompt_context"]
-        elif role == "reviewer" and len(source) > MAX_DIRECT_REVIEW_CHARS:
+        elif role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS or chunked_review):
+            if chunked_review and len(source) <= MAX_DIRECT_REVIEW_CHARS:
+                status["review_chunk_fallback_unit"] = unit_id
             reviewed = process_review_chunks(
                 job_id, slug, status, engine, chapter, previous_record, owned)
             if reviewed is None:
@@ -3973,6 +4005,16 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             recoverable_code = translator_model_output_code(exc, structural_helper)
         if role == "reviewer" and isinstance(exc, ModelError):
             recoverable_code = reviewer_model_output_code(exc)
+            if recoverable_code:
+                detail = reviewer_failure_detail(exc)
+                status["last_review_failure"] = {
+                    "unit_id": unit_id, "at": clock(),
+                    "model_call": status.get("model_calls_started"), **detail}
+                key = unit_id + ":" + detail["kind"]
+                counts = status.setdefault("review_failure_counts", {})
+                if not isinstance(counts, dict) or type(counts.get(key, 0)) is not int:
+                    raise JobError("invalid review failure diagnostics")
+                counts[key] = counts.get(key, 0) + 1
         if recoverable_code:
             counters = status.setdefault("unit_protocol_failures", {})
             counters[unit_id] = counters.get(unit_id, 0) + 1
@@ -4087,9 +4129,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if status.get("_memory_only_change"):
                 status["memory_recheck_unit"] = unit_id
         status.pop("_memory_only_change", None)
-    if role == "reviewer" and len(source) > MAX_DIRECT_REVIEW_CHARS:
+    if role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS
+                              or status.get("review_chunk_fallback_unit") == unit_id):
         review_chunk_stage_path(slug, unit_id).unlink(missing_ok=True)
         status.pop("review_chunk_progress", None)
+        status.pop("review_chunk_fallback_unit", None)
     cli("release", slug, str(chapter["number"]), "--session-id", active["session_id"])
     status["active"] = None
     # A valid persisted literary result is a fresh checkpoint for this role.
