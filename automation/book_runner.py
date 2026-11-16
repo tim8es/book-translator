@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import math
 import os
 import re
 import shutil
@@ -60,6 +61,7 @@ MAX_FAILURES = 3
 # Durable scheduled recovery: no immediate dispatch loop after provider outage.
 MAX_BACKOFF_SECONDS = 3600
 MIN_BACKOFF_SECONDS = 60
+MAX_PROVIDER_RETRY_ATTEMPTS = 6
 FALLBACK_AFTER_TRANSIENTS = 2
 # Bounded model calls per checkpoint keep a book from flooding Actions.
 CORRECTION_BATCH_SIZE = 3
@@ -174,8 +176,15 @@ def schedule_provider_retry(status: dict, chapter: dict, role: str,
             and previous["unit_id"] == chapter["unit_id"]
             and previous["role"] == role)
     attempts = (previous["attempts"] if same else 0) + 1
-    if attempts > 1000:
-        raise JobError("provider retry attempt counter overflow")
+    if attempts > MAX_PROVIDER_RETRY_ATTEMPTS:
+        # A persistently failing provider must not consume a book's budget
+        # indefinitely. Fail closed, without promoting a translation/review.
+        status.pop("provider_retry", None)
+        status.update({"state": "blocked", "phase": "provider-retry-exhausted",
+                       "last_error": str(failure)[:350],
+                       "last_error_code": failure.code,
+                       "blocked_unit_id": chapter["unit_id"]})
+        return
     # Honour a provider-supplied numeric Retry-After, capped to one hour.
     delay = min(MAX_BACKOFF_SECONDS, max(
         MIN_BACKOFF_SECONDS, 60 * (2 ** min(attempts - 1, 6)),
@@ -1082,6 +1091,9 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                     and not recoverable_structural_span_blocked(state)
                     and not recoverable_protected_correction_blocked(state)):
                 continue
+            if state and safe_book_slug(state.get("book_slug")) and auto_mode(state["book_slug"]) != "auto":
+                # A delayed Auto event cannot cross an operator hand-off to ChatOps.
+                continue
             if state and state.get("state") == "running" and not provider_retry_due(state):
                 continue
             if state and state.get("state") == "paused" and auto_mode(state["book_slug"]) != "auto":
@@ -1097,6 +1109,46 @@ def ready_jobs(limit: int = 6) -> list[dict]:
     # to lexically earlier job IDs. Each checkpoint refreshes updated_at.
     candidates.sort(key=lambda item: (item[0], item[1]))
     return [item for _, _, item in candidates[:limit]]
+
+
+def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
+    """Read-only, generation-bound signal for a deferred workflow_dispatch.
+
+    Check both before and after waiting. A stale retry must never wake a
+    different review generation, a paused book, or ChatOps.
+    """
+    safe_id(job_id)
+    if not isinstance(expected_not_before, str):
+        raise JobError("provider retry signal requires a timestamp")
+    try:
+        deadline = datetime.fromisoformat(expected_not_before.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise JobError("invalid provider retry signal timestamp") from exc
+    if deadline.tzinfo is None:
+        raise JobError("provider retry signal must be timezone-aware")
+    stale = {"eligible": False, "wait_seconds": 0}
+    state = status_path(job_id)
+    if not state.exists():
+        return stale
+    status = read_json(state)
+    retry = status.get("provider_retry")
+    if (status.get("state") != "running"
+            or status.get("phase") != "provider-backoff"
+            or status.get("active") is not None
+            or not isinstance(retry, dict)
+            or retry.get("not_before") != expected_not_before):
+        return stale
+    provider_retry_due(status)  # validate the whole durable retry checkpoint
+    slug = status.get("book_slug")
+    if not safe_book_slug(slug):
+        raise JobError("provider retry signal has invalid book scope")
+    if auto_mode(slug) != "auto":
+        return stale
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+    if remaining > MAX_BACKOFF_SECONDS + 30:
+        raise JobError("provider retry deadline exceeds the bounded waiter")
+    return {"eligible": True,
+            "wait_seconds": max(0, math.ceil(remaining))}
 
 
 def select(explicit: str | None) -> str:
@@ -4386,7 +4438,13 @@ def publish_outputs(job_id: str, status: dict) -> None:
             print("continue_queue=true", file=stream)
         elif status["state"] == "running":
             if status.get("phase") == "provider-backoff":
-                # Scheduled scan will retry at/after the durable deadline.
+                # A dedicated, book-unlocked waiter will dispatch this exact
+                # retry generation at its deadline; cron remains fallback.
+                retry = status.get("provider_retry")
+                provider_retry_due(status)
+                if not isinstance(retry, dict):
+                    raise JobError("backoff phase is missing durable retry")
+                print("retry_at=" + retry["not_before"], file=stream)
                 print("continue_queue=true", file=stream)
             else:
                 print("continue=true", file=stream)
@@ -4402,11 +4460,22 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--select", action="store_true")
     parser.add_argument("--book-key", action="store_true")
+    parser.add_argument("--retry-status", action="store_true")
+    parser.add_argument("--retry-at")
     parser.add_argument("--list-ready-json", action="store_true")
     parser.add_argument("--job-id")
     parser.add_argument("--resume-blocked", action="store_true")
     parser.add_argument("--resume-interrupted", action="store_true")
     args = parser.parse_args()
+    if args.retry_status:
+        if (args.select or args.book_key or args.list_ready_json
+                or args.resume_blocked or args.resume_interrupted
+                or not args.retry_at):
+            parser.error("retry status requires only --job-id and --retry-at")
+        print(json.dumps(provider_retry_signal(safe_id(args.job_id), args.retry_at)))
+        return 0
+    if args.retry_at:
+        parser.error("--retry-at requires --retry-status")
     if args.list_ready_json:
         if args.select or args.book_key:
             parser.error("list-ready cannot be combined with select/book-key")
