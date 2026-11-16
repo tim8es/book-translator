@@ -3674,6 +3674,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     structural_plan = None
     structural_helper = None
     review_context = "independent_session"
+    reviewed_glossary: list[dict] = []
     # Fully validate the model response before changing canonical artifacts.
     # Model/format failures are safe to checkpoint as retries. CLI failures
     # after mutation remain fail-closed and must be examined separately.
@@ -3786,7 +3787,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 job_id, slug, status, engine, chapter, previous_record, owned)
             if reviewed is None:
                 return
-            outcome, report, reviewed_style = reviewed
+            outcome, report, reviewed_style, reviewed_glossary = reviewed
             prompt_context = status["prompt_context"]
         elif preserve_links:
             prompt_context["execution_mode"] = "deterministic_external_link_preservation"
@@ -3820,6 +3821,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         answer, review_context=review_context, source=source,
                         translation=translation_bytes, previous_record=previous_record,
                         claim=owned)
+                    reviewed_glossary = reviewer_glossary_proposals(answer)
                 except ModelError as exc:
                     # Provider/transport failures happen outside this parse/verify
                     # block and never trigger an extra paid call. Repair only a
@@ -3837,6 +3839,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         repaired, review_context=review_context, source=source,
                         translation=translation_bytes, previous_record=previous_record,
                         claim=owned)
+                    reviewed_glossary = reviewer_glossary_proposals(repaired)
             else:
                 translated, proposed_glossary, proposed_style = parse_translation(answer)
         if role != "reviewer":
@@ -3964,9 +3967,28 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         if status.get("force_full_review_unit") == unit_id:
             status.pop("force_full_review_unit", None)
         if outcome == "PASS":
+            book = ROOT / "books" / slug
+            accepted_text = (book / chapter["translation_path"]).read_text("utf-8")
+            source_text = (book / chapter["source_path"]).read_text("utf-8")
+            candidates = merge_unique_correction_decisions(
+                reviewed_glossary, paired_inline_name_glossary(source_text, accepted_text))
+            overflow = max(0, len(candidates) - 40)
+            candidates, ungrounded = filter_ungrounded_glossary_proposals(
+                candidates[:40], source_text, accepted_text)
+            candidates, conflicts = filter_conflicting_glossary_proposals(book, candidates)
             cli("accept-review", slug, str(chapter["number"]))
+            saved_glossary = save_claim_bound_decisions(
+                book, unit_id, active["session_id"], "glossary", candidates)
+            status["memory_glossary_saved"] = (
+                status.get("memory_glossary_saved", 0) + saved_glossary)
+            status["glossary_evidence_rejected"] = (
+                status.get("glossary_evidence_rejected", 0) + ungrounded)
+            status["glossary_conflicts_rejected"] = (
+                status.get("glossary_conflicts_rejected", 0) + conflicts)
+            status["glossary_proposals_deferred"] = (
+                status.get("glossary_proposals_deferred", 0) + overflow)
             saved = save_claim_bound_decisions(
-                ROOT / "books" / slug, unit_id, active["session_id"],
+                book, unit_id, active["session_id"],
                 "style_guide", reviewed_style)
             status["memory_style_saved"] = status.get("memory_style_saved", 0) + saved
             status["pending_style"] = []
