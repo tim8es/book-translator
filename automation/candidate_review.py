@@ -124,8 +124,10 @@ def parse_verdict(response: str, expected_ids: list[str]) -> list[str]:
         decoded = json.loads(response)
     except (TypeError, ValueError) as exc:
         raise CandidateReviewError("candidate preflight response is not JSON") from exc
-    if not isinstance(decoded, dict) or set(decoded) != {
-            "schema_version", "checks", "decisions"} or decoded["schema_version"] != 1:
+    if (not isinstance(decoded, dict) or set(decoded) != {
+            "schema_version", "checks", "decisions"}
+            or type(decoded["schema_version"]) is not int
+            or decoded["schema_version"] != 1):
         raise CandidateReviewError("candidate preflight schema mismatch")
     checks = decoded["checks"]
     if not isinstance(checks, dict) or set(checks) != set(CHECKS) or any(
@@ -144,6 +146,7 @@ def parse_verdict(response: str, expected_ids: list[str]) -> list[str]:
         fid, verdict, risk = (
             decision["finding_id"], decision["verdict"], decision["risk"])
         if (not isinstance(fid, str) or fid in found or fid not in expected_ids
+                or not isinstance(verdict, str) or not isinstance(risk, str)
                 or verdict not in {"approve", "reject"} or risk not in RISKS
                 or (verdict == "approve") != (risk == "none")):
             raise CandidateReviewError("candidate preflight invalid decision")
