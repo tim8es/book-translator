@@ -21,7 +21,7 @@ from pathlib import Path
 
 HEX32 = re.compile(r"^[0-9a-f]{32}$")
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
-SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,99}$")
+SLUG = re.compile(r"[^\W_][\w-]{0,99}\Z")
 SESSION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 OPERATIONS = {"claim", "renew-claim", "release", "accept-translation",
               "review-record", "accept-review", "cleanup-claims",
