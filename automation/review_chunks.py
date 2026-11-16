@@ -1,0 +1,237 @@
+"""Source/translation-bound resumable review partitioning for oversized units.
+
+Pure, deterministic public-runtime helper; canonical reviewer evidence and its
+acceptance remain owned by the pinned literary workflow. Source is never edited.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+
+SCHEMA_VERSION = 1
+HELPER_REVISION = "review-chunks-v1"
+TARGET_CHARS = 12_000
+OVERLAP_CHARS = 1_800
+MAX_CHUNKS = 64
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cuts(text: str, count: int) -> list[int]:
+    """Find strictly increasing paragraph-aligned boundaries."""
+    candidates = [m.end() for m in re.finditer(r"\n[ \t]*\n", text)]
+    if len(candidates) < count - 1:
+        raise ValueError("too few paragraph boundaries for bounded review")
+    result = [0]
+    for part in range(1, count):
+        target = len(text) * part / count
+        remaining = count - part
+        available = [pos for pos in candidates
+                     if pos > result[-1] + 500
+                     and len(text) - pos >= 500 * remaining
+                     and sum(1 for candidate in candidates if candidate > pos) >= remaining - 1]
+        if not available:
+            raise ValueError("cannot safely partition reviewer paragraphs")
+        result.append(min(available, key=lambda pos: abs(pos - target)))
+    result.append(len(text))
+    if any(right <= left for left, right in zip(result, result[1:])):
+        raise ValueError("review partitions do not advance")
+    return result
+
+
+def _window(text: str, start: int, end: int) -> list[int]:
+    """Expand to nearby full paragraphs, never cutting inside a paragraph."""
+    left = max(0, start - OVERLAP_CHARS)
+    right = min(len(text), end + OVERLAP_CHARS)
+    if left > 0:
+        found = text.rfind("\n\n", 0, left)
+        left = found + 2 if found >= 0 else 0
+    if right < len(text):
+        found = text.find("\n\n", right)
+        right = found + 2 if found >= 0 else len(text)
+    return [left, right]
+
+
+def plan(source: str, translation: str) -> dict:
+    if not source.strip() or not translation.strip():
+        raise ValueError("review requires both complete source and translation")
+    count = max(2, math.ceil(max(len(source), len(translation)) / TARGET_CHARS))
+    if count > MAX_CHUNKS:
+        raise ValueError("source exceeds bounded review capacity")
+    sb = _cuts(source, count)
+    tb = _cuts(translation, count)
+    chunks = []
+    for i in range(count):
+        sc, tc = [sb[i], sb[i + 1]], [tb[i], tb[i + 1]]
+        sw, tw = _window(source, *sc), _window(translation, *tc)
+        if (sw[0] > sc[0] or sw[1] < sc[1]
+                or tw[0] > tc[0] or tw[1] < tc[1]
+                or sw[1] - sw[0] + tw[1] - tw[0] > 42_000):
+            raise ValueError("review chunk cannot fit the safe context budget")
+        chunks.append({"id": "chunk-%03d" % (i + 1), "source_core": sc,
+                       "translation_core": tc, "source_window": sw,
+                       "translation_window": tw})
+    result = {"schema_version": SCHEMA_VERSION, "helper_revision": HELPER_REVISION,
+              "source_sha256": sha(source), "translation_sha256": sha(translation),
+              "chunks": chunks}
+    validate_plan(result, source, translation)
+    return result
+
+
+def validate_plan(value: dict, source: str, translation: str) -> None:
+    if (not isinstance(value, dict) or set(value) != {
+            "schema_version", "helper_revision", "source_sha256",
+            "translation_sha256", "chunks"}
+            or value["schema_version"] != SCHEMA_VERSION
+            or value["helper_revision"] != HELPER_REVISION
+            or value["source_sha256"] != sha(source)
+            or value["translation_sha256"] != sha(translation)
+            or not isinstance(value["chunks"], list)
+            or not 2 <= len(value["chunks"]) <= MAX_CHUNKS):
+        raise ValueError("review plan is missing or stale")
+    for kind, text in (("source", source), ("translation", translation)):
+        offset = 0
+        for i, item in enumerate(value["chunks"]):
+            if not isinstance(item, dict) or set(item) != {
+                    "id", "source_core", "translation_core",
+                    "source_window", "translation_window"}:
+                raise ValueError("invalid review chunk")
+            if item["id"] != "chunk-%03d" % (i + 1):
+                raise ValueError("out-of-order review chunk")
+            core, window = item[kind + "_core"], item[kind + "_window"]
+            if (not isinstance(core, list) or not isinstance(window, list)
+                    or len(core) != 2 or len(window) != 2
+                    or any(type(v) is not int for v in core + window)
+                    or core[0] != offset or not offset < core[1] <= len(text)
+                    or not 0 <= window[0] <= core[0]
+                    or not core[1] <= window[1] <= len(text)):
+                raise ValueError("review chunks do not cover the complete artifact")
+            offset = core[1]
+        if offset != len(text):
+            raise ValueError("review final chunk leaves unreviewed text")
+    # Persisted plans must be deterministic, not user/model supplied.
+    for kind, text in (("source", source), ("translation", translation)):
+        cuts = _cuts(text, len(value["chunks"]))
+        for i, item in enumerate(value["chunks"]):
+            if (item[kind + "_core"] != [cuts[i], cuts[i + 1]]
+                    or item[kind + "_window"] != _window(text, cuts[i], cuts[i + 1])):
+                raise ValueError("review partition was modified")
+
+
+def validate_stage(stage: dict, plan_value: dict, unit_id: str, revision: str) -> None:
+    if (not isinstance(stage, dict)
+            or set(stage) != {"schema_version", "plan", "unit_id", "workflow_revision", "completed"}
+            or stage["schema_version"] != SCHEMA_VERSION
+            or stage["plan"] != plan_value or stage["unit_id"] != unit_id
+            or stage["workflow_revision"] != revision
+            or not isinstance(stage["completed"], dict)):
+        raise ValueError("review checkpoint is stale or malformed")
+    ids = {part["id"] for part in plan_value["chunks"]}
+    if any(key not in ids or not isinstance(value, dict)
+           or set(value) != {"outcome", "report", "style"}
+           for key, value in stage["completed"].items()):
+        raise ValueError("review checkpoint has unexpected evidence")
+
+
+def new_stage(plan_value: dict, unit_id: str, revision: str) -> dict:
+    return {"schema_version": SCHEMA_VERSION, "plan": plan_value,
+            "unit_id": unit_id, "workflow_revision": revision, "completed": {}}
+
+
+def find_previous_for_chunk(previous: dict | None, chunk: dict, source: str) -> list[dict]:
+    if not previous:
+        return []
+    report = previous.get("quality_report", {})
+    if not isinstance(report, dict) or report.get("evidence_version") != 2:
+        return []
+    result = []
+    for item in report["findings"]:
+        if item["resolved"]:
+            continue
+        anchor = item["source_anchor"]
+        quote = anchor["quote"]
+        if source.count(quote) != 1:
+            raise ValueError("previous review source quote is not unique")
+        offset = source.find(quote)
+        if chunk["source_core"][0] <= offset < chunk["source_core"][1]:
+            result.append({
+                "id": item["id"], "category": item["category"],
+                "severity": item["severity"], "detail": item["detail"],
+                "source_anchor": anchor,
+                "previous_translation_anchor": item["translation_anchor"],
+                "previous_record_id": previous["record_id"],
+            })
+    return result
+
+
+def validate_chunk_report(chunk: dict, report: dict, source: str,
+                          translation: str) -> None:
+    if (not isinstance(report, dict) or report.get("evidence_version") != 2
+            or report.get("checks") != dict.fromkeys(
+                ("coverage", "meaning", "terminology", "style", "structure"), True)
+            or not isinstance(report.get("findings"), list)):
+        raise ValueError("chunk lacks complete reviewer checks")
+    for item in report["findings"]:
+        src = item["source_anchor"]
+        spos = source.find(src["quote"])
+        if (spos < chunk["source_core"][0]
+                or spos >= chunk["source_core"][1]
+                or source.count(src["quote"]) != 1):
+            raise ValueError("review finding not anchored to the assigned source core")
+        tgt = item["translation_anchor"]
+        if tgt is not None:
+            tpos = translation.find(tgt["quote"])
+            if (tpos < chunk["translation_window"][0]
+                    or tpos >= chunk["translation_window"][1]
+                    or translation.count(tgt["quote"]) != 1):
+                raise ValueError("review finding not anchored to the corresponding translation")
+        if item["id"].startswith("chunk-"):
+            raise ValueError("review chunk IDs must be local and unprefixed")
+
+
+def combine(stage: dict) -> dict:
+    """Return raw JSON schema for one canonical, still-unaccepted review."""
+    chunks = stage["plan"]["chunks"]
+    if set(stage["completed"]) != {p["id"] for p in chunks}:
+        raise ValueError("full reviewer coverage has not been established")
+    all_findings, all_style = [], []
+    seen_prior = set()
+    for part in chunks:
+        stored = stage["completed"][part["id"]]
+        if stored["outcome"] not in {"PASS", "CORRECTIONS_REQUIRED"}:
+            raise ValueError("invalid completed review outcome")
+        report = stored["report"]
+        if report.get("checks") != dict.fromkeys(
+                ("coverage", "meaning", "terminology", "style", "structure"), True):
+            raise ValueError("review checks missing from chunk")
+        if stored["outcome"] == "PASS" and any(
+                not x["resolved"] for x in report["findings"]):
+            raise ValueError("chunk claims PASS despite unresolved findings")
+        for finding in report["findings"]:
+            item = dict(finding)
+            item["id"] = part["id"] + "-" + item["id"]
+            resolves = item.get("resolves")
+            if resolves is not None:
+                key = (resolves["record_id"], resolves["finding_id"])
+                if key in seen_prior:
+                    raise ValueError("prior finding was reviewed more than once")
+                seen_prior.add(key)
+            all_findings.append(item)
+        for item in stored["style"]:
+            if item not in all_style:
+                all_style.append(item)
+    if len(all_findings) > 100:
+        raise ValueError("aggregated review exceeds canonical findings limit")
+    unresolved = any(not f["resolved"] for f in all_findings)
+    outcome = ("CORRECTIONS_REQUIRED" if unresolved else "PASS")
+    if any(stage["completed"][part["id"]]["outcome"] == "CORRECTIONS_REQUIRED"
+           for part in chunks) and not unresolved:
+        raise ValueError("chunk requests corrections without unresolved evidence")
+    return {"evidence_version": 2, "outcome": outcome,
+            "checks": dict.fromkeys(
+                ("coverage", "meaning", "terminology", "style", "structure"), True),
+            "findings": all_findings, "style_guide": all_style}
