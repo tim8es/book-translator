@@ -233,7 +233,7 @@ class IncrementalReviewEvidenceTests(unittest.TestCase):
                                    "checks": combined["checks"],
                                    "findings": combined["findings"]},
             }
-            path = runner.review_chunk_stage_path("synthetic", self.unit)
+            path = book / ".workflow/auto-review-chunks/chapter-000001.json"
             status = {"workflow_revision": self.revision}
             with patch.object(runner, "ROOT", root), \
                  patch.object(runner, "chapter_data",
