@@ -115,6 +115,12 @@ class AutomatedBookTests(unittest.TestCase):
                 worker.store_json(control, {"schema_version": 1, "mode": "auto",
                     "updated_at": "2026-11-10T10:02:00+00:00"})
                 self.assertFalse(worker.auto_resume_requested(status))
+                status["active"] = {"role": "reviewer", "chapter": 2,
+                                    "unit_id": "chapter-000002", "session_id": "review-session"}
+                self.assertTrue(worker.auto_resume_requested(status))
+                worker.store_json(control, {"schema_version": 1, "mode": "auto",
+                    "updated_at": "2026-11-10T09:59:00+00:00"})
+                self.assertFalse(worker.auto_resume_requested(status))
 
     def test_auto_pause_and_resume_do_not_change_literary_workflow(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -854,6 +860,11 @@ class AutomatedBookTests(unittest.TestCase):
                 "state": "blocked", "phase": "operator-intervention-required",
                 "active": {"role": "corrector", "chapter": 6, "session_id": "session-1"},
                 "model_calls_started": 26, "failures": 1,
+                "updated_at": "2026-11-10T10:00:00+00:00",
+            })
+            worker.store_json(book / ".workflow" / "auto-control.json", {
+                "schema_version": 1, "mode": "auto",
+                "updated_at": "2026-11-10T10:01:00+00:00",
             })
             engine = root / "engine"
             engine.mkdir()
@@ -865,10 +876,15 @@ class AutomatedBookTests(unittest.TestCase):
                  patch.object(worker, "checkpoint"), \
                  patch.object(worker, "process_claim") as process:
                 status = worker.run(job, resume_interrupted=True)
+                implicitly_resumed = worker.run(job)
+            self.assertEqual(implicitly_resumed["state"], "running")
+            self.assertEqual(implicitly_resumed["recoveries"][-1]["action"],
+                             "resume-interrupted-claim")
             self.assertEqual(status["state"], "running")
             self.assertEqual(status["model_calls_started"], 26)
             self.assertEqual(status["active"]["session_id"], "session-1")
-            process.assert_called_once_with(job, "stable-title", status, engine)
+            self.assertEqual(process.call_count, 2)
+            process.assert_any_call(job, "stable-title", status, engine)
 
     def test_conflicting_glossary_proposal_is_rejected_without_changing_canonical_glossary(self):
         with tempfile.TemporaryDirectory() as folder:
