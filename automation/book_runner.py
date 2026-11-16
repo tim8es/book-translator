@@ -4104,6 +4104,68 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     return (*checked, reviewer_glossary_proposals(combined_json))
 
 
+
+def archive_incremental_reviewer_stage(slug: str, chapter: dict,
+                                       status: dict, report: dict) -> bool:
+    """Keep an exact completed rejected review solely for future clean reuse.
+
+    A recorded, current canonical reviewer record must independently match the
+    complete staged report and source/translation bytes. Missing or mismatched
+    ledger evidence causes ordinary stage cleanup, never a synthetic PASS.
+    """
+    path = review_chunk_stage_path(slug, chapter["unit_id"])
+    if not path.is_file():
+        return False
+    stage = read_json(path)
+    if not isinstance(stage, dict) or stage.get("schema_version") != 2:
+        return False
+    try:
+        incremental_review.validate_shape(
+            stage, chapter["unit_id"], status["workflow_revision"])
+        book = ROOT / "books" / slug
+        source = (book / chapter["source_path"]).read_text("utf-8")
+        target = (book / chapter["translation_path"]).read_text("utf-8")
+        review_chunks.validate_plan(stage["plan"], source, target)
+        if len(stage["completed"]) != len(stage["plan"]["chunks"]):
+            return False
+        for part in stage["plan"]["chunks"]:
+            if stage["windows"][part["id"]] != incremental_review.window_hashes(
+                    part, source, target):
+                return False
+        combined = review_chunks.combine(stage)
+        _, ledger, latest_chapters = chapter_data(slug)
+        current = next((item for item in latest_chapters
+                        if item["unit_id"] == chapter["unit_id"]), None)
+        recent = latest_record(ledger, current) if current else None
+        if (not isinstance(recent, dict) or not recent.get("record_id")
+                or recent.get("outcome") != "CORRECTIONS_REQUIRED"
+                or recent.get("source_sha256") != stage["plan"]["source_sha256"]
+                or recent.get("translation_sha256") != stage["plan"]["translation_sha256"]
+                or combined["outcome"] != recent["outcome"]
+                or combined["checks"] != recent.get("quality_report", {}).get("checks")
+                or combined["findings"] != recent.get("quality_report", {}).get("findings")
+                or combined["checks"] != report.get("checks")
+                or combined["findings"] != report.get("findings")):
+            return False
+        stage["accepted_review_record_id"] = recent["record_id"]
+        incremental_review.validate_shape(
+            stage, chapter["unit_id"], status["workflow_revision"])
+        store_json(path, stage)
+        status["review_incremental_archive"] = {
+            "unit_id": chapter["unit_id"],
+            "review_record_id": recent["record_id"],
+            "translation_sha256": stage["plan"]["translation_sha256"],
+            "clean_chunks": sum(
+                part["outcome"] == "PASS" and not part["report"]["findings"]
+                for part in stage["completed"].values()),
+        }
+        return True
+    except (ValueError, KeyError, TypeError, OSError):
+        # The optimized archive is optional. Do not compromise a canonical
+        # rejected review that has already been recorded successfully.
+        return False
+
+
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     active = status["active"]
     _, _, chapters = chapter_data(slug)
@@ -4520,7 +4582,13 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         status.pop("_memory_only_change", None)
     if role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS
                               or status.get("review_chunk_fallback_unit") == unit_id):
-        review_chunk_stage_path(slug, unit_id).unlink(missing_ok=True)
+        # An archived v2 stage is not acceptance evidence; only clean,
+        # content-identical windows may be reused after the next correction.
+        archived = (outcome == "CORRECTIONS_REQUIRED"
+                    and archive_incremental_reviewer_stage(
+                        slug, chapter, status, report))
+        if not archived:
+            review_chunk_stage_path(slug, unit_id).unlink(missing_ok=True)
         status.pop("review_chunk_progress", None)
         status.pop("review_chunk_fallback_unit", None)
     cli("release", slug, str(chapter["number"]), "--session-id", active["session_id"])
