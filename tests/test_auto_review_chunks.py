@@ -4,6 +4,7 @@ Contains no book source, provider network calls, or irreversible Git writes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -257,6 +258,82 @@ class ReviewChunkWorkerTests(unittest.TestCase):
         self.assertEqual(len(self.status["review_chunk_invalidations"]), 1)
         self.assertEqual((self.book / self.chapter["source_path"]).read_text("utf-8"),
                          self.source)
+
+    def test_exhausted_chunk_reviewer_with_stale_full_report_is_safely_deferred(self):
+        # Reproduces a book with three accepted chunk checks out of seven,
+        # while the only complete rejected report binds an older translation.
+        plan = chunks.plan(self.source, self.target)
+        self.assertGreaterEqual(len(plan["chunks"]), 4)
+        stage = chunks.new_stage(plan, self.chapter["unit_id"],
+                                 self.status["workflow_revision"])
+        stage["completed"] = {item["id"]: {
+            "outcome": "PASS", "report": {"findings": []}, "style": []}
+            for item in plan["chunks"][:3]}
+        path = runner.review_chunk_stage_path(self.slug, self.chapter["unit_id"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(stage), encoding="utf-8")
+        self.status["review_chunk_progress"] = {
+            "unit_id": self.chapter["unit_id"], "completed": 3,
+            "total": len(plan["chunks"])}
+        self.status["review_chunk_fallback_unit"] = self.chapter["unit_id"]
+        self.status["failures"] = runner.MAX_FAILURES - 1
+        self.status["model_calls_started"] = 77
+        self.status["correction_rounds"] = {self.chapter["unit_id"]: 3}
+        source_sha = hashlib.sha256(self.source.encode("utf-8")).hexdigest()
+        target_sha = hashlib.sha256(self.target.encode("utf-8")).hexdigest()
+        self.chapter["translation_acceptance"] = {
+            "source_sha256": source_sha, "translation_sha256": target_sha}
+        old_review = {
+            "record_id": "a" * 32, "sequence": 4,
+            "unit_id": self.chapter["unit_id"],
+            "outcome": "CORRECTIONS_REQUIRED",
+            "source_sha256": source_sha, "translation_sha256": "0" * 64,
+            "quality_report": {"evidence_version": 2, "findings": []}}
+        claim_path = (self.book / ".workflow" / "claims" /
+                      (self.chapter["unit_id"] + ".json"))
+        claim_path.parent.mkdir(parents=True, exist_ok=True)
+        claim_path.write_text(json.dumps({
+            "role": "reviewer", "unit_id": self.chapter["unit_id"],
+            "session_id": self.status["active"]["session_id"]}), "utf-8")
+        pinned = self.root / "pinned" / "scripts"
+        (pinned / "workflow").mkdir(parents=True)
+        (pinned / "workflow" / "attention.py").touch()
+        snapshot = path.read_bytes()
+        with patch.object(runner, "chapter_data", return_value=(
+                {}, {"records": [old_review]}, [self.chapter])), \
+             patch.object(runner, "preliminary_context", return_value=(
+                 "pinned system", "review prompt", self.source)), \
+             patch.object(runner, "process_review_chunks",
+                          side_effect=ModelError(
+                              "reviewer evidence is invalid: synthetic")), \
+             patch.object(runner, "reviewer_model_output_code",
+                          return_value="review_evidence_invalid"), \
+             patch.object(runner, "reviewer_failure_detail",
+                          return_value={"kind": "review_evidence_invalid"}), \
+             patch.object(runner, "pinned_scripts_dir", return_value=pinned), \
+             patch.object(runner, "defer_protocol_failed_unit") as wrong_route, \
+             patch.object(runner, "cli") as cli:
+            runner.process_claim("f" * 32, self.slug,
+                                 self.status, self.root)
+        wrong_route.assert_not_called()
+        cli.assert_called_once_with(
+            "release", self.slug, "2",
+            "--session-id", "auto-test-reviewer")
+        self.assertEqual(self.status["state"], "blocked")
+        self.assertEqual(self.status["phase"],
+                         "review-deferred-requires-operator")
+        self.assertEqual(self.status["last_error_code"],
+                         "review_evidence_invalid")
+        self.assertIsNone(self.status["active"])
+        self.assertEqual(self.status["model_calls_started"], 77)
+        self.assertEqual(self.status["review_chunk_progress"]["completed"], 3)
+        self.assertEqual(path.read_bytes(), snapshot)
+        self.assertEqual(self.status["deferred_review_units"],
+                         [self.chapter["unit_id"]])
+        self.assertEqual(
+            self.status["model_review_deferral_audit"][-1]["route"],
+            "hash-bound-adapter")
+        self.assertNotIn("PASS", repr(self.status))
 
     def test_invalid_model_output_cannot_stage_false_review(self):
         with patch.object(runner, "complete_for_job", return_value='{"outcome":"PASS"}'):
