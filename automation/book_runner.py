@@ -33,6 +33,7 @@ from uuid import uuid4
 from omniroute import ModelError, TransientModelError, complete
 import review_chunks
 import correction_regression
+import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
@@ -2705,6 +2706,41 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
             or correction_progressed(ledger, chapter))
 
 
+def defer_stalled_review(slug: str, status: dict, ledger: dict,
+                         chapter: dict) -> bool:
+    """Escalate repeated rejected reviews instead of paying for another loop.
+
+    A stall is *not* a verdict on literary quality. Current source/translation
+    hashes and the exact latest rejected review remain authoritative.
+    """
+    unit_id = chapter["unit_id"]
+    # Operator-authorized additional rounds remain an explicit override.
+    if (operator_unit_limit(status, "review", unit_id, MAX_ACCEPTED_REVIEWS_PER_UNIT)
+            > MAX_ACCEPTED_REVIEWS_PER_UNIT
+            or operator_unit_limit(status, "correction", unit_id, MAX_CORRECTIONS)
+            > MAX_CORRECTIONS):
+        return False
+    report = review_convergence.stalled_rejected_reviews(ledger, chapter)
+    if report is None:
+        return False
+    # The actual current ledger, not remembered failure counters, is used.
+    record = latest_record(ledger, chapter)
+    if not record or record.get("record_id") != report["review_record_ids"][-1]:
+        return False
+    if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
+        cli("defer-review", slug, str(chapter["number"]),
+            "--reason", "operator-attention")
+    else:
+        defer_review_unit(status, unit_id)
+    history = status.setdefault("review_stagnation_audit", [])
+    if not isinstance(history, list):
+        raise JobError("invalid review stagnation audit")
+    history.append({"unit_id": unit_id, "at": clock(), **report})
+    status["review_stagnation_audit"] = history[-64:]
+    status["last_review_stagnation"] = {"unit_id": unit_id, **report}
+    return True
+
+
 def approved_unit_ids(slug: str, chapters: list) -> set[str]:
     if not re.fullmatch(r"[\w-]{1,120}", slug):
         raise JobError("invalid book slug for user approval")
@@ -2799,6 +2835,9 @@ def next_operation(slug: str, status: dict) -> tuple[str, dict | None]:
             # translation with a newly accepted glossary revision.
             if status.get("memory_recheck_unit") == chapter["unit_id"]:
                 return "reviewer", chapter
+            if defer_stalled_review(slug, status, ledger, chapter):
+                deferred.add(chapter["unit_id"])
+                continue
             record = latest_record(ledger, chapter)
             report = record.get("quality_report", {}) if record else {}
             if (status.get("force_full_review_unit") == chapter["unit_id"]
@@ -2948,6 +2987,9 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             if not chapter:
                 raise JobError("canonical attention selection returned unknown unit")
             record = latest_record(ledger, chapter)
+            if (status.get("memory_recheck_unit") != chapter["unit_id"]
+                    and defer_stalled_review(slug, status, ledger, chapter)):
+                continue
             if (accepted_review_count(ledger, chapter) < operator_unit_limit(
                     status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
                     and correction_allowed(status, ledger, chapter)):
@@ -2988,6 +3030,10 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             and report.get("evidence_version") != 2):
         return "reviewer", chapter
     if operation == "correct_translation":
+        if (status.get("memory_recheck_unit") != unit_id
+                and not (pinned_scripts_dir() / "workflow" / "attention.py").exists()
+                and defer_stalled_review(slug, status, ledger, chapter)):
+            return next_operation(slug, status)
         if accepted_review_count(ledger, chapter) >= operator_unit_limit(
                     status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
             if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
@@ -3046,6 +3092,39 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         "not casually propose conflicting renderings. If a recorded rendering "
         "conflicts with the source or target-language grammar, report a glossary "
         "decision issue with evidence rather than forcing a literal replacement.")
+    if role == "translator":
+        system += (
+            "\n\nSINGLE-PASS FIDELITY CHECK BEFORE SUBMITTING (internal "
+            "verification, not a separate review or extra model call): "
+            "First map the assigned source's events, speakers, subjects, "
+            "negations, quantities, chronology, modal verbs, ambiguities and "
+            "recurring names; keep those facts consistent throughout the output. "
+            "Then draft the complete target text in source order. Before "
+            "returning your final JSON, silently compare every source "
+            "paragraph/sentence with your translation for omissions, added "
+            "meaning, swapped referents, shifted certainty, repeated or lost "
+            "dialogue, unnatural target-language morphology and inconsistent "
+            "glossary forms. Repair only source-supported mistakes in your "
+            "own draft. Preserve intentional source repetition and ambiguity. "
+            "Do not output the checklist, analysis, or a separate QA report; "
+            "return only the original pinned translator response schema."
+        )
+    if role == "reviewer":
+        system += (
+            "\n\nUSEFUL INDEPENDENT REVIEW: On a first review, sweep the "
+            "complete supplied source sequentially and compare each "
+            "corresponding translated passage before listing findings. "
+            "Do not spend cycles on alternate acceptable word choices, "
+            "optional polish or personal stylistic preferences. Report an "
+            "unresolved issue only when a concrete source/target discrepancy "
+            "or verifiable target-language error warrants correction; cite "
+            "precise current anchors and explain the required change. "
+            "Distinguish deliberately repeated source language from added "
+            "accidental repetition. On follow-ups, verify all previous "
+            "findings, then check the modified passages for new regressions. "
+            "Do not invent issues just to fill the findings list or return "
+            "PASS without doing every required check."
+        )
     if structural_segments is not None:
         system += ("\n\nSTRUCTURAL TRANSLATION EXECUTION MODE: The public canonical "
                    "helper has removed all links, image addresses, and EPUB "
@@ -3659,6 +3738,11 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "For a recurring terminology discrepancy, check all occurrences "
         "in the assigned source CORE, with a separately anchored finding "
         "for every distinct discrepancy; never canonize a disputed spelling. "
+        "Use the assigned full source core systematically on first review "
+        "rather than finding a small subset of obvious issues. Require a "
+        "concrete source discrepancy or demonstrable target-language mistake; "
+        "do not turn acceptable stylistic variants into blocking issues. "
+        "First reconcile old findings before adding genuinely new ones. "
         "Never claim checks for passages you did not compare.")
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
