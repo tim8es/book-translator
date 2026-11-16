@@ -3698,6 +3698,10 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         status.setdefault("role_protocol_failures", {}).pop(
             chapter["unit_id"] + ":reviewer", None)
         store_json(stage_path, stage)
+        # This part produced valid, source-bound independent review evidence.
+        # Reset only the consecutive model-failure streak; do not grant a
+        # chapter PASS or relax the pinned review/claim validation.
+        status["failures"] = 0
         status["review_chunk_progress"] = {
             "unit_id": chapter["unit_id"],
             "source_sha256": plan["source_sha256"],
