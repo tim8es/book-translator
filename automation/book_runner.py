@@ -3864,12 +3864,26 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     book = ROOT / "books" / slug
     source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
     translation = (book / chapter["translation_path"]).read_bytes().decode("utf-8")
-    try:
-        plan = review_chunks.plan(source, translation)
-    except ValueError as exc:
-        raise JobError("cannot safely partition independent review: " + str(exc)) from exc
     stage_path = review_chunk_stage_path(slug, chapter["unit_id"])
     stage = read_json(stage_path) if stage_path.is_file() else None
+    prior_plan = stage.get("plan") if isinstance(stage, dict) else None
+    prior_revision = (prior_plan.get("helper_revision")
+                      if isinstance(prior_plan, dict) else None)
+    # A durable in-flight stage keeps its own helper revision even if the
+    # runtime flag changes. Existing literary workflow pins are untouched.
+    if prior_revision not in {None, review_chunks.HELPER_REVISION,
+                             review_chunks.ALIGNMENT_REVISION}:
+        raise JobError("unsupported durable reviewer helper revision")
+    alignment_mode = os.environ.get("BOOK_TRANSLATOR_MARKER_ALIGNMENT", "off")
+    if alignment_mode not in {"on", "off"}:
+        raise JobError("BOOK_TRANSLATOR_MARKER_ALIGNMENT must be on or off")
+    marker_plan = (prior_revision == review_chunks.ALIGNMENT_REVISION
+                   or (prior_revision is None and alignment_mode == "on"))
+    try:
+        plan = (review_chunks.plan_aligned(source, translation) if marker_plan
+                else review_chunks.plan(source, translation))
+    except ValueError as exc:
+        raise JobError("cannot safely partition independent review: " + str(exc)) from exc
     if stage is None:
         stage = review_chunks.new_stage(
             plan, chapter["unit_id"], status["workflow_revision"])
