@@ -143,13 +143,18 @@ class ProviderRecoveryTests(unittest.TestCase):
                                "not_before": (datetime.now(timezone.utc)
                                - timedelta(minutes=1)).isoformat()}
         }))
-        for _ in range(15):
+        for _ in range(worker.MAX_PROVIDER_RETRY_ATTEMPTS - 2):
             worker.schedule_provider_retry(
                 self.status, self.chapter, "translator", second)
         deadline = datetime.fromisoformat(self.status["provider_retry"]["not_before"])
         self.assertLessEqual(
             (deadline - datetime.now(timezone.utc)).total_seconds(),
             worker.MAX_BACKOFF_SECONDS + 2)
+        worker.schedule_provider_retry(
+            self.status, self.chapter, "translator", second)
+        self.assertEqual(self.status["state"], "blocked")
+        self.assertEqual(self.status["phase"], "provider-retry-exhausted")
+        self.assertNotIn("provider_retry", self.status)
 
     def test_corrupted_checkpoint_blocks_no_external_requests(self):
         self.status["provider_retry"] = {"not_before": "invalid"}
@@ -412,14 +417,68 @@ class ProviderRecoveryTests(unittest.TestCase):
                 {**self.status, "failures": 3}, "invalid_translator_output"))
             cli.assert_not_called()
 
-    def test_provider_backoff_has_no_immediate_dispatch(self):
+    def test_provider_backoff_emits_durable_deferred_dispatch(self):
+        worker.schedule_provider_retry(
+            self.status, self.chapter, "translator",
+            TransientModelError("timeout", code="transport"))
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
             with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
-                worker.publish_outputs(
-                    "b" * 32, {"state": "running", "phase": "provider-backoff"})
-            self.assertIn("continue_queue=true", output.read_text("utf-8"))
-            self.assertNotIn("continue=true", output.read_text("utf-8"))
+                worker.publish_outputs("b" * 32, self.status)
+            content = output.read_text("utf-8")
+            self.assertIn(
+                "retry_at=" + self.status["provider_retry"]["not_before"], content)
+            self.assertIn("continue_queue=true", content)
+            self.assertNotIn("continue=true", content)
+
+    def test_deferred_retry_signal_is_bound_to_current_generation_and_auto_mode(self):
+        job_id = "b" * 32
+        slug = "synthetic-book"
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(worker, "ROOT", Path(directory)):
+            store = worker.status_path(job_id)
+            store.parent.mkdir(parents=True)
+            control = Path(directory) / "books" / slug / ".workflow" / "auto-control.json"
+            control.parent.mkdir(parents=True)
+            control.write_text(json.dumps({"schema_version": 1, "mode": "auto"}))
+            status = {**self.status, "book_slug": slug, "active": None}
+            worker.schedule_provider_retry(
+                status, self.chapter, "translator",
+                TransientModelError("timeout", code="transport"))
+            expected = status["provider_retry"]["not_before"]
+            store.write_text(json.dumps(status))
+            signal = worker.provider_retry_signal(job_id, expected)
+            self.assertTrue(signal["eligible"])
+            self.assertGreater(signal["wait_seconds"], 0)
+            self.assertLessEqual(signal["wait_seconds"], worker.MAX_BACKOFF_SECONDS)
+            self.assertFalse(worker.provider_retry_signal(
+                job_id, (datetime.now(timezone.utc)
+                         + timedelta(minutes=4)).isoformat())["eligible"])
+            control.write_text(json.dumps({"schema_version": 1, "mode": "chatops"}))
+            self.assertFalse(worker.provider_retry_signal(job_id, expected)["eligible"])
+            control.write_text(json.dumps({"schema_version": 1, "mode": "auto"}))
+            status["phase"] = "review-chunk-staged"
+            store.write_text(json.dumps(status))
+            self.assertFalse(worker.provider_retry_signal(job_id, expected)["eligible"])
+
+    def test_deferred_retry_rejects_invalid_and_oversized_deadlines(self):
+        with self.assertRaisesRegex(worker.JobError, "timezone-aware"):
+            worker.provider_retry_signal("c" * 32, "2026-11-16T12:00:00")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(worker, "ROOT", Path(directory)):
+            job_id, slug = "b" * 32, "synthetic-book"
+            status = {**self.status, "book_slug": slug, "active": None}
+            worker.schedule_provider_retry(
+                status, self.chapter, "translator",
+                TransientModelError("timeout", code="transport"))
+            status["provider_retry"]["not_before"] = (
+                datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+            store = worker.status_path(job_id)
+            store.parent.mkdir(parents=True)
+            store.write_text(json.dumps(status))
+            with self.assertRaisesRegex(worker.JobError, "bounded waiter"):
+                worker.provider_retry_signal(
+                    job_id, status["provider_retry"]["not_before"])
 
 
 if __name__ == "__main__":
