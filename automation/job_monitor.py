@@ -28,6 +28,7 @@ SHA256 = re.compile(r"^[a-f0-9]{64}$")
 SLUG = re.compile(r"^[\w-]{1,120}$", re.UNICODE)
 FINAL = {"done", "blocked"}
 STALE_HOURS = 2
+BACKOFF_ALERT_GRACE_MINUTES = 15
 
 
 def read_json(path: Path) -> dict:
@@ -179,10 +180,23 @@ def inspect(root: Path, job_id: str, now: datetime, include_missing: bool) -> di
             elapsed = now - utc_date(status["updated_at"])
         except (ValueError, KeyError, TypeError):
             elapsed = timedelta.max
-        if elapsed < timedelta(hours=STALE_HOURS):
-            return None
-        kind = "stalled"
-        reason = "No durable checkpoint for at least two hours; inspect Actions and claims"
+        if status.get("phase") == "provider-backoff":
+            retry = status.get("provider_retry")
+            try:
+                deadline = utc_date(retry["not_before"])
+            except (TypeError, KeyError, ValueError):
+                kind = "integrity_failed"
+                reason = "Provider backoff has invalid or missing durable retry deadline"
+            else:
+                if now < deadline + timedelta(minutes=BACKOFF_ALERT_GRACE_MINUTES):
+                    return None
+                kind = "stalled"
+                reason = "Provider retry deadline passed without a durable checkpoint; inspect retry waiter and Actions"
+        else:
+            if elapsed < timedelta(hours=STALE_HOURS):
+                return None
+            kind = "stalled"
+            reason = "No durable checkpoint for at least two hours; inspect Actions and claims"
     elif state == "blocked":
         # A retired intake request must not alert the same user twice.
         if status.get("superseded_by_job_id") or str(status.get("phase", "")).startswith("superseded-"):
