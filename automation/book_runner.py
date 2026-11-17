@@ -455,14 +455,21 @@ def _mismatch_index(expected: list, actual: list) -> int:
 def approve_blocked_resume(status: dict) -> None:
     phase = status.get("phase")
     if (status.get("state") != "blocked" or phase not in
-            {"model-blocked", "correction-limit-reached", "review-deferred-requires-operator", "attention-requires-operator"}
+            {"model-blocked", "correction-limit-reached", "review-deferred-requires-operator",
+             "attention-requires-operator", "model-call-limit-reached"}
             or status.get("active") is not None):
         raise JobError("only an inactive blocked job with a supported recovery path can be resumed")
+    if phase == "model-call-limit-reached" and not model_budget_resume_available(status):
+        raise JobError("exhausted model budget has no valid remaining allowance")
     history = status.get("recoveries", [])
     if not isinstance(history, list):
         raise JobError("invalid recovery history")
-    history.append({"action": "resume-" + phase, "approved_at": clock(),
-                    "previous_error": status.get("last_error")})
+    event = {"action": "resume-" + phase, "approved_at": clock(),
+             "previous_error": status.get("last_error")}
+    if phase == "model-call-limit-reached":
+        event.update(model_calls_started=status["model_calls_started"],
+                     model_call_limit=model_call_limit())
+    history.append(event)
     status.update({"recoveries": history, "state": "running",
                    "phase": "operator-resume-authorized", "failures": 0,
                    "last_error": None})
@@ -1046,6 +1053,15 @@ def recoverable_protected_correction_blocked(status: dict) -> bool:
             and re.fullmatch(r"chapter-[0-9]{6}", unit) is not None)
 
 
+def model_budget_resume_available(status: dict) -> bool:
+    """An exhausted budget is recoverable only with a valid remaining allowance."""
+    count = status.get("model_calls_started")
+    return (status.get("state") == "blocked"
+            and status.get("phase") == "model-call-limit-reached"
+            and "active" in status and status["active"] is None
+            and type(count) is int and 0 < count < model_call_limit())
+
+
 def auto_resume_requested(status: dict) -> bool:
     """A fresh operator resume-auto can reopen a supported durable checkpoint.
 
@@ -1059,6 +1075,9 @@ def auto_resume_requested(status: dict) -> bool:
     if phase == "operator-intervention-required":
         if not isinstance(active, dict) or active.get("role") not in (
                 "reviewer", "corrector", "translator"):
+            return False
+    elif phase == "model-call-limit-reached":
+        if not model_budget_resume_available(status):
             return False
     elif (phase not in {"model-blocked", "correction-limit-reached",
                        "attention-requires-operator"}
@@ -4772,9 +4791,15 @@ def run(job_id: str, *, resume_blocked: bool = False,
             not provider_retry_due(status)):
         return status
     if (resume_blocked and not preflight_resume and (status.get("phase") not in
-            {"model-blocked", "correction-limit-reached", "review-deferred-requires-operator", "attention-requires-operator"}
+            {"model-blocked", "correction-limit-reached", "review-deferred-requires-operator",
+             "attention-requires-operator", "model-call-limit-reached"}
             or status.get("active") is not None)):
         raise JobError("resume requires an inactive blocked job")
+    if resume_blocked and status.get("phase") == "model-call-limit-reached":
+        if (not model_budget_resume_available(status)
+                or not safe_book_slug(status.get("book_slug"))
+                or auto_mode(status["book_slug"]) != "auto"):
+            raise JobError("model budget recovery requires unused allowance and Auto mode")
     if resume_interrupted and (status.get("phase") != "operator-intervention-required"
                                or not isinstance(status.get("active"), dict)):
         raise JobError("interrupted recovery requires the recorded active claim")
