@@ -77,7 +77,7 @@ def complete(role: str, system: str, user: str) -> str:
     # calling durable worker. Transient failures are persisted and retried by
     # the scheduled Actions wake, not by uncounted requests inside this client.
     try:
-        with urlopen(request, timeout=240) as response:
+        with urlopen(request, timeout=900) as response:
             payload = json.loads(response.read(8_000_000).decode("utf-8"))
         choice = payload["choices"][0]
         reason = choice.get("finish_reason")
