@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 VALIDATOR = "epub-preserved-xhtml-v1"
@@ -92,6 +92,27 @@ def _verify_static_svg(content: bytes, path: str) -> None:
                 ids.add(value)
     if any(ref not in ids for ref in references):
         raise PreservedEpubError(f"Unsafe SVG unresolved local reference: {path}")
+
+
+def safe_external_image_reference(href: str) -> bool:
+    """Accept a narrow passive HTTPS reference, never download or certify pixels."""
+    if (not isinstance(href, str) or not href.startswith("https://")
+            or not href.isascii() or any(ord(c) <= 32 or ord(c) >= 127 for c in href)
+            or any(c in href for c in '<>\\"\\\'\\\\')):
+        return False
+    try:
+        uri = urlsplit(href)
+        host = uri.hostname or ""
+        # Public DNS-shaped host only; no literal IPs, credentials, custom
+        # ports, local names, or ambiguous authority. No network lookup.
+        return (uri.scheme == "https" and uri.netloc.lower() == host
+                and uri.username is None and uri.password is None
+                and re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host) is not None
+                and not host.endswith((".local", ".localhost", ".internal", ".test", ".invalid", ".example"))
+                and bool(uri.path) and uri.path.startswith("/")
+                and not uri.fragment)
+    except ValueError:
+        return False
 
 
 def _path(opf: str, href: str) -> str:
@@ -522,6 +543,13 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
                 href = img.get("src") if _local(img.tag) == "img" else next((v for k, v in img.attrib.items() if _local(k) == "href"), None)
                 if not href:
                     raise PreservedEpubError(f"Missing image reference: {path}")
+                if _local(img.tag) == "img" and safe_external_image_reference(href):
+                    # The URL is source-bound, not a ZIP member. Do not access
+                    # the external service or claim a hash of unknown pixels.
+                    imgs.append({"kind": "external-image-reference", "url": href,
+                                 "reference_sha256": _hash(href.encode("utf-8")),
+                                 "availability": "unverified"})
+                    continue
                 asset = _path(path, href)
                 media_type = media_by_path.get(asset)
                 if media_type not in {"image/jpeg", "image/png", "image/gif", "image/svg+xml"}:
@@ -1081,6 +1109,13 @@ def validate(content: bytes, *, source: Path, expected_docs: int) -> dict[str, A
             if d.kind != "text" and new.read(d.path) != old.read(d.path):
                 raise PreservedEpubError(f"Artwork/TOC XHTML changed: {d.path}")
             if d.kind == "text":
+                def external_images(archive):
+                    root = ET.fromstring(archive.read(d.path))
+                    return [dict(node.attrib) for node in root.iter()
+                            if _local(node.tag) == "img"
+                            and safe_external_image_reference(node.get("src", ""))]
+                if external_images(old) != external_images(new):
+                    raise PreservedEpubError(f"External image reference changed: {d.path}")
                 # Decorative linked-icon credits were excluded from translation;
                 # verify their entire XHTML subtree survived, not just its text.
                 def protected_labels(archive):

@@ -502,7 +502,8 @@ def coverage_integrity_errors(
     if not isinstance(report, dict):
         return ["Invalid source-coverage.json object"]
     errors: list[str] = []
-    from .epub_preserve import VALIDATOR as PRESERVE_VALIDATOR, MODE as PRESERVE_MODE
+    from .epub_preserve import (VALIDATOR as PRESERVE_VALIDATOR, MODE as PRESERVE_MODE,
+                                safe_external_image_reference)
     expected_validator = PRESERVE_VALIDATOR if metadata.get("layout_mode") == PRESERVE_MODE else VALIDATOR
     if (report.get("schema_version"), report.get("validator"), report.get("state")) != (
         1, expected_validator, "verified"
@@ -540,6 +541,14 @@ def coverage_integrity_errors(
                     errors.append(f"Missing preserved image inventory for {path}")
                 else:
                     for asset in images:
+                        if isinstance(asset, Mapping) and asset.get("kind") == "external-image-reference":
+                            url = asset.get("url")
+                            if (set(asset) != {"kind", "url", "reference_sha256", "availability"}
+                                    or not safe_external_image_reference(url)
+                                    or asset.get("availability") != "unverified"
+                                    or asset.get("reference_sha256") != hashlib.sha256(url.encode("utf-8")).hexdigest()):
+                                errors.append(f"Invalid external image reference for {path}")
+                            continue
                         if (not isinstance(asset, Mapping)
                                 or not isinstance(asset.get("path"), str)
                                 or not asset["path"] or asset["path"].startswith("/")

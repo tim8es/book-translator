@@ -11,9 +11,16 @@ The original EPUB ZIP package remains immutable and SHA-256 bound. The extracted
 units are ordered prose-bearing **source XHTML documents**. Image-only spine
 items and a verified simple legacy XHTML TOC are retained as package resources
 but are not sent to a literary translator as text-only units. There can therefore
-be fewer translation units than spine entries. Every referenced raster asset is
+be fewer translation units than spine entries. Every local referenced raster asset is
 verified against the EPUB manifest, recorded with SHA-256 in
-`source-coverage.json`, and preserved byte-for-byte. Manifest-declared SVG image
+`source-coverage.json`, and preserved byte-for-byte. A passive XHTML `img` with
+a bounded HTTPS URL may instead remain an external reference, without network
+access, downloading, or a claim to verify its pixels. Coverage explicitly records
+the original URL, its reference-only SHA-256 and unverified availability. Build
+preserves the element and its attributes; validation rejects changed references.
+The image is not embedded and may be unavailable or request the remote service
+when opened in a reader. Unsafe URL schemes/authorities, remote SVG resources
+and broken local images remain blocking. Manifest-declared SVG image
 assets are also supported when an independent XML inspection proves they consist
 only of static, text-free vector shapes and local gradient references. SVG
 scripts, embedded text, foreign content, remote resources and external references
