@@ -74,7 +74,7 @@ During the draft:
 The Translator output consists of:
 
 - the complete chapter translation artifact;
-- proposed glossary changes, if any;
+- model-authored glossary proposals for significant source-grounded terms, including semantic type and optional useful target-language notes; no generic markup-derived entries;
 - proposed style-guide changes, if any;
 - unresolved ambiguities or warnings, if any.
 

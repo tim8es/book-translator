@@ -42,7 +42,7 @@ from review_diagnostics import (review_advisories, reviewer_failure_detail,
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
                               parse_correction_patches, parse_translation, PatchAnchorMismatch, role_contracts,
                               save_claim_bound_decisions, updated_glossary, model_glossary_context,
-                              reviewer_glossary_proposals, paired_inline_name_glossary)
+                              reviewer_glossary_proposals)
 
 # The shared runtime lives in the public repository but all mutable state
 # lives in the invoking book-state checkout (private or otherwise).
@@ -534,8 +534,9 @@ def filter_conflicting_glossary_proposals(book: Path, proposals: list[dict]) -> 
                 rejected += 1
                 continue
             raise
-        accepted.append(proposal)
-        current = replacement
+        if replacement != current:
+            accepted.append(proposal)
+            current = replacement
     return accepted, rejected
 
 
@@ -3226,6 +3227,27 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
     return mapping[operation], chapter
 
 
+GLOSSARY_POLICY = (
+    "LITERARY GLOSSARY (model-authored): Independently identify stable, recurring "
+    "names, aliases, titles, places, organizations and domain terms in the assigned "
+    "source and its translation. Return only source-grounded decisions in the "
+    "existing glossary array (original, translation, type, notes); use dictionary "
+    "forms rather than incidental grammatical case. Classify semantically, not by "
+    "capitalization, hyperlinks, EPUB markers or metadata tags. Do not promote "
+    "generic tags or ordinary phrases merely because they are linked. Write type "
+    "and any useful notes in the stated target language. Notes may be an empty "
+    "string; never repeat generic inflection instructions, technical provenance "
+    "or obvious restatements. Include individual context only when supported by "
+    "the supplied text. Check existing entries before proposing new ones; avoid "
+    "duplicates. For a supported extension of an existing note, keep its original "
+    "wording and append new information after a semicolon and space; do not change "
+    "an established rendering or classification without flagging a conflict for "
+    "reconciliation. As Reviewer, independently verify the lexical decisions "
+    "and propose missing or materially useful additions. No new entries is valid "
+    "when none are justified."
+)
+
+
 def context(engine: Path, slug: str, chapter: dict, role: str,
             pending_style: list[dict] | None = None, *,
             force_full_review: bool = False,
@@ -3263,6 +3285,7 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         "not casually propose conflicting renderings. If a recorded rendering "
         "conflicts with the source or target-language grammar, report a glossary "
         "decision issue with evidence rather than forcing a literal replacement.")
+    system += "\n\n" + GLOSSARY_POLICY
     if role == "translator":
         system += (
             "\n\nSINGLE-PASS FIDELITY CHECK BEFORE SUBMITTING (internal "
@@ -3538,7 +3561,7 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
             "\"style_guide\":[]}. Do not use the old three-field finding format. "
             "glossary contains source-grounded recurring names, nicknames, organizations and " 
             "domain terms (up to 40, exactly original, translation, type, notes). " 
-            "Copy attested source and target lexical forms; if names conflict " 
+            "Use source-grounded dictionary forms; if names conflict " 
             "report a terminology finding, not an arbitrary preference. " 
             "Return [] only when no stable lexical decision is supported. " 
             "style_guide contains source-grounded entries with exactly source_pattern, "
@@ -3568,7 +3591,7 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                 "translation must contain the COMPLETE assigned source unit including all Markdown and "
                 "EPUB markers, without summary or omissions. glossary must be an array of recurring "
                 "name/place/term decisions with exactly keys original, translation, type, notes. "
-                "Record named entities when present, avoid generic vocabulary. "
+                "Record meaningful recurring entities when present, avoid generic vocabulary. "
                 "style_guide must be an array of source-supported stable literary observations "
                 "with exactly keys source_pattern, translation_approach, evidence. "
                 "Use empty arrays if no decisions are justified; no Markdown fence or commentary."
@@ -3855,6 +3878,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "outside the paired target window, refuse to assert PASS and report "
         "a concrete unresolved source-grounded concern. "
         "Do not change accepted text or fabricate checks.")
+    system += "\n\n" + GLOSSARY_POLICY
     user = (
         "BOUND REVIEW PART " + chunk["id"] + " OF " + str(total) +
         ". Only this source CORE is assigned; the orchestrator verifies exact "
@@ -4578,8 +4602,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             book = ROOT / "books" / slug
             accepted_text = (book / chapter["translation_path"]).read_text("utf-8")
             source_text = (book / chapter["source_path"]).read_text("utf-8")
-            candidates = merge_unique_correction_decisions(
-                reviewed_glossary, paired_inline_name_glossary(source_text, accepted_text))
+            # Literary decisions come only from the independent model response.
+            # EPUB markers are structural evidence, not semantic classifications.
+            candidates = reviewed_glossary
             overflow = max(0, len(candidates) - 40)
             candidates, ungrounded = filter_ungrounded_glossary_proposals(
                 candidates[:40], source_text, accepted_text)

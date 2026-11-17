@@ -24,6 +24,8 @@ When isolated workers are unavailable, use `single_agent_bounded_context`: const
 
 Only the orchestrator may update global mutable state such as `progress.json`, `glossary.md`, `style-guide.md`, source integrity state, workflow provenance, and other book-wide decisions. Workers may return artifacts and proposals; shared-state proposals are reconciled through the central compare-and-swap path.
 
+Glossary semantics belong to the literary workers. The orchestrator validates the model-authored proposals, checks source/target support, avoids duplicates and conflicting renderings, and reconciles additions through the existing audited proposal path. Technical EPUB structure is not sufficient to generate lexical decisions. Keep existing glossary bytes unchanged unless a current accepted proposal justifies a new or enriched entry; a change of an established rendering or classification requires explicit reconciliation. Empty notes are valid. No separate model invocation is needed.
+
 ## Supported workspace
 
 A supported book lives at `books/<book-slug>/` and has current-schema durable state:

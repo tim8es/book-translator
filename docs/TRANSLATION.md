@@ -128,6 +128,8 @@ Read the current glossary before translating or reviewing a chapter. Do not chan
 
 Glossary entries are source-term → target-language lexical decisions accompanied by type and contextual notes. They are not instructions to paste one literal string into every occurrence. Use the book's `source_language` and `target_language`; apply grammatical case, number, agreement, transliteration, or intentional unchanged spelling according to language and context. A glossary cannot be validated by writing-system assumptions.
 
+All literary glossary entries are authored by a language-model worker, never inferred as semantic facts from EPUB markup or links. Use source-grounded dictionary forms, classify by meaning, and write the type and any notes in the target language. Notes are optional (an empty string or blank table cell is valid); include only term-specific, source-supported usage information. Do not repeat general grammatical instructions or technical extraction provenance. Do not add generic tags or phrases solely because they are linked. Check existing entries before proposing new ones; when adding supported information to an existing note, retain its wording and append after a semicolon and space.
+
 A glossary is revisable evidence, not proof that the translated text is wrong. If a canonical rendering conflicts with source meaning, natural target-language usage, or established usage in the book, flag the glossary decision for review with concrete evidence. Do not corrupt a correct translation to match a questionable glossary entry. The Orchestrator reconciles shared decisions, and the Reviewer independently rechecks impacted text. Automated exact-substring warnings are advisory, not literary-error evidence.
 
 ## Dialogue and character voice

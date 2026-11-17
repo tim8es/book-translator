@@ -1,4 +1,4 @@
-"""Regression tests for reviewer-sourced and marker-aligned glossary memory.
+"""Regression tests for model-authored glossary memory and independent review.
 
 Only synthetic fixtures; no copyrighted book text, network, or model API.
 """
@@ -18,8 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import book_runner as runner
 import review_chunks
 from literary_context import (
-    parse_literary_review, paired_inline_name_glossary,
-    reviewer_glossary_proposals,
+    parse_literary_review, reviewer_glossary_proposals,
 )
 from omniroute import ModelError
 
@@ -64,42 +63,15 @@ class ReviewerGlossaryTests(unittest.TestCase):
         with self.assertRaises(ModelError):
             reviewer_glossary_proposals(json.dumps(invalid, ensure_ascii=False))
 
-    def test_structurally_paired_names_are_derived_without_guessing(self):
-        source = (
-            "<!-- bt-block:000001 -->\n"
-            "<!-- bt-inline:000001:start -->Mara Knox<!-- bt-inline:000001:end -->\n"
-            "<!-- bt-inline:000002:start -->Archive of Our Own<!-- bt-inline:000002:end -->\n"
-            "<!-- bt-block:000002 -->\n"
-            "<!-- bt-inline:000001:start -->Theo Green (Example)<!-- bt-inline:000001:end -->\n"
-        )
-        translation = (
-            "<!-- bt-block:000001 -->\n"
-            "<!-- bt-inline:000001:start -->Мара Нокс<!-- bt-inline:000001:end -->\n"
-            "<!-- bt-inline:000002:start -->Архив всех авторов<!-- bt-inline:000002:end -->\n"
-            "<!-- bt-block:000002 -->\n"
-            "<!-- bt-inline:000001:start -->Тео Грин (Пример)<!-- bt-inline:000001:end -->\n"
-        )
-        names = paired_inline_name_glossary(source, translation)
-        self.assertEqual(
-            [(r["original"], r["translation"]) for r in names],
-            [("Mara Knox", "Мара Нокс"), ("Theo Green", "Тео Грин")],
-        )
-        self.assertEqual(paired_inline_name_glossary(source, ""), [])
-
-    def test_conflicting_linked_renderings_are_not_canonized(self):
-        source = (
-            "<!-- bt-block:000001 -->\n"
-            "<!-- bt-inline:000001:start -->Mara Knox<!-- bt-inline:000001:end -->\n"
-            "<!-- bt-block:000002 -->\n"
-            "<!-- bt-inline:000001:start -->Mara Knox<!-- bt-inline:000001:end -->\n"
-        )
-        translation = (
-            "<!-- bt-block:000001 -->\n"
-            "<!-- bt-inline:000001:start -->Мара Нокс<!-- bt-inline:000001:end -->\n"
-            "<!-- bt-block:000002 -->\n"
-            "<!-- bt-inline:000001:start -->Мария Нокс<!-- bt-inline:000001:end -->\n"
-        )
-        self.assertEqual(paired_inline_name_glossary(source, translation), [])
+    def test_empty_notes_valid_for_reviewer(self):
+        row = {**name(), "notes": ""}
+        payload = reviewer_payload([row])
+        self.assertEqual(reviewer_glossary_proposals(payload), [row])
+        self.assertEqual(parse_literary_review(payload)[0], "PASS")
+        with self.assertRaises(ModelError):
+            reviewer_glossary_proposals(reviewer_payload([{**row, "type": ""}]))
+        with self.assertRaises(ModelError):
+            reviewer_glossary_proposals(reviewer_payload([{**row, "notes": None}]))
 
     def test_chunked_review_aggregates_glossary_and_accepts_legacy_stage(self):
         source = ("Alpha paragraph.\n\n" * 90)
@@ -126,8 +98,12 @@ class ReviewerGlossaryTests(unittest.TestCase):
             book = repo / "books" / "sample"
             for sub in ("extracted", "translated", ".workflow/claims"):
                 (book / sub).mkdir(parents=True, exist_ok=True)
-            source = "Mara walks. Theo waits."
-            translation = "Мара идёт. Тео ждёт."
+            # A linked tag would previously be misclassified and saved by code.
+            # Only the explicitly proposed model entry may be persisted.
+            source = ("<!-- bt-block:000001 -->\nMara walks. Theo waits.\n"
+                      "<!-- bt-inline:000001:start -->Winter Festival<!-- bt-inline:000001:end -->")
+            translation = ("<!-- bt-block:000001 -->\nМара идёт. Тео ждёт.\n"
+                           "<!-- bt-inline:000001:start -->Зимний Фестиваль<!-- bt-inline:000001:end -->")
             (book / "extracted" / "001.md").write_text(source, "utf-8")
             (book / "translated" / "001.md").write_text(translation, "utf-8")
             (book / "glossary.md").write_text(
