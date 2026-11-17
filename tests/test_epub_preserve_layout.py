@@ -1,6 +1,7 @@
 """Synthetic, copyright-free EPUB preservation contract tests."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
