@@ -156,6 +156,23 @@ class ProviderRecoveryTests(unittest.TestCase):
         self.assertEqual(self.status["phase"], "provider-retry-exhausted")
         self.assertNotIn("provider_retry", self.status)
 
+    def test_retry_schedule_and_long_waits_do_not_dispatch_sleep_workflow(self):
+        failure = TransientModelError("timeout", code="transport")
+        for attempt, seconds in enumerate((300, 900, 1800, 43200, 86400), 1):
+            worker.schedule_provider_retry(self.status, self.chapter, "translator", failure)
+            retry = self.status["provider_retry"]
+            self.assertEqual(retry["attempts"], attempt)
+            remaining = (datetime.fromisoformat(retry["not_before"])
+                         - datetime.now(timezone.utc)).total_seconds()
+            self.assertAlmostEqual(remaining, seconds, delta=3)
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "outputs"
+                with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+                    worker.publish_outputs("a" * 32, self.status)
+                self.assertEqual("retry_at=" in output.read_text(), attempt <= 3)
+        worker.schedule_provider_retry(self.status, self.chapter, "translator", failure)
+        self.assertEqual(self.status["phase"], "provider-retry-exhausted")
+
     def test_corrupted_checkpoint_blocks_no_external_requests(self):
         self.status["provider_retry"] = {"not_before": "invalid"}
         with self.assertRaisesRegex(worker.JobError, "invalid provider retry checkpoint"):

@@ -201,6 +201,14 @@ def inspect(root: Path, job_id: str, now: datetime, include_missing: bool) -> di
         # A retired intake request must not alert the same user twice.
         if status.get("superseded_by_job_id") or str(status.get("phase", "")).startswith("superseded-"):
             return None
+        if status.get("preflight_retry_at") is not None:
+            try:
+                deadline = utc_date(status["preflight_retry_at"])
+            except (ValueError, KeyError, TypeError):
+                return {"job_id": job_id, "type": "integrity_failed", "state": state,
+                        "phase": "invalid-preflight-retry", "reason": "Invalid preflight retry deadline"}
+            if now < deadline + timedelta(minutes=BACKOFF_ALERT_GRACE_MINUTES):
+                return None
         kind = "blocked"
         if status.get("phase") == "correction-limit-reached":
             reason = "Automatic correction limit reached; no further correction attempt is authorized for this unit."
