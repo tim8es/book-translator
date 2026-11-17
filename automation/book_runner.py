@@ -927,7 +927,10 @@ def known_epub_preflight_blocker(status: dict) -> bool:
                 r"(?:Unsupported semantic element <big>|"
                 r"Nested prose blocks require explicit mapping|"
                 r"[^:\n]+\.xhtml: Unmapped prose in <div>|"
-                r"[^:\n]+\.xhtml: Unsupported semantic element <(?:sub|sup|small)>)\n?"
+                r"[^:\n]+\.xhtml: Unsupported semantic element <(?:sub|sup|small)>|"
+                # Legacy extractor normalized HTTPS to https:/ as a ZIP path.
+                # Local missing images and arbitrary schemes stay quarantined.
+                r"Undeclared or unsupported raster asset: https:/[A-Za-z0-9.-]+/[^\s<>]+)\n?"
             ), error) is not None)
 
 

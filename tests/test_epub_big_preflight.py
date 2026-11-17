@@ -269,7 +269,8 @@ class PreflightRecoveryTests(unittest.TestCase):
         for error in ("Unsupported semantic element <big>",
                       "Nested prose blocks require explicit mapping",
                       "OPS/part.xhtml: Unmapped prose in <div>",
-                      "OPS/part.xhtml: Unsupported semantic element <sub>"):
+                      "OPS/part.xhtml: Unsupported semantic element <sub>",
+                      "Undeclared or unsupported raster asset: https:/images.example.org/view"):
             for retries in range(5):
                 state = {**base, "preflight_retries": retries,
                          "last_error": prefix + error}
@@ -285,6 +286,7 @@ class PreflightRecoveryTests(unittest.TestCase):
             {"phase": "model-blocked"},
             {"updated_at": "invalid"},
             {"last_error": "JobError: another failure"},
+            {"last_error": prefix + "Undeclared or unsupported raster asset: OPS/absent.jpg"},
         ):
             self.assertFalse(book_runner.recoverable_epub_preflight({**base, **updates}))
 

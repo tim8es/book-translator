@@ -1,6 +1,7 @@
 """Synthetic, copyright-free EPUB preservation contract tests."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
@@ -198,6 +199,73 @@ class PreserveTests(unittest.TestCase):
         self.assertTrue(ep.has_raster_xhtml(self.source))
         with self.assertRaisesRegex(BookError, 'Undeclared or unsupported raster'):
             read_epub(self.source)
+
+    def test_external_image_reference_is_preserved_without_claiming_pixel_identity(self):
+        from workflow.source_coverage import coverage_integrity_errors
+        url = "https://images.example.org/view/illustration"
+        self.replace_xhtml('OPS/chapter.xhtml', b'</body>',
+                           ('<p>Before <img src="' + url +
+                            '" class="remote" alt=""/> after.</p></body>').encode())
+        original = self.source.read_bytes()
+        chapters = self.extracted()
+        report = ep.audit(self.source, chapters)
+        asset = report['documents'][3]['images'][1]
+        self.assertEqual(asset, {"kind": "external-image-reference", "url": url,
+                                 "reference_sha256": hashlib.sha256(url.encode()).hexdigest(),
+                                 "availability": "unverified"})
+        self.assertIn("bt-media:", chapters[1].content)
+        translated = chapters[1].content.replace("Before ", "До ").replace(" after.", " после.")
+        output = ep.build(self.source, [{"markdown": chapters[0].content},
+                                       {"markdown": translated}],
+                          expected_source_sha256=report['source_sha256'], language='ru')
+        self.assertEqual(self.source.read_bytes(), original)
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            root = ET.fromstring(archive.read('OPS/chapter.xhtml'))
+            remote = root.find('.//{*}img[@class="remote"]')
+            self.assertEqual(remote.attrib, {"src": url, "class": "remote", "alt": ""})
+            self.assertIn("До ", "".join(root.itertext()))
+            self.assertIn(" после.", "".join(root.itertext()))
+            members = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        tampered = io.BytesIO()
+        with zipfile.ZipFile(tampered, 'w') as archive:
+            for info, data in members:
+                if info.filename == 'OPS/chapter.xhtml':
+                    data = data.replace(url.encode(), b'https://images.example.org/changed')
+                archive.writestr(info, data)
+        with self.assertRaisesRegex(ep.PreservedEpubError, 'External image reference changed'):
+            ep.validate(tampered.getvalue(), source=self.source, expected_docs=5)
+
+        book_dir = Path(self.temp.name) / 'remote-book'
+        (book_dir / 'extracted').mkdir(parents=True)
+        progress = {'chapters': []}
+        for number, chapter in enumerate(chapters, 1):
+            rel = f'extracted/chapter-{number:06d}.md'
+            (book_dir / rel).write_text(chapter.content, encoding='utf-8')
+            progress['chapters'].append({'number': number, 'source_path': rel})
+        metadata = {'source_format': 'epub', 'layout_mode': ep.MODE,
+                    'source': {'sha256': report['source_sha256'],
+                               'size_bytes': self.source.stat().st_size}}
+        coverage = book_dir / 'source-coverage.json'
+        coverage.write_text(json.dumps(report), encoding='utf-8')
+        self.assertEqual(coverage_integrity_errors(book_dir, metadata, progress), [])
+        asset['availability'] = 'verified'
+        coverage.write_text(json.dumps(report), encoding='utf-8')
+        self.assertIn('Invalid external image reference for OPS/chapter.xhtml',
+                      coverage_integrity_errors(book_dir, metadata, progress))
+
+    def test_unsafe_remote_image_references_and_missing_local_images_remain_blocked(self):
+        for url in ('http://images.example.org/picture', '//images.example.org/picture',
+                    'https://localhost/picture', 'https://127.0.0.1/picture',
+                    'https://user@images.example.org/picture',
+                    'https://images.example.org:8080/picture',
+                    'https://images.example.org/picture#fragment',
+                    'javascript:evil', 'absent.jpg'):
+            with self.subTest(url=url):
+                fixture(self.source)
+                self.replace_xhtml('OPS/chapter.xhtml', b'src="flower.jpg"',
+                                   ('src="' + url + '"').encode())
+                with self.assertRaises(ep.PreservedEpubError):
+                    ep.analyze(self.source)
 
     def install_vector_fixture(self, svg: str) -> None:
         """Add a declared SVG in place of a decorative raster image."""
