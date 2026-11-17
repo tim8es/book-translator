@@ -182,6 +182,34 @@ class LiteraryContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting glossary"):
             updated_glossary(first, [{**value, "translation": "Северный мост"}])
 
+    def test_model_glossary_accepts_empty_notes_and_preserves_other_validation(self):
+        row = {"original": "Mara", "translation": "Мара",
+               "type": "персонаж", "notes": ""}
+        payload = {"translation": "Мара идёт.", "glossary": [row], "style_guide": []}
+        self.assertEqual(parse_translation(json.dumps(payload))[1], [row])
+        for invalid in ("translation", "type", "original"):
+            bad = {**payload, "glossary": [{**row, invalid: ""}]}
+            with self.assertRaises(ModelError):
+                parse_translation(json.dumps(bad))
+        with self.assertRaises(ModelError):
+            parse_translation(json.dumps({**payload, "glossary": [{**row, "notes": "\n"}]}))
+
+    def test_model_glossary_enrichment_is_idempotent_and_casefolded(self):
+        initial = "# Glossary\n| Original | Translation | Type | Notes |\n| --- | --- | --- | --- |\n"
+        row = {"original": "Mara", "translation": "Мара",
+               "type": "персонаж", "notes": ""}
+        first = updated_glossary(initial, [row])
+        enriched = updated_glossary(first, [{**row, "original": "MARA",
+                                              "notes": "Капитан"}])
+        self.assertIn("| Mara | Мара | персонаж | Капитан |", enriched)
+        self.assertEqual(enriched.count("Мара"), 1)
+        extended = updated_glossary(enriched, [{**row, "notes": "Капитан; сестра Теи"}])
+        self.assertIn("Капитан; сестра Теи", extended)
+        self.assertEqual(updated_glossary(extended, [row]), extended)
+        self.assertEqual(updated_glossary(extended, [{**row, "notes": "Иная заметка"}]), extended)
+        with self.assertRaisesRegex(ValueError, "conflicting glossary"):
+            updated_glossary(extended, [{**row, "original": "MARA", "translation": "Мария"}])
+
     def test_style_is_idempotent(self):
         row = {"source_pattern": "dry dialogue", "translation_approach": "restrained",
                "evidence": "chapter one"}

@@ -71,7 +71,7 @@ Any substantial wording change during polish must be checked again against the c
 
 The Reviewer returns exactly one outcome category:
 
-- `PASS` — the current translation satisfies the source-comparison and literary standards in this contract; optionally include proposed glossary/style decisions or non-blocking notes.
+- `PASS` — the current translation satisfies the source-comparison and literary standards in this contract; independently verify established lexical decisions, propose missing or materially useful glossary entries when supported, and optionally include style decisions or non-blocking notes.
 - `CORRECTIONS_REQUIRED` — concrete fidelity or literary problems remain; return actionable findings and corrections or passages that must be corrected and re-reviewed.
 
 `PASS` is a literary review result, not a repository state mutation.

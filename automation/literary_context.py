@@ -40,8 +40,9 @@ class PatchAnchorMismatch(ModelError):
         self.received_anchor = dict(received)
 
 
-def _one_line(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > 700:
+def _one_line(value: object, field: str, *, allow_empty: bool = False) -> str:
+    if (not isinstance(value, str) or len(value) > 700
+            or (not allow_empty and not value.strip())):
         raise ModelError(f"invalid literary memory field: {field}")
     if "\n" in value or "\r" in value or "<!--" in value:
         raise ModelError(f"unsafe literary memory field: {field}")
@@ -55,7 +56,11 @@ def _entries(raw: object, keys: set[str], field: str) -> list[dict]:
     for entry in raw:
         if not isinstance(entry, dict) or set(entry) != keys:
             raise ModelError(f"{field} entry has invalid keys")
-        result.append({k: _one_line(entry[k], f"{field}.{k}") for k in sorted(keys)})
+        result.append({
+            k: _one_line(entry[k], f"{field}.{k}",
+                         allow_empty=(field == "glossary" and k == "notes"))
+            for k in sorted(keys)
+        })
     return result
 
 
@@ -306,73 +311,47 @@ def full_shared_context(book: Path) -> tuple[str, str]:
     return glossary, guide
 
 
-def paired_inline_name_glossary(source: str, translation: str) -> list[dict]:
-    """Find exact pairs of linked proper names, not guessed prose mappings.
-
-    Callers must require accepted, currently reviewed source/translation bytes
-    before turning these conservative candidates into canonical decisions.
-    """
-    block = re.compile(r"<!-- bt-block:\d+ -->\s*([\s\S]*?)(?=<!-- bt-block:\d+ -->|\Z)")
-    inline = re.compile(
-        r"<!-- bt-inline:(\d+):start -->([^<\n]{1,150})"
-        r"<!-- bt-inline:\1:end -->"
-    )
-    sources = block.findall(source)
-    targets = block.findall(translation)
-    if not sources or len(sources) != len(targets):
-        return []
-    candidates: dict[str, dict] = {}
-    ambiguous: set[str] = set()
-    for src, tgt in zip(sources, targets):
-        originals, renderings = inline.findall(src), inline.findall(tgt)
-        if [key for key, _ in originals] != [key for key, _ in renderings]:
-            continue
-        for (_, raw), (_, translated) in zip(originals, renderings):
-            # Linked metadata may append a non-lexical context descriptor.
-            raw = re.sub(r"\s+\([^()]{1,80}\)$", "", raw.strip())
-            translated = re.sub(r"\s+\([^()]{1,80}\)$", "", translated.strip())
-            words = [raw.split(), translated.split()]
-            if any(not 2 <= len(tokens) <= 3 for tokens in words):
-                continue
-            if any(not all(
-                token[0].isupper() and all(ch.isalpha() or ch in "-'’"
-                                            for ch in token)
-                for token in tokens) for tokens in words):
-                continue
-            if raw == translated:
-                continue
-            key = raw.casefold()
-            row = {"original": raw, "translation": translated,
-                   "type": "linked proper name",
-                   "notes": "Paired source and target EPUB name link; inflect in context."}
-            if key in candidates and candidates[key]["translation"] != translated:
-                ambiguous.add(key)
-            else:
-                candidates[key] = row
-    return [item for key, item in candidates.items()
-            if key not in ambiguous][:MAX_ITEMS]
-
-
 def _cell(value: str) -> str:
     return value.replace("|", "\\|").strip()
 
 
 def updated_glossary(current: str, rows: list[dict]) -> str:
+    """Reconcile model-authored decisions without synthesizing literary content."""
     if not rows:
         return current
     if "| Original | Translation | Type | Notes |" not in current:
         raise ValueError("glossary template is not recognized")
-    result = current.rstrip("\n")
+    lines = current.rstrip("\n").splitlines()
     for row in rows:
-        prefix = "| " + _cell(row["original"]) + " |"
-        existing = [line for line in result.splitlines() if line.startswith(prefix)]
-        target = f"| {_cell(row['original'])} | {_cell(row['translation'])} | {_cell(row['type'])} | {_cell(row['notes'])} |"
+        original, rendering, kind, notes = (
+            _cell(row[key]) for key in ("original", "translation", "type", "notes"))
+        target = f"| {original} | {rendering} | {kind} | {notes} |"
+        existing = []
+        for index, line in enumerate(lines):
+            if not line.lstrip().startswith("|"):
+                continue
+            cells = [part.strip() for part in
+                     re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+            if len(cells) == 4 and cells[0].casefold() == original.casefold():
+                if cells[0].casefold() == "original" or re.fullmatch(r"[-:\s]+", cells[0]):
+                    continue
+                existing.append((index, cells))
         if existing:
-            if any(line.split("|")[2].strip() != _cell(row["translation"]) for line in existing):
+            if any(cells[1] != rendering for _, cells in existing):
                 raise ValueError(f"conflicting glossary rendering for {row['original']}")
+            # Preserve historical wording and classifications; only fill an empty
+            # note or accept an explicit extension that keeps the old note intact.
+            # A real terminology/type change requires canonical reconciliation.
+            if len(existing) == 1:
+                index, cells = existing[0]
+                old_note = cells[3]
+                if (cells[2].casefold() == kind.casefold() and notes
+                        and (not old_note or notes.startswith(old_note + "; "))):
+                    lines[index] = f"| {cells[0]} | {cells[1]} | {cells[2]} | {notes} |"
             continue
-        result += "\n" + target
-    return result + "\n"
+        lines.append(target)
+    result = "\n".join(lines) + "\n"
+    return current if result == current.rstrip("\n") + "\n" else result
 
 
 def updated_style(current: str, rows: list[dict]) -> str:
