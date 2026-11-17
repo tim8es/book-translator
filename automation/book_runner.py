@@ -67,9 +67,10 @@ MAX_ACCEPTED_REVIEWS_PER_UNIT = 4
 MAX_CORRECTION_EXTENSIONS = 1
 MAX_FAILURES = 3
 # Durable scheduled recovery: no immediate dispatch loop after provider outage.
-MAX_BACKOFF_SECONDS = 3600
-MIN_BACKOFF_SECONDS = 60
-MAX_PROVIDER_RETRY_ATTEMPTS = 6
+AUTO_RETRY_DELAYS_SECONDS = (5 * 60, 15 * 60, 30 * 60, 12 * 3600, 24 * 3600)
+MAX_BACKOFF_SECONDS = AUTO_RETRY_DELAYS_SECONDS[-1]
+MAX_WAITER_SECONDS = 3600
+MAX_PROVIDER_RETRY_ATTEMPTS = len(AUTO_RETRY_DELAYS_SECONDS)
 FALLBACK_AFTER_TRANSIENTS = 2
 # Bounded model calls per checkpoint keep a book from flooding Actions.
 CORRECTION_BATCH_SIZE = 3
@@ -193,9 +194,9 @@ def schedule_provider_retry(status: dict, chapter: dict, role: str,
                        "last_error_code": failure.code,
                        "blocked_unit_id": chapter["unit_id"]})
         return
-    # Honour a provider-supplied numeric Retry-After, capped to one hour.
+    # Never retry earlier than the policy or a bounded provider Retry-After.
     delay = min(MAX_BACKOFF_SECONDS, max(
-        MIN_BACKOFF_SECONDS, 60 * (2 ** min(attempts - 1, 6)),
+        AUTO_RETRY_DELAYS_SECONDS[attempts - 1],
         failure.retry_after_seconds or 0))
     status["provider_retry"] = {
         "chapter": chapter["number"], "unit_id": chapter["unit_id"],
@@ -910,18 +911,9 @@ def auto_mode(slug: str) -> str:
     return data["mode"]
 
 
-def recoverable_epub_preflight(status: dict) -> bool:
-    """Bounded replay of explicitly repaired EPUB pre-initialization blockers.
-
-    Replays are scoped to a known error per reviewed engine upgrade, never
-    to arbitrary extraction errors, book-state mutations or interrupted claims.
-    """
+def known_epub_preflight_blocker(status: dict) -> bool:
+    """Only explicitly repaired pre-initialization errors are retryable."""
     error = status.get("last_error")
-    retries = status.get("preflight_retries", 0)
-    fixed_errors = {
-        0: "Unsupported semantic element <big>",
-        1: "Nested prose blocks require explicit mapping",
-    }
     prefix = ("JobError: canonical CLI rejected operation: "
               "ERROR: EPUB source-preserving extraction blocked: ")
     return (status.get("state") == "blocked"
@@ -930,18 +922,43 @@ def recoverable_epub_preflight(status: dict) -> bool:
             and status.get("active") is None
             and status.get("workflow_revision") is None
             and status.get("source_sha256") is None
-            and type(retries) is int
             and isinstance(error, str)
-            and ((retries in fixed_errors
-                  and error.startswith(prefix + fixed_errors[retries]))
-                 or (retries == 2 and re.fullmatch(
-                     re.escape(prefix) + r"[^:\n]+\.xhtml: Unmapped prose in <div>\n?",
-                     error,
-                 ) is not None)
-                 or (retries == 3 and re.fullmatch(
-                     re.escape(prefix) + r"[^:\n]+\.xhtml: Unsupported semantic element <(?:sub|sup|small)>\n?",
-                     error,
-                 ) is not None)))
+            and re.fullmatch(re.escape(prefix) + (
+                r"(?:Unsupported semantic element <big>|"
+                r"Nested prose blocks require explicit mapping|"
+                r"[^:\n]+\.xhtml: Unmapped prose in <div>|"
+                r"[^:\n]+\.xhtml: Unsupported semantic element <(?:sub|sup|small)>)\n?"
+            ), error) is not None)
+
+
+def epub_preflight_retry_at(status: dict) -> str | None:
+    """Deadline derived from durable failure state; migrate legacy counters.
+
+    Five replays total per intake, independent of the order of known errors.
+    Invalid/missing timing or coordination evidence stays quarantined.
+    """
+    retries = status.get("preflight_retries", 0)
+    if (not known_epub_preflight_blocker(status)
+            or type(retries) is not int
+            or not 0 <= retries < len(AUTO_RETRY_DELAYS_SECONDS)):
+        return None
+    try:
+        recorded = status.get("preflight_retry_at")
+        when = datetime.fromisoformat(
+            (recorded if recorded is not None else status["updated_at"]).replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            return None
+        if recorded is None:
+            when += timedelta(seconds=AUTO_RETRY_DELAYS_SECONDS[retries])
+        return when.isoformat()
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return None
+
+
+def recoverable_epub_preflight(status: dict) -> bool:
+    deadline = epub_preflight_retry_at(status)
+    return deadline is not None and datetime.now(timezone.utc) >= datetime.fromisoformat(deadline)
+
 
 def recoverable_structural_span_blocked(status: dict) -> bool:
     """One-shot restart of a proven pre-model span-planning bug.
@@ -1151,6 +1168,12 @@ def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
     if not state.exists():
         return stale
     status = read_json(state)
+    preflight = epub_preflight_retry_at(status)
+    if preflight == expected_not_before and preflight is not None:
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining > MAX_WAITER_SECONDS + 30:
+            raise JobError("preflight retry deadline exceeds the bounded waiter")
+        return {"eligible": True, "wait_seconds": max(0, math.ceil(remaining))}
     retry = status.get("provider_retry")
     if (status.get("state") != "running"
             or status.get("phase") != "provider-backoff"
@@ -1165,7 +1188,7 @@ def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
     if auto_mode(slug) != "auto":
         return stale
     remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
-    if remaining > MAX_BACKOFF_SECONDS + 30:
+    if remaining > MAX_WAITER_SECONDS + 30:
         raise JobError("provider retry deadline exceeds the bounded waiter")
     return {"eligible": True,
             "wait_seconds": max(0, math.ceil(remaining))}
@@ -1193,7 +1216,10 @@ def select(explicit: str | None) -> str:
             if auto_mode(recorded["book_slug"]) == "auto":
                 return job_id
             continue
-        if recorded.get("state") not in FINAL or auto_resume_requested(recorded):
+        if recorded.get("state") == "running" and not provider_retry_due(recorded):
+            continue
+        if (recorded.get("state") not in FINAL or auto_resume_requested(recorded)
+                or recoverable_epub_preflight(recorded)):
             return job_id
     return ""
 
@@ -4698,6 +4724,9 @@ def run(job_id: str, *, resume_blocked: bool = False,
               or recoverable_structural_span_blocked(status)
               or recoverable_protected_correction_blocked(status)):
             resume_blocked = True
+    # An explicit dispatch must not bypass a durable preflight backoff.
+    if status and known_epub_preflight_blocker(status) and not recoverable_epub_preflight(status):
+        return status
     preflight_resume = bool(resume_blocked and status and recoverable_epub_preflight(status))
     structural_resume = bool(resume_blocked and status and recoverable_structural_span_blocked(status))
     protected_correction_resume = bool(
@@ -4753,9 +4782,10 @@ def run(job_id: str, *, resume_blocked: bool = False,
             )
         if not folder.exists():
             if preflight_resume:
-                # Durable one-shot marker before executing the formerly blocked
-                # extractor. A second failure cannot loop on the 15-minute scan.
+                # Consume the attempt durably before extraction. An interrupted
+                # process cannot reset the budget or immediately replay.
                 status["preflight_retries"] = status.get("preflight_retries", 0) + 1
+                status.pop("preflight_retry_at", None)
                 checkpoint(job_id, status, None)
             initial_request = {**request, "title": title}
             if author:
@@ -5038,6 +5068,12 @@ def block_on_unexpected_failure(job_id: str, exc: Exception) -> dict:
              "last_error": (type(exc).__name__ + ": " + error)[:350]}
     state.setdefault("book_slug", None)
     state.setdefault("correction_rounds", {})
+    state.pop("preflight_retry_at", None)
+    retries = state.get("preflight_retries", 0)
+    if (known_epub_preflight_blocker(state) and type(retries) is int
+            and 0 <= retries < len(AUTO_RETRY_DELAYS_SECONDS)):
+        state["preflight_retry_at"] = (datetime.now(timezone.utc) + timedelta(
+            seconds=AUTO_RETRY_DELAYS_SECONDS[retries])).isoformat()
     if state.get("active"):
         state["recovery_note"] = "A claim may still be active; inspect canonical state before recovery"
     checkpoint(job_id, state, None)
@@ -5061,7 +5097,12 @@ def publish_outputs(job_id: str, status: dict) -> None:
                 provider_retry_due(status)
                 if not isinstance(retry, dict):
                     raise JobError("backoff phase is missing durable retry")
-                print("retry_at=" + retry["not_before"], file=stream)
+                # GitHub-hosted runners must not sleep for 12/24 hours.
+                # The durable minute scheduler picks up long deadlines.
+                remaining = (datetime.fromisoformat(retry["not_before"].replace("Z", "+00:00"))
+                             - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= MAX_WAITER_SECONDS:
+                    print("retry_at=" + retry["not_before"], file=stream)
                 print("continue_queue=true", file=stream)
             else:
                 print("continue=true", file=stream)
@@ -5070,7 +5111,11 @@ def publish_outputs(job_id: str, status: dict) -> None:
             # Selection skips paused books until ChatOps resumes their mode.
             print("continue_queue=true", file=stream)
             if status["state"] == "blocked":
-                print("blocked=true", file=stream)
+                deadline = epub_preflight_retry_at(status)
+                if deadline is None:
+                    print("blocked=true", file=stream)
+                elif 0 < (datetime.fromisoformat(deadline) - datetime.now(timezone.utc)).total_seconds() <= MAX_WAITER_SECONDS:
+                    print("retry_at=" + deadline, file=stream)
 
 
 def main() -> int:

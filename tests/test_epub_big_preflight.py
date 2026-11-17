@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -256,94 +257,74 @@ class PreflightRecoveryTests(unittest.TestCase):
             "state": "blocked",
             "phase": "operator-intervention-required",
             "failures": 1,
+            "updated_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
             "last_error": "JobError: canonical CLI rejected operation: "
                           "ERROR: EPUB source-preserving extraction blocked: "
                           "Unsupported semantic element <big>\n",
         }
 
-    def test_only_one_preflight_retry_is_eligible(self):
+    def test_known_errors_are_order_independent_and_bounded(self):
         base = self.status()
-        self.assertTrue(book_runner.recoverable_epub_preflight(base))
-        self.assertTrue(book_runner.recoverable_epub_preflight({
-            **base,
-            "preflight_retries": 1,
-            "last_error": "JobError: canonical CLI rejected operation: "
-                          "ERROR: EPUB source-preserving extraction blocked: "
-                          "Nested prose blocks require explicit mapping\n",
-        }))
-        self.assertTrue(book_runner.recoverable_epub_preflight({
-            **base,
-            "preflight_retries": 2,
-            "last_error": "JobError: canonical CLI rejected operation: "
-                          "ERROR: EPUB source-preserving extraction blocked: "
-                          "OPS/part.xhtml: Unmapped prose in <div>\n",
-        }))
-        self.assertTrue(book_runner.recoverable_epub_preflight({
-            **base,
-            "preflight_retries": 3,
-            "last_error": "JobError: canonical CLI rejected operation: "
-                          "ERROR: EPUB source-preserving extraction blocked: "
-                          "OPS/part.xhtml: Unsupported semantic element <sub>\n",
-        }))
+        prefix = "JobError: canonical CLI rejected operation: ERROR: EPUB source-preserving extraction blocked: "
+        for error in ("Unsupported semantic element <big>",
+                      "Nested prose blocks require explicit mapping",
+                      "OPS/part.xhtml: Unmapped prose in <div>",
+                      "OPS/part.xhtml: Unsupported semantic element <sub>"):
+            for retries in range(5):
+                state = {**base, "preflight_retries": retries,
+                         "last_error": prefix + error}
+                self.assertTrue(book_runner.recoverable_epub_preflight(state))
         for updates in (
-            {"preflight_retries": 1},
+            {"preflight_retries": 5},
+            {"preflight_retries": -1},
+            {"preflight_retries": True},
             {"book_slug": "existing-book"},
             {"workflow_revision": "a" * 40},
+            {"source_sha256": "a" * 64},
             {"active": {"role": "translator"}},
             {"phase": "model-blocked"},
+            {"updated_at": "invalid"},
             {"last_error": "JobError: another failure"},
         ):
             self.assertFalse(book_runner.recoverable_epub_preflight({**base, **updates}))
 
-    def test_eligible_job_is_selected_once_then_quarantined(self):
+    def test_each_delay_and_legacy_backoff(self):
+        now = datetime.now(timezone.utc)
+        for count, seconds in enumerate((300, 900, 1800, 43200, 86400)):
+            state = {**self.status(), "preflight_retries": count,
+                     "updated_at": now.isoformat()}
+            self.assertEqual(datetime.fromisoformat(book_runner.epub_preflight_retry_at(state)),
+                             now + timedelta(seconds=seconds))
+            self.assertFalse(book_runner.recoverable_epub_preflight(state))
+            state["updated_at"] = (now - timedelta(seconds=seconds + 1)).isoformat()
+            self.assertTrue(book_runner.recoverable_epub_preflight(state))
+
+    def test_initial_nested_error_selected_only_when_due(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "intake" / "auto" / self.JOB).mkdir(parents=True)
             (root / "automation" / "status").mkdir(parents=True)
             (root / "intake" / "auto" / self.JOB / "request.json").write_text("{}")
             status_file = root / "automation" / "status" / (self.JOB + ".json")
-            status = self.status()
-            status_file.write_text(json.dumps(status))
+            state = self.status()
+            state["last_error"] = ("JobError: canonical CLI rejected operation: ERROR: "
+                                   "EPUB source-preserving extraction blocked: "
+                                   "Nested prose blocks require explicit mapping")
             with patch.object(book_runner, "ROOT", root), \
                  patch.object(book_runner, "book_key", return_value="intake-test"):
+                state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                status_file.write_text(json.dumps(state))
+                self.assertEqual(book_runner.ready_jobs(), [])
+                deadline = book_runner.epub_preflight_retry_at(state)
+                self.assertTrue(book_runner.provider_retry_signal(self.JOB, deadline)["eligible"])
+                state["updated_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+                status_file.write_text(json.dumps(state))
                 self.assertEqual(book_runner.ready_jobs(),
                                  [{"job_id": self.JOB, "book_key": "intake-test"}])
-                status["preflight_retries"] = 1
-                status_file.write_text(json.dumps(status))
+                state["preflight_retries"] = 5
+                status_file.write_text(json.dumps(state))
                 self.assertEqual(book_runner.ready_jobs(), [])
-                status["last_error"] = (
-                    "JobError: canonical CLI rejected operation: ERROR: "
-                    "EPUB source-preserving extraction blocked: "
-                    "Nested prose blocks require explicit mapping"
-                )
-                status_file.write_text(json.dumps(status))
-                self.assertEqual(book_runner.ready_jobs(),
-                                 [{"job_id": self.JOB, "book_key": "intake-test"}])
-                status["preflight_retries"] = 2
-                status_file.write_text(json.dumps(status))
-                self.assertEqual(book_runner.ready_jobs(), [])
-                status["last_error"] = (
-                    "JobError: canonical CLI rejected operation: ERROR: "
-                    "EPUB source-preserving extraction blocked: "
-                    "source.xhtml: Unmapped prose in <div>"
-                )
-                status_file.write_text(json.dumps(status))
-                self.assertEqual(book_runner.ready_jobs(),
-                                 [{"job_id": self.JOB, "book_key": "intake-test"}])
-                status["preflight_retries"] = 3
-                status_file.write_text(json.dumps(status))
-                self.assertEqual(book_runner.ready_jobs(), [])
-                status["last_error"] = (
-                    "JobError: canonical CLI rejected operation: ERROR: "
-                    "EPUB source-preserving extraction blocked: "
-                    "OPS/part.xhtml: Unsupported semantic element <sub>"
-                )
-                status_file.write_text(json.dumps(status))
-                self.assertEqual(book_runner.ready_jobs(),
-                                 [{"job_id": self.JOB, "book_key": "intake-test"}])
-                status["preflight_retries"] = 4
-                status_file.write_text(json.dumps(status))
-                self.assertEqual(book_runner.ready_jobs(), [])
+                self.assertFalse(book_runner.provider_retry_signal(self.JOB, deadline)["eligible"])
 
 
 if __name__ == "__main__":

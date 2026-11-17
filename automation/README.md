@@ -168,3 +168,7 @@ PASS evidence, bypasses source coverage checks, or modifies the book workflow
 pin. Shared workflow bugs belong in the public implementation and its tests;
 the private repository only owns launcher configuration, adapter-specific
 integrations, and private data.
+
+## Bounded automatic recovery
+
+Retryable provider transport/HTTP failures and explicitly repaired pre-initialization EPUB blockers use five retries, after 5 minutes, 15 minutes, 30 minutes, 12 hours and 24 hours respectively, measured from the latest failed attempt. Provider Retry-After may extend an interval (bounded at 24 hours). Known EPUB errors are order-independent; the existing durable intake-wide retry count is preserved. Unknown extraction failures, integrity failures and ambiguous canonical mutations still require operator intervention. Short backoffs use the existing deferred dispatcher; long backoffs rely on the durable scheduled selector, not sleeping hosted runners. The schedule is a not-before deadline, not a guarantee of exact dispatch time. Existing book workflow pins remain unchanged.
