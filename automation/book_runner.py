@@ -137,8 +137,8 @@ def model_call_limit() -> int:
     raw = os.environ.get("OMNIROUTE_MODEL_CALL_LIMIT", "").strip()
     if not raw:
         return DEFAULT_MODEL_CALL_LIMIT
-    if not raw.isdecimal() or not 1 <= int(raw) <= 400:
-        raise JobError("OMNIROUTE_MODEL_CALL_LIMIT must be an integer from 1 to 400")
+    if not raw.isdecimal() or not 1 <= int(raw) <= 1500:
+        raise JobError("OMNIROUTE_MODEL_CALL_LIMIT must be an integer from 1 to 1500")
     return int(raw)
 
 
