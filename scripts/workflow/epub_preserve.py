@@ -98,7 +98,7 @@ def safe_external_image_reference(href: str) -> bool:
     """Accept a narrow passive HTTPS reference, never download or certify pixels."""
     if (not isinstance(href, str) or not href.startswith("https://")
             or not href.isascii() or any(ord(c) <= 32 or ord(c) >= 127 for c in href)
-            or any(c in href for c in '<>\\"\\\'\\\\')):
+            or any(c in href for c in (chr(34), chr(39), chr(92), "<", ">"))):
         return False
     try:
         uri = urlsplit(href)
