@@ -112,6 +112,7 @@ class PublicHelperBridgeTests(unittest.TestCase):
             return "system", json.dumps(structural_segments), "source"
         with patch.object(worker, "ROOT", self.root), \
              patch.object(worker, "STRUCTURAL_MODEL_SEGMENTS_PER_CALL", 3), \
+             patch.object(worker, "STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT", 2), \
              patch.object(worker, "context", side_effect=context), \
              patch.object(worker, "complete",
                           side_effect=complete or self.complete) as calls, \
@@ -167,73 +168,112 @@ class PublicHelperBridgeTests(unittest.TestCase):
         stage = self.book / ".workflow/auto-structural-translation/chapter-000001.json"
         self.assertEqual(len(json.loads(stage.read_text("utf-8"))["segments"]), 6)
 
-    def test_short_translation_repair_requests_only_rejected_source_segment(self):
+    def test_short_translation_retains_good_siblings_and_retries_only_missing(self):
         source = "One full sentence, not a summary.\n\n" * 22
         self.plan["segments"] = [
-            {"id": f"s{i:05d}", "source": source} for i in range(1, 8)
+            {"id": f"s{i:05d}", "source": source + str(i)} for i in range(1, 8)
         ]
         calls = []
 
         def complete(_role, _system, user):
-            payload = user.split("\nREJECTED SHORT TRANSLATION")[0]
-            selected = json.loads(payload)
-            calls.append([item["id"] for item in selected])
+            selected = json.loads(user)
+            calls.append([int(item["source"][-1]) for item in selected])
             return json.dumps({
                 "segments": [{"id": item["id"],
                               "translation": ("x" if len(calls) == 1
-                                              and item["id"] == "s00001"
-                                              else source)}
+                                              and item["id"] == "1"
+                                              else item["source"])}
                              for item in selected],
                 "glossary": [], "style_guide": [],
             })
         result, count, checkpoints = self.once(complete=complete)
         self.assertIsNone(result)
-        self.assertEqual(count, 3)
-        self.assertEqual(checkpoints, 5)
-        self.assertEqual(calls[0], ["s00001", "s00002", "s00003"])
-        self.assertEqual(calls[1], ["s00001"])
-        self.assertEqual(calls[2], ["s00004", "s00005", "s00006"])
+        self.assertEqual((count, checkpoints), (2, 4))
+        self.assertEqual(calls, [[1, 2, 3], [1]])
         stage = self.book / ".workflow/auto-structural-translation/chapter-000001.json"
         saved = json.loads(stage.read_text("utf-8"))["segments"]
-        self.assertEqual(len(saved), 6)
-        self.assertEqual(saved["s00001"], source)
+        self.assertEqual(len(saved), 3)
+        self.assertEqual(saved["s00001"], source + "1")
+        self.assertEqual(saved["s00002"], source + "2")
+        self.assertEqual(saved["s00003"], source + "3")
 
     def test_runtime_public_ref_is_an_immutable_commit(self):
         self.assertRegex(worker.PUBLIC_STRUCTURAL_HELPER_REVISION,
                          r"^[0-9a-f]{40}$")
-        self.assertEqual(worker.STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT, 2)
+        self.assertEqual(worker.STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT, 20)
         self.assertEqual(worker.STRUCTURAL_MODEL_SEGMENTS_PER_CALL, 24)
 
 
 
-    def test_invalid_json_gets_one_durable_focused_repair_and_single_span_mode(self):
+    def test_invalid_json_shrinks_then_grows_across_durable_checkpoints(self):
         requests = []
 
         def model(_role, _system, user):
-            original = user.split("\nREJECTED STRUCTURAL OUTPUT:")[0]
-            selected = json.loads(original)
-            requests.append([item["id"] for item in selected])
+            selected = json.loads(user)
+            requests.append([item["source"] for item in selected])
             if len(requests) == 1:
                 return "not JSON"
-            return json.dumps({
-                "segments": [{"id": item["id"], "translation": "Перевод " + item["id"]}
-                             for item in selected],
-                "glossary": [], "style_guide": [],
-            }, ensure_ascii=False)
+            return self.complete(_role, _system, user)
 
         outcome, calls, checkpoints = self.once(complete=model)
         self.assertIsNone(outcome)
-        self.assertEqual((calls, checkpoints), (3, 5))
+        self.assertEqual((calls, checkpoints), (2, 4))
         self.assertEqual(requests, [
-            ["s00001", "s00002", "s00003"], ["s00001"], ["s00002"],
+            ["sample 1", "sample 2", "sample 3"], ["sample 1"],
         ])
-        self.assertEqual(self.status["model_calls_started"], 3)
-        self.assertEqual(self.status["structural_protocol_fallback_units"][
-            self.chapter["unit_id"]], self.plan["source_sha256"])
+        entry = self.status["structural_adaptive_batches"][self.chapter["unit_id"]]
+        self.assertEqual((entry["limit"], entry["success_streak"]), (1, 1))
+        self.assertEqual(entry["rejected_batches"], 1)
+        self.once(complete=model)
+        self.assertEqual(requests[2:], [["sample 2"], ["sample 3", "sample 4"]])
+        self.assertEqual(entry["limit"], 2)
+        self.assertEqual(entry["staged_segments"], 4)
         staged = self.book / ".workflow/auto-structural-translation/chapter-000001.json"
         self.assertEqual(set(json.loads(staged.read_text("utf-8"))["segments"]),
-                         {"s00001", "s00002"})
+                         {"s00001", "s00002", "s00003", "s00004"})
         self.assertFalse((self.book / "translated/001.md").exists())
+
+    def test_legacy_single_mode_recovers_without_changing_staged_ids(self):
+        self.once()
+        self.status.pop("structural_adaptive_batches")
+        self.status["structural_protocol_fallback_units"] = {
+            self.chapter["unit_id"]: self.plan["source_sha256"]}
+        result, calls, _ = self.once()
+        self.assertIsNotNone(result)
+        self.assertEqual(calls, 1)
+        entry = self.status["structural_adaptive_batches"][self.chapter["unit_id"]]
+        self.assertTrue(entry["legacy_single_mode"])
+        self.assertEqual(entry["staged_segments"], 1)
+        self.assertEqual(self.status["model_calls_started"], 3)
+
+    def test_missing_id_preserves_subset_and_does_not_replay_it(self):
+        requests = []
+        def model(_role, _system, user):
+            selected = json.loads(user)
+            requests.append([x["source"] for x in selected])
+            if len(requests) == 1:
+                selected = selected[1:]
+            return self.complete(_role, _system, json.dumps(selected))
+        self.once(complete=model)
+        self.assertEqual(requests, [
+            ["sample 1", "sample 2", "sample 3"], ["sample 1"]])
+        self.assertEqual(self.status["structural_segment_progress"]["completed"], 3)
+        self.assertEqual(self.status["structural_adaptive_batches"][
+            self.chapter["unit_id"]]["partial_batches"], 1)
+
+    def test_local_ids_cannot_overwrite_or_select_unrequested_durable_ids(self):
+        local, aliases = worker.structural_local_batch([
+            {"id": "s00093", "source": "One"}, {"id": "s00094", "source": "Two"}])
+        self.assertEqual([x["id"] for x in local], ["1", "2"])
+        def response(ids):
+            return json.dumps({"segments": [
+                {"id": x, "translation": "Russian"} for x in ids],
+                "glossary": [], "style_guide": []})
+        mapped, _, _ = worker.parse_structural_local_batch(response(["2", "1"]), aliases, self.helper)
+        self.assertEqual(set(mapped), {"s00093", "s00094"})
+        for ids in (["1", "1"], ["3"], ["s00093"], [1]):
+            with self.subTest(ids=ids), self.assertRaises(ValueError):
+                worker.parse_structural_local_batch(response(ids), aliases, self.helper)
 
     def test_transport_error_is_not_reinterpreted_as_json_repair(self):
         with self.assertRaisesRegex(ModelError, "transport"):
