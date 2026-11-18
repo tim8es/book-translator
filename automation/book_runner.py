@@ -36,6 +36,7 @@ import correction_regression
 import candidate_review
 import incremental_review
 import adaptive_budget
+import coherent_batches
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -2066,8 +2067,9 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                        else adaptive_budget.translation_batch_limit(
                            STRUCTURAL_MODEL_SEGMENTS_PER_CALL, pressure))
         try:
-            selected = helper.next_spans(
-                plan, stage["segments"], limit=batch_limit)
+            selected = coherent_batches.structural_selection(
+                helper, plan, stage["segments"], batch_limit, pressure=pressure,
+                fallback=fallback.get(chapter["unit_id"]) == plan["source_sha256"])
         except ValueError as exc:
             raise JobError("invalid source-bound structural translation progress") from exc
         if not selected:
@@ -2501,8 +2503,16 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             }
         else:
             selected = pending[:CORRECTION_BATCH_SIZE]
-        if adaptive_budget.provider_pressure(status, chapter["unit_id"], "corrector"):
+        pressure = adaptive_budget.provider_pressure(status, chapter["unit_id"], "corrector")
+        if pressure:
             selected = selected[:1]
+        if adaptive:
+            selected = coherent_batches.correction_selection(
+                pending, translation, selected, status.get("correction_regression_rejections", []),
+                chapter["unit_id"], record["record_id"], failures=status.get("failures", 0),
+                pressure=pressure, isolated=bool(isolated))
+            if coherent_batches.enabled():
+                status["adaptive_correction_budget"]["current_selection_size"] = len(selected)
         if continue_batches and isolated and len(pending) > 1:
             strategy = correction_orchestrator_strategy(
                 job_id, slug, status, engine, chapter, record, pending, isolated)
@@ -3792,6 +3802,8 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                      + "\nCheck each candidate against the original and contextual "
                        "target-language morphology. Do not blindly change a "
                        "translation or accept a warning as proof of an error.")
+    if role == "reviewer" and not bounded_review:
+        user += coherent_batches.block_address_prompt(source, translation_raw)
     if (role == "reviewer" and len(source) > MAX_CHAPTER_CHARS
             and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS):
         raise JobError("complete reviewer prompt exceeds safe budget; bounded review required")
@@ -3872,7 +3884,11 @@ def checked_reviewer_response(answer: str, *, review_context: str, source: str,
                               translation: bytes, previous_record: dict | None,
                               claim: dict) -> tuple[str, dict, list[dict]]:
     """Validate a complete reviewer report before any canonical ledger write."""
-    outcome, report, style = parse_literary_review(answer, context=review_context)
+    try:
+        normalized = coherent_batches.normalize_block_addresses(answer, source, translation.decode("utf-8"))
+    except ValueError as exc:
+        raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
+    outcome, report, style = parse_literary_review(normalized, context=review_context)
     if report.get("evidence_version") != 2:
         raise ModelError("automatic reviewer must return anchored v2 evidence")
     try:
@@ -4327,7 +4343,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         status["prompt_context"] = prompt_context
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
-        outcome, report, style = parse_literary_review(answer)
+        try:
+            normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
+        except ValueError as exc:
+            raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
+        outcome, report, style = parse_literary_review(normalized)
         reviewer_glossary = reviewer_glossary_proposals(answer)
         if report.get("evidence_version") != 2:
             raise ModelError("automatic reviewer must return anchored v2 evidence")
@@ -4573,7 +4593,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             incremental_enabled = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW") == "on"
             archived_stage = (review_chunk_stage_path(slug, unit_id).is_file()
                               and incremental_enabled)
-            if incremental_enabled and candidate_target is not None and not archived_stage:
+            if (incremental_enabled and candidate_target is not None and not archived_stage
+                    and not coherent_batches.prefer_direct_review(
+                        len(system), len(user), len(source), MAX_DIRECT_REVIEW_CHARS, MAX_REVIEW_PROMPT_CHARS)):
                 proactive = execution_scheduler.proactive_review_target(status, len(system) + len(user))
                 if proactive < pinned_review_target:
                     try:
@@ -4589,6 +4611,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                               (status.get("review_chunk_fallback_unit") == unit_id
                                or provider_partition or archived_stage
                                or pinned_review_target < review_chunks.TARGET_CHARS
+                               or (coherent_batches.enabled() and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS)
                                or (len(source) <= MAX_DIRECT_REVIEW_CHARS
                                    and should_chunk_review(source, candidate_target, scoped_count))))
         if (role == "reviewer" and not chunked_review
