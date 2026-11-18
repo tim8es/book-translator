@@ -112,12 +112,22 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
         prompt = status.get("prompt_context") or {}
         retry = status.get("provider_retry") or {}
         metrics = status.get("execution_metrics", {})
+        # Only this benchmark runs on approved public-domain/original fixtures.
+        # Redact every provider setting even in diagnostic-only messages.
+        message=str(status.get("last_error",""))[:250]
+        for key,value in env.items():
+            if key.startswith("OMNIROUTE_") and value and len(value)>2:
+                message=message.replace(value,"[REDACTED]")
         print(json.dumps({"arm":mode,"phase":status.get("phase"),"calls":status.get("model_calls_started",0),
                           "unit_id":(status.get("active") or {}).get("unit_id"),
                           "execution_mode":prompt.get("execution_mode"),"chunk":prompt.get("chunk_id"),
                           "chunk_count":prompt.get("chunk_count"),"error_code":status.get("last_error_code"),
                           "review_failure":(status.get("last_review_failure") or {}).get("kind"),
-                          "retry_code":retry.get("code"),"accepted":metrics.get("accepted_operations",{})},ensure_ascii=False),flush=True)
+                          "retry_code":retry.get("code"),"accepted":metrics.get("accepted_operations",{}),
+                          "last_error":message,"gate_failure":status.get("transactional_gate_failure"),
+                          "patch_progress":status.get("correction_batch_progress"),
+                          "review_progress":status.get("review_chunk_progress"),
+                          "batch_size":prompt.get("batch_finding_count")},ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break

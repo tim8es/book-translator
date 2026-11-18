@@ -2319,6 +2319,9 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
         pending=[case for case in cases if transactional_quality.approval_key(case,cache_binding) not in cache["approved"]]
         groups=transactional_quality.group_prompts(pending,instructions)
     except (correction_regression.CorrectionRegression,candidate_review.CandidateReviewError) as exc:
+        status["transactional_gate_failure"]={"unit_id":chapter["unit_id"],"reason":str(exc)[:240],
+                                               "patch_count":len(patches),"source_chars":len(source),
+                                               "target_chars":len(translation),"at":clock()}
         raise ModelError("transactional candidate cannot be safely verified: "+str(exc)) from exc
     if not cases:
         raise JobError("empty transactional gate")

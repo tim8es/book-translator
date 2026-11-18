@@ -43,20 +43,28 @@ def correction_selection(pending, translation, baseline, rejected, unit_id, reco
                  if x.get("unit_id") == unit_id and x.get("review_record_id") == record_id}
     chosen = []
     ranges = []
-    for item in pending[:MAX_CORRECTIONS]:
+    for item in (pending if os.environ.get("BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY") == "on" else pending[:MAX_CORRECTIONS]):
+        if len(chosen)>=MAX_CORRECTIONS:
+            break
         anchor = item.get("translation_anchor")
         if (item["id"] in retry_ids or item.get("severity") == "critical"
                 or item.get("category") in {"structure", "omission"}
                 or (item.get("category") == "referent" and item.get("severity") == "major")
                 or not isinstance(anchor, dict) or anchor.get("occurrence") != 0):
+            if os.environ.get("BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY") == "on" and chosen:
+                continue
             break
         quote = anchor.get("quote")
         if (not isinstance(quote, str) or not quote or translation.count(quote) != 1
                 or "<!--" in quote or "](" in quote):
+            if os.environ.get("BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY") == "on" and chosen:
+                continue
             break
         start = translation.index(quote)
         end = start + len(quote)
         if any(start < b and a < end for a, b in ranges):
+            if os.environ.get("BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY") == "on" and chosen:
+                continue
             break
         chosen.append(item)
         ranges.append((start, end))

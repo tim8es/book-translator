@@ -70,9 +70,9 @@ class TransactionalQualityTests(unittest.TestCase):
         self.assertIn("письмом",c["complete_current_target_block"])
         with patch.dict(os.environ,{"BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY":"off"}):
             self.safe([edit(self.f,"Синяя Сойка")],[self.f])
-    def test_unaligned_large_fail_closed(self):
+    def test_unaligned_marker_mismatch_large_fail_closed(self):
         with self.assertRaisesRegex(candidate_review.CandidateReviewError,"unaligned transaction"):
-            q.transaction_cases("s"*10000,"t"*10000,"u"*10000,[edit(self.f,"Новый текст")],[self.f],book_runner._anchor_position)
+            q.transaction_cases(marked("s"*10000),"t"*10000,"u"*10000,[edit(self.f,"Новый текст")],[self.f],book_runner._anchor_position)
 
     def test_exact_case_cache_invalidates_changed_context_or_memory(self):
         binding={"source":"s","baseline":"b","policy":"p"}

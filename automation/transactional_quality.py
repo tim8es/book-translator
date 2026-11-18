@@ -6,6 +6,7 @@ import os
 import re
 from correction_regression import CorrectionRegression
 import candidate_review
+import plain_review_scope
 
 BLOCK = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 MARKUP = re.compile(r"<!--\s*bt-[^>]*-->")
@@ -76,6 +77,22 @@ def correction_context(source,translation,finding,position):
     if not enabled():
         return None
     left,right=blocks(source),blocks(translation)
+    if plain_review_scope.plain(source,translation):
+        try:
+            ss,se=position(source,finding["source_anchor"])
+            a,b=plain_review_scope.paragraph_window(source,ss,se)
+            anchor=finding.get("translation_anchor")
+            if anchor is None:
+                return {"complete_source_paragraph":source[a:b]}
+            ts,te=position(translation,anchor)
+            c,d=plain_review_scope.paragraph_window(translation,ts,te)
+            if b-a+d-c>10000:
+                return None
+            return {"complete_source_paragraph":source[a:b],
+                    "complete_current_target_paragraph":translation[c:d],
+                    "alignment":"verify reviewer-anchored correspondence"}
+        except plain_review_scope.ScopeError:
+            return None
     if not left or list(left)!=list(right):
         return None
     ss,se=position(source,finding["source_anchor"])
@@ -95,6 +112,11 @@ def transaction_cases(source,before,after,patches,findings,position):
     def claim(ids):
         return [{"id":i,"detail":by_id[i]["detail"],"category":by_id[i]["category"],
                  "severity":by_id[i]["severity"]} for i in ids]
+    if plain_review_scope.plain(source,before) and plain_review_scope.plain(source,after):
+        try:
+            return plain_review_scope.candidate_cases(source,before,after,patches,findings,position)
+        except (plain_review_scope.ScopeError,KeyError,TypeError) as exc:
+            raise candidate_review.CandidateReviewError("unmarked correction scope unsafe: "+str(exc)) from exc
     if not left or list(left)!=list(old) or list(old)!=list(new):
         if len(source)+len(before)+len(after)>18000:
             raise candidate_review.CandidateReviewError("unaligned transaction exceeds safe full-context limit")
@@ -128,13 +150,14 @@ def group_prompts(cases,contract):
     """Bound each paid request by size, without omitting any case."""
     groups=[];current=[]
     def build(items):
-        system,user=candidate_review.build_prompt(items,contract)
-        user+=("\nCheck the actual COMBINED candidate for one source-owned block "
-               "(or a whole unmarked unit). Check all patch_ids together. "
+        system,user=candidate_review.build_prompt(items,contract,max_prompt_chars=52_000)
+        user+=("\nCheck the actual COMBINED candidate for a source-owned block "
+               "or an exact reviewer-anchor-linked paragraph window. Separate source excerpts are "
+               "not assumed aligned; verify the mapping. Check all patch_ids together. "
                "Reject if ANY source-supported content was lost or newly distorted, "
                "if a claimed correction did not address its reviewed issue, or if uncertain. "
                "Return one decision per case finding_id, not per patch_ids member.")
-        if len(system)+len(user)>candidate_review.MAX_PROMPT_CHARS:
+        if len(system)+len(user)>52_000:
             raise candidate_review.CandidateReviewError("transaction group exceeds safe context")
         return system,user
     for case in cases:

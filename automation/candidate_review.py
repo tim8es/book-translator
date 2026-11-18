@@ -81,7 +81,7 @@ def cases(source: str, translation: str, patches: list[dict],
     return result
 
 
-def build_prompt(candidates: list[dict], reviewer_contract: str) -> tuple[str, str]:
+def build_prompt(candidates: list[dict], reviewer_contract: str, *, max_prompt_chars: int = MAX_PROMPT_CHARS) -> tuple[str, str]:
     if not isinstance(reviewer_contract, str) or not reviewer_contract.strip():
         raise CandidateReviewError("missing pinned independent reviewer contract")
     system = (
@@ -114,7 +114,9 @@ def build_prompt(candidates: list[dict], reviewer_contract: str) -> tuple[str, s
         "dialogue, names, structure, omission, other. "
         "The result is ONLY a pre-acceptance veto, never chapter PASS evidence."
     )
-    if len(system) + len(user) > MAX_PROMPT_CHARS:
+    if type(max_prompt_chars) is not int or not MAX_PROMPT_CHARS<=max_prompt_chars<=52_000:
+        raise CandidateReviewError("invalid candidate preflight prompt budget")
+    if len(system) + len(user) > max_prompt_chars:
         raise CandidateReviewError("candidate preflight context exceeds safe limit")
     return system, user
 
