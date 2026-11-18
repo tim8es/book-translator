@@ -104,3 +104,33 @@ class CoherentTests(unittest.TestCase):
                 coherent.normalize_block_addresses(raw.replace("Old phrase.","Invented"),s,t)
         with patch.dict(os.environ, {"BOOK_TRANSLATOR_COHERENT_BATCHES":"off"}):
             self.assertEqual(coherent.normalize_block_addresses(raw,s,t), raw)
+
+    def test_fixture_deterministic_and_local_state_layout(self):
+        import tempfile
+        import json
+        from unittest.mock import patch
+        import coherent_live_benchmark as live
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            one, two = root/"one.epub", root/"two.epub"
+            live.make_epub(one)
+            live.make_epub(two)
+            self.assertEqual(one.read_bytes(), two.read_bytes())
+            import zipfile
+            with zipfile.ZipFile(one) as z:
+                self.assertEqual(z.testzip(), None)
+                self.assertEqual(z.read("mimetype"), b"application/epub+zip")
+            original = live.subprocess.run
+            def run(args, **kwargs):
+                if str(args[0]) == sys.executable:
+                    self.assertTrue((kwargs["cwd"]/"books"/".gitkeep").is_file())
+                    status = kwargs["cwd"]/"automation"/"status"/(live.JOB+".json")
+                    status.parent.mkdir(parents=True, exist_ok=True)
+                    status.write_text(json.dumps({"state":"blocked","phase":"test","model_calls_started":0}))
+                    from types import SimpleNamespace
+                    return SimpleNamespace(returncode=0)
+                return original(args, **kwargs)
+            with patch.object(live.subprocess,"run",side_effect=run):
+                row = live.run_arm(root,one.read_bytes(),"off",3)
+            self.assertEqual(row["calls_reserved"],0)
+            self.assertFalse(row["epub_verified"])

@@ -72,6 +72,8 @@ def run_arm(home, source, mode, cap):
     git(root,"init","--initial-branch=main")
     git(root,"config","user.name","Synthetic benchmark")
     git(root,"config","user.email","benchmark@example.invalid")
+    (root / "books").mkdir()
+    (root / "books" / ".gitkeep").touch()
     intake = root / "intake" / "auto" / JOB
     intake.mkdir(parents=True)
     (intake/"source.epub").write_bytes(source)
@@ -118,12 +120,17 @@ def run_arm(home, source, mode, cap):
         artifact = book/manifest["artifact_path"]
         complete = manifest["preview"] is False and hashlib.sha256(artifact.read_bytes()).hexdigest()==manifest["artifact_sha256"]
     metrics = status.get("execution_metrics",{})
+    # Synthetic-only initialization diagnostic; redact every provider setting.
+    preflight = str(status.get("last_error",""))[:500] if not status.get("model_calls_started",0) else ""
+    for key, value in env.items():
+        if key.startswith("OMNIROUTE_") and value and len(value) > 2:
+            preflight = preflight.replace(value,"[REDACTED]")
     return {"arm":mode,"source_sha256":hashlib.sha256(source).hexdigest(),"workflow_revision":PIN,
             "state":status.get("state"),"stop_reason":reason,"wall_seconds":round(time.monotonic()-started,2),
             "calls_reserved":status.get("model_calls_started",0),"api":metrics.get("api",{}),
             "accepted_operations":metrics.get("accepted_operations",{}),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
-            "epub_verified":complete,"last_error_code":status.get("last_error_code")}
+            "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}
 
 def main():
     p=argparse.ArgumentParser()
