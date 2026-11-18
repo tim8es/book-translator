@@ -38,7 +38,7 @@ class TransientModelError(ModelError):
 def config(role: str) -> tuple[str, str, str]:
     if role not in {"TRANSLATOR", "REVIEWER", "CORRECTOR",
                     "TRANSLATOR_FALLBACK", "REVIEWER_FALLBACK",
-                    "CORRECTOR_FALLBACK"}:
+                    "CORRECTOR_FALLBACK", "ORCHESTRATOR"}:
         raise ModelError("unsupported model role")
     base = os.environ.get("OMNIROUTE_BASE_URL", "").rstrip("/")
     key = os.environ.get("OMNIROUTE_API_KEY", "")

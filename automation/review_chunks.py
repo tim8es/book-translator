@@ -13,6 +13,8 @@ import re
 SCHEMA_VERSION = 1
 HELPER_REVISION = "review-chunks-v1"
 ALIGNMENT_REVISION = "review-chunks-markers-v1"
+STABLE_ALIGNMENT_REVISION = "review-chunks-source-stable-v1"
+ALIGNED_REVISIONS = {ALIGNMENT_REVISION, STABLE_ALIGNMENT_REVISION}
 BLOCK_MARKER = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 TARGET_CHARS = 12_000
 OVERLAP_CHARS = 1_800
@@ -88,7 +90,8 @@ def plan(source: str, translation: str, *, target_chars: int = TARGET_CHARS) -> 
 
 
 def _marker_cuts(source: str, translation: str, *, count: int | None = None,
-                 target_chars: int = TARGET_CHARS) -> tuple[list[int], list[int]] | None:
+                 target_chars: int = TARGET_CHARS,
+                 stable: bool = False) -> tuple[list[int], list[int]] | None:
     """Find paired boundaries at exact protected EPUB block IDs.
 
     Unlike independent target-length cuts, corresponding cores start/end on
@@ -108,7 +111,8 @@ def _marker_cuts(source: str, translation: str, *, count: int | None = None,
         return None
     src = [0] + [item.start() for item in sm[1:]] + [len(source)]
     dst = [0] + [item.start() for item in tm[1:]] + [len(translation)]
-    masses = [max(src[i + 1] - src[i], dst[i + 1] - dst[i])
+    masses = [(src[i + 1] - src[i]) if stable else
+              max(src[i + 1] - src[i], dst[i + 1] - dst[i])
               for i in range(len(sm))]
     if type(target_chars) is not int or not 3000 <= target_chars <= TARGET_CHARS:
         raise ValueError("invalid adaptive review target")
@@ -139,7 +143,8 @@ def _marker_cuts(source: str, translation: str, *, count: int | None = None,
 
 
 def plan_aligned(source: str, translation: str, *,
-                 target_chars: int = TARGET_CHARS) -> dict:
+                 target_chars: int = TARGET_CHARS, stable: bool = False,
+                 count: int | None = None) -> dict:
     """Opt-in marker-aligned reviewer plan; legacy fallback when no markers.
 
     This is a new helper revision for *new* checkpoints. Legacy checkpoints
@@ -147,7 +152,8 @@ def plan_aligned(source: str, translation: str, *,
     """
     if not source.strip() or not translation.strip():
         raise ValueError("review requires both complete source and translation")
-    pair = _marker_cuts(source, translation, target_chars=target_chars)
+    pair = _marker_cuts(source, translation, target_chars=target_chars,
+                        stable=stable, count=count)
     if pair is None:
         return plan(source, translation, target_chars=target_chars)
     sb, tb = pair
@@ -163,7 +169,7 @@ def plan_aligned(source: str, translation: str, *,
                        "translation_core": tc, "source_window": sw,
                        "translation_window": tw})
     result = {"schema_version": SCHEMA_VERSION,
-              "helper_revision": ALIGNMENT_REVISION,
+              "helper_revision": STABLE_ALIGNMENT_REVISION if stable else ALIGNMENT_REVISION,
               "source_sha256": sha(source), "translation_sha256": sha(translation),
               "chunks": chunks}
     validate_plan(result, source, translation)
@@ -175,7 +181,7 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
             "schema_version", "helper_revision", "source_sha256",
             "translation_sha256", "chunks"}
             or value["schema_version"] != SCHEMA_VERSION
-            or value["helper_revision"] not in {HELPER_REVISION, ALIGNMENT_REVISION}
+            or value["helper_revision"] not in ({HELPER_REVISION} | ALIGNED_REVISIONS)
             or value["source_sha256"] != sha(source)
             or value["translation_sha256"] != sha(translation)
             or not isinstance(value["chunks"], list)
@@ -202,8 +208,9 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
         if offset != len(text):
             raise ValueError("review final chunk leaves unreviewed text")
     # Persisted plans must be deterministic, not user/model supplied.
-    if value["helper_revision"] == ALIGNMENT_REVISION:
-        aligned = _marker_cuts(source, translation, count=len(value["chunks"]))
+    if value["helper_revision"] in ALIGNED_REVISIONS:
+        aligned = _marker_cuts(source, translation, count=len(value["chunks"]),
+                               stable=value["helper_revision"] == STABLE_ALIGNMENT_REVISION)
         if aligned is None or len(aligned[0]) != len(value["chunks"]) + 1:
             raise ValueError("aligned review plan has lost marker boundaries")
         source_cuts, target_cuts = aligned

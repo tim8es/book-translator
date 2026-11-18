@@ -47,7 +47,7 @@ def _validate_binding(value: dict) -> None:
 
 
 def new_stage(plan: dict, unit_id: str, workflow_revision: str, current_binding: dict) -> dict:
-    if plan.get("helper_revision") != review_chunks.ALIGNMENT_REVISION:
+    if plan.get("helper_revision") not in review_chunks.ALIGNED_REVISIONS:
         raise ValueError("incremental reviewer requires protected marker alignment")
     _validate_binding(current_binding)
     return {
@@ -80,7 +80,7 @@ def validate_shape(stage: dict, unit_id: str, revision: str) -> None:
             or set(plan) != {"schema_version", "helper_revision", "source_sha256",
                             "translation_sha256", "chunks"}
             or plan["schema_version"] != review_chunks.SCHEMA_VERSION
-            or plan["helper_revision"] != review_chunks.ALIGNMENT_REVISION
+            or plan["helper_revision"] not in review_chunks.ALIGNED_REVISIONS
             or not all(isinstance(plan[key], str) and HEX64.fullmatch(plan[key])
                        for key in ("source_sha256", "translation_sha256"))
             or not isinstance(plan["chunks"], list)

@@ -19,7 +19,7 @@ MAX_ITEMS = 40
 # shortcut: patches cap at 30 per response; raise only for a measured unit needing more.
 MAX_PATCHES = 30
 MAX_PATCH_CHARS = 10_000
-_ALLOWED_ROLES = {"translator", "reviewer"}
+_ALLOWED_ROLES = {"translator", "reviewer", "orchestrator"}
 _NAME_KEYS = {"original", "translation", "type", "notes"}
 _STYLE_KEYS = {"source_pattern", "translation_approach", "evidence"}
 # Corrector supplies an edit intent; known target coordinates come ONLY from the
@@ -245,12 +245,15 @@ def role_contracts(engine: Path, role: str) -> tuple[str, list[str]]:
     from workflow.context_routing import contract_paths, read_manifest
     manifest = read_manifest(engine)
     files = contract_paths(manifest, role)
-    mandatory = {"AGENTS.md", "docs/TRANSLATION.md",
-                 "docs/TRANSLATOR.md" if role == "translator" else "docs/REVIEWER.md"}
+    mandatory = ({"AGENTS.md", "docs/ORCHESTRATION.md"} if role == "orchestrator"
+                 else {"AGENTS.md", "docs/TRANSLATION.md",
+                       "docs/TRANSLATOR.md" if role == "translator" else "docs/REVIEWER.md"})
     if not mandatory.issubset(set(files)):
         raise ValueError(f"missing required {role} role contracts")
-    other_role = "docs/REVIEWER.md" if role == "translator" else "docs/TRANSLATOR.md"
-    if other_role in files:
+    forbidden = ({"docs/TRANSLATOR.md", "docs/REVIEWER.md"} if role == "orchestrator"
+                 else {"docs/REVIEWER.md" if role == "translator" else "docs/TRANSLATOR.md",
+                       "docs/ORCHESTRATION.md"})
+    if forbidden.intersection(files):
         raise ValueError(f"cross-role contract leakage in {role} profile")
     sections = []
     for path in files:
