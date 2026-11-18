@@ -241,11 +241,32 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
     # A route name, not model ID or credential, is safe in metadata.
     status["provider_model_route"] = "fallback" if route != role else "primary"
     status.pop("model_response_diagnostics", None)
-    answer = complete(route, system, user)
+    started = time.monotonic()
+    metric = {"unit_id": current_unit, "role": current_role,
+              "route": status["provider_model_route"],
+              "request_chars": len(system) + len(user)}
+    try:
+        answer = complete(route, system, user)
+    except ModelError as exc:
+        metric["outcome"] = exc.code if isinstance(exc, TransientModelError) else "model_error"
+        raise
+    else:
+        metric["outcome"] = "response"
+    finally:
+        metric["duration_ms"] = max(0, round((time.monotonic() - started) * 1000))
+        status["provider_call_metric"] = metric
+        history = status.get("provider_call_metrics", [])
+        if not isinstance(history, list):
+            history = []
+        status["provider_call_metrics"] = (history + [metric])[-40:]
     # The transport returns string-compatible output and optional safe
     # metadata. Diagnostics must never contain source text or credentials.
     diagnostics = getattr(answer, "diagnostics", None)
     if isinstance(diagnostics, dict):
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = diagnostics.get(field)
+            if type(value) is int and 0 <= value <= 1_000_000_000:
+                metric[field] = value
         status["model_response_diagnostics"] = {
             **diagnostics,
             "route": status["provider_model_route"],
@@ -2033,8 +2054,11 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
         fallback = status.get("structural_protocol_fallback_units", {})
         if not isinstance(fallback, dict):
             raise JobError("invalid structural protocol fallback checkpoint")
+        pressure = adaptive_budget.provider_pressure(
+            status, chapter["unit_id"], status.get("active", {}).get("role", "translator"))
         batch_limit = (1 if fallback.get(chapter["unit_id"]) == plan["source_sha256"]
-                       else STRUCTURAL_MODEL_SEGMENTS_PER_CALL)
+                       else adaptive_budget.translation_batch_limit(
+                           STRUCTURAL_MODEL_SEGMENTS_PER_CALL, pressure))
         try:
             selected = helper.next_spans(
                 plan, stage["segments"], limit=batch_limit)
@@ -2428,6 +2452,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             }
         else:
             selected = pending[:CORRECTION_BATCH_SIZE]
+        if adaptive_budget.provider_pressure(status, chapter["unit_id"], "corrector"):
+            selected = selected[:1]
         system, user, _ = context(
             engine, slug, chapter, "corrector", correction_findings=selected)
         earlier = [item["finding_id"] for item in
@@ -3985,12 +4011,29 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     incremental_mode = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW", "off")
     if alignment_mode not in {"on", "off"} or incremental_mode not in {"on", "off"}:
         raise JobError("review alignment/incremental flags must be on or off")
+    pressure = adaptive_budget.provider_pressure(status, chapter["unit_id"], "reviewer")
     marker_plan = (prior_revision == review_chunks.ALIGNMENT_REVISION
                    or (prior_revision is None and
-                       (alignment_mode == "on" or incremental_mode == "on")))
+                       (alignment_mode == "on" or incremental_mode == "on" or pressure)))
+    planner = review_chunks.plan_aligned if marker_plan else review_chunks.plan
     try:
-        plan = (review_chunks.plan_aligned(source, translation) if marker_plan
-                else review_chunks.plan(source, translation))
+        # Preserve successful staged parts and their exact coverage. A fresh
+        # plan (or a still-empty plan) may shrink after repeated slow failures.
+        current_hashes = (isinstance(prior_plan, dict)
+                          and prior_plan.get("source_sha256") == review_chunks.sha(source)
+                          and prior_plan.get("translation_sha256") == review_chunks.sha(translation))
+        if current_hashes:
+            review_chunks.validate_plan(prior_plan, source, translation)
+            plan = prior_plan
+            if pressure and not stage.get("completed"):
+                smaller = planner(source, translation,
+                                  target_chars=adaptive_budget.review_target_chars(pressure))
+                if len(smaller["chunks"]) > len(plan["chunks"]):
+                    stage = None
+                    plan = smaller
+        else:
+            plan = planner(source, translation,
+                           target_chars=adaptive_budget.review_target_chars(pressure))
     except ValueError as exc:
         raise JobError("cannot safely partition independent review: " + str(exc)) from exc
     binding = None
@@ -4142,6 +4185,9 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         status["model_calls_started"] = count + 1
         status["phase"] = "model-call-reserved"
         status["prompt_context"] = prompt_context
+        # Persist even an empty plan before the paid call so the retry is
+        # deterministic. No unvalidated review evidence is written here.
+        store_json(stage_path, stage)
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         outcome, report, style = parse_literary_review(answer)
@@ -4374,8 +4420,20 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             scoped_count = protocol_failures.get(unit_id + ":reviewer", 0)
             if type(scoped_count) is not int or scoped_count < 0:
                 raise JobError("invalid reviewer protocol counter")
+            pressure = adaptive_budget.provider_pressure(status, unit_id, "reviewer")
+            provider_partition = False
+            if pressure and candidate_target is not None:
+                try:
+                    review_chunks.plan_aligned(
+                        source, candidate_target,
+                        target_chars=adaptive_budget.review_target_chars(pressure))
+                    provider_partition = True
+                except ValueError:
+                    # Cannot safely split this input; retain normal retry/failover.
+                    pass
             chunked_review = (candidate_target is not None and
                               (status.get("review_chunk_fallback_unit") == unit_id
+                               or provider_partition
                                or (len(source) <= MAX_DIRECT_REVIEW_CHARS
                                    and should_chunk_review(source, candidate_target, scoped_count))))
         if (role == "reviewer" and not chunked_review

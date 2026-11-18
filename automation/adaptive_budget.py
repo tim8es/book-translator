@@ -88,3 +88,38 @@ def plan(findings: list[dict], *, rejected: list[dict] | None = None,
         "lower_bound_remaining_calls": math.ceil(len(findings) / MAX_GROUP),
         "current_selection_size": group_size,
     }
+
+
+# Provider recovery is technical pacing, separate from literary corrections.
+SIZE_RETRY_CODES = {"transport", "http_408", "http_500", "http_502", "http_503", "http_504"}
+
+
+def provider_pressure(status: dict, unit_id: str, role: str) -> int:
+    """Scoped, conservative fallback for a repeated potentially size-related outage.
+
+    Rapid outages and rate limits retain the normal backoff. Old checkpoints
+    without timings remain eligible after repeated transient failures.
+    """
+    retry = status.get("provider_retry")
+    if (not isinstance(retry, dict) or retry.get("unit_id") != unit_id
+            or retry.get("role") != role or retry.get("code") not in SIZE_RETRY_CODES):
+        return 0
+    attempts = retry.get("attempts")
+    if type(attempts) is not int or attempts < 2:
+        return 0
+    metric = status.get("provider_call_metric")
+    if (isinstance(metric, dict) and metric.get("unit_id") == unit_id
+            and metric.get("role") == role and metric.get("outcome") == retry["code"]
+            and type(metric.get("duration_ms")) is int
+            and metric["duration_ms"] < 120_000
+            and retry["code"] in {"http_500", "http_502", "http_503"}):
+        return 0
+    return min(3, attempts - 1)
+
+
+def review_target_chars(pressure: int) -> int:
+    return 12_000 if pressure <= 0 else 6_000 if pressure == 1 else 3_000
+
+
+def translation_batch_limit(normal: int, pressure: int) -> int:
+    return max(1, normal // (2 ** pressure))
