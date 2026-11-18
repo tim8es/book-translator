@@ -63,7 +63,7 @@ def make_epub(path):
 def git(path, *args):
     subprocess.run(["git","-C",str(path),*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
-def run_arm(home, source, mode, cap):
+def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=None):
     root = home / mode
     root.mkdir()
     remote = home / (mode + "-bare")
@@ -89,6 +89,7 @@ def run_arm(home, source, mode, cap):
            "BOOK_TRANSLATOR_CONTINUE_CORRECTIONS":"on","BOOK_TRANSLATOR_MARKER_ALIGNMENT":"on",
            "BOOK_TRANSLATOR_INCREMENTAL_REVIEW":"on","BOOK_TRANSLATOR_ADAPTIVE_BUDGET":"on",
            "BOOK_TRANSLATOR_QUEUE_BUDGET":"on"}
+    env.update(environment or {})
     for key in ("GITHUB_OUTPUT","BOOK_TRANSLATOR_PINNED_ENGINE","BOOK_TRANSLATOR_PINNED_REVISION"):
         env.pop(key,None)
     status_path = root/"automation"/"status"/(JOB+".json")
@@ -96,8 +97,16 @@ def run_arm(home, source, mode, cap):
     status = {}
     reason = "checkpoint-limit"
     for _ in range(120):
-        result = subprocess.run([sys.executable,str(ROOT/"automation/book_runner.py"),"--job-id",JOB],
-                                cwd=root,env=env,capture_output=True,text=True)
+        remaining = None if wall_budget_seconds is None else wall_budget_seconds - (time.monotonic()-started)
+        if remaining is not None and remaining <= 0:
+            reason = "wall-clock-budget"; break
+        try:
+            result = subprocess.run([sys.executable,str(ROOT/"automation/book_runner.py"),"--job-id",JOB],
+                                    cwd=root,env=env,capture_output=True,text=True, **({"timeout":remaining} if remaining is not None else {}))
+        except subprocess.TimeoutExpired:
+            if status_path.exists():
+                status = json.loads(status_path.read_text("utf-8"))
+            reason = "wall-clock-budget"; break
         if status_path.exists():
             status = json.loads(status_path.read_text("utf-8"))
         print(json.dumps({"arm":mode,"phase":status.get("phase"),"calls":status.get("model_calls_started",0)},ensure_ascii=False),flush=True)
@@ -108,8 +117,15 @@ def run_arm(home, source, mode, cap):
             reason = status.get("phase")
             break
         if status.get("phase") == "provider-backoff":
-            reason = "provider-backoff"
-            break
+            if wall_budget_seconds is None:
+                reason = "provider-backoff"; break
+            from datetime import datetime, timezone
+            due = datetime.fromisoformat(status["provider_retry"]["not_before"].replace("Z","+00:00"))
+            delay = max(0, (due-datetime.now(timezone.utc)).total_seconds())
+            remaining = wall_budget_seconds-(time.monotonic()-started)
+            if delay >= remaining:
+                reason = "provider-backoff-exceeds-budget"; break
+            time.sleep(delay+0.1)
     book = root/"books"/str(status.get("book_slug",""))
     chapters = []
     if (book/"progress.json").is_file():

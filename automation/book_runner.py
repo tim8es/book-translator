@@ -38,6 +38,7 @@ import incremental_review
 import adaptive_budget
 import coherent_batches
 import transactional_quality
+import block_delta_review
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -3008,6 +3009,20 @@ def focused_review_context(slug: str, chapter: dict, previous: dict,
             or delta.get("source_sha256") != source_sha
             or delta.get("translation_sha256") != translation_sha):
         raise JobError("review-delta does not match the current accepted artifacts")
+    if transactional_quality.enabled():
+        book = ROOT / "books" / slug
+        baseline_sha = previous.get("translation_sha256", "")
+        if HEX64.fullmatch(baseline_sha):
+            baseline = book / ".workflow" / "review-baselines" / (baseline_sha + ".md")
+            if baseline.is_file():
+                try:
+                    scoped = block_delta_review.scope(source, baseline.read_bytes().decode("utf-8"),
+                        translation, previous, {"glossary":fingerprint(book/"glossary.md"),
+                                                "style_guide":fingerprint(book/"style-guide.md")}, _anchor_position)
+                except (JobError, ValueError, UnicodeError):
+                    scoped = None
+                if scoped is not None and len(json.dumps(scoped, ensure_ascii=False)) <= MAX_FOCUSED_CONTEXT_CHARS:
+                    return scoped
     if delta.get("mode") != "focused_candidate":
         return None
     if delta.get("previous_record_id") != previous.get("record_id"):
@@ -3741,6 +3756,12 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                  "and include only accepted decisions in style_guide):\n"
                  + json.dumps(pending_style or [], ensure_ascii=False))
         if bounded_review:
+            if bounded_review.get("block_delta_version") == 1:
+                user += ("\nSOURCE-PAIRED BLOCK FOLLOW-UP: compare EVERY supplied source/current-target pair. "
+                         "The previous independent full review and byte-identical outside-scope blocks "
+                         "supply the unchanged baseline. Explicitly recheck EVERY previous unresolved finding. "
+                         "If wider continuity, meaning or formatting is uncertain, request full review; do not PASS. "
+                         "Do not invent findings outside the supplied blocks.")
             user += (
                 "\nThis is a hash-bound focused follow-up. The previous independent review checked "
                 "the unchanged artifact; the supplied delta contains every changed paragraph plus "
@@ -4718,6 +4739,16 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                                or (coherent_batches.enabled() and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS)
                                or (len(source) <= MAX_DIRECT_REVIEW_CHARS
                                    and should_chunk_review(source, candidate_target, scoped_count))))
+        if (role == "reviewer" and chunked_review and transactional_quality.enabled()
+                and not force_full_review and not pressure and not scoped_count
+                and len(source) <= MAX_DIRECT_REVIEW_CHARS
+                and candidate_target is not None and previous_record):
+            scoped = focused_review_context(slug, chapter, previous_record, source, candidate_target)
+            stage_file = review_chunk_stage_path(slug, unit_id)
+            stage_current = (stage_file.is_file() and read_json(stage_file).get("plan", {}).get("translation_sha256")
+                             == review_chunks.sha(candidate_target))
+            if scoped and scoped.get("block_delta_version") == 1 and not stage_current:
+                chunked_review = False
         if (role == "reviewer" and not chunked_review
                 and len(source) <= MAX_DIRECT_REVIEW_CHARS
                 and previous_quality.get("evidence_version") == 2 and not force_full_review):
@@ -5033,10 +5064,12 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 status["memory_recheck_unit"] = unit_id
         status.pop("_memory_only_change", None)
     if role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS
-                              or status.get("review_chunk_fallback_unit") == unit_id):
+                              or status.get("review_chunk_fallback_unit") == unit_id
+                              or (transactional_quality.enabled() and review_context == "bounded_context"
+                                  and review_chunk_stage_path(slug, unit_id).is_file())):
         # An archived v2 stage is not acceptance evidence; only clean,
         # content-identical windows may be reused after the next correction.
-        archived = (outcome == "CORRECTIONS_REQUIRED"
+        archived = (outcome == "CORRECTIONS_REQUIRED" and review_context != "bounded_context"
                     and archive_incremental_reviewer_stage(
                         slug, chapter, status, report))
         if not archived:
