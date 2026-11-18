@@ -4185,9 +4185,6 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         status["model_calls_started"] = count + 1
         status["phase"] = "model-call-reserved"
         status["prompt_context"] = prompt_context
-        # Persist even an empty plan before the paid call so the retry is
-        # deterministic. No unvalidated review evidence is written here.
-        store_json(stage_path, stage)
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         outcome, report, style = parse_literary_review(answer)
