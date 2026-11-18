@@ -39,6 +39,8 @@ import adaptive_budget
 import coherent_batches
 import transactional_quality
 import block_delta_review
+import compact_review
+import block_recovery
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -327,6 +329,8 @@ def reviewer_model_output_code(error: ModelError) -> str | None:
     if not isinstance(error, ModelError) or isinstance(error, TransientModelError):
         return None
     message = str(error)
+    if message.startswith("compact reviewer evidence rejected: "):
+        return "review_evidence_invalid"
     if message in {
         "reviewer must return JSON",
         "reviewer response has invalid literary memory schema",
@@ -2555,6 +2559,17 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
                 if continue_batches else set())
+    # A previously rejected isolated block gets one alternate, scope-preserving
+    # reconstruction before it is deferred. This remains a reviewer-bound patch.
+    if transactional_quality.enabled() and isolated:
+        seen_recovery = status.get("block_recovery_attempts", [])
+        for item in unresolved:
+            key = record["record_id"] + ":" + item["id"]
+            if (item["id"] in isolated and key not in seen_recovery
+                    and block_recovery.spec(source, translation, item, _anchor_position) is not None):
+                isolated.remove(item["id"])
+                execution_scheduler.record_isolated(status, chapter, record, isolated)
+                break
     initially_pending = [
         item for item in unresolved if item["id"] not in already_staged | isolated]
     try:
@@ -2630,6 +2645,20 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 + json.dumps(sorted(set(earlier))) +
                 ". Change the wording/strategy; do not repeat rejected text."
             )
+        recovery = None
+        recovery_key = None
+        if transactional_quality.enabled() and not pressure:
+            seen_recovery = status.get("block_recovery_attempts", [])
+            for item in selected:
+                key = record["record_id"] + ":" + item["id"]
+                if item["id"] in earlier and key not in seen_recovery:
+                    recovery = block_recovery.spec(source, translation, item, _anchor_position)
+                    if recovery is not None:
+                        selected = [item]
+                        recovery_key = key
+                        system, user, _ = context(engine, slug, chapter, "corrector", correction_findings=selected)
+                        user += block_recovery.prompt(recovery)
+                        break
         prompt_context = {
             "role": "corrector",
             "workflow_revision": status["workflow_revision"],
@@ -2637,7 +2666,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             "glossary_sha256": fingerprint(book / "glossary.md"),
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
-            "correction_mode": "bounded-review-patches",
+            "correction_mode": ("block-reconstruction" if recovery is not None else "bounded-review-patches"),
             "batch_finding_count": len(selected),
         }
         count = status.get("model_calls_started", 0)
@@ -2657,6 +2686,12 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                        "prompt_context": prompt_context})
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "CORRECTOR", system, user)
+        if recovery is not None:
+            status["block_recovery_attempts"] = (status.get("block_recovery_attempts", []) + [recovery_key])[-100:]
+            try:
+                answer = block_recovery.compile_response(answer, recovery)
+            except block_recovery.RecoveryError as exc:
+                raise ModelError("corrector block reconstruction rejected") from exc
         try:
             patches, glossary, style = parse_correction_patches(
                 answer, selected, allow_partial=True)
@@ -4189,6 +4224,14 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "a concrete unresolved source-grounded concern. "
         "Do not change accepted text or fabricate checks.")
     system += "\n\n" + GLOSSARY_POLICY
+    paired = compact_review.packet(source, translation, chunk) if compact_review.enabled() else None
+    if paired is not None:
+        compact_user = compact_review.build_user(paired, chunk, total, bibliographic,
+            model_glossary_context(glossary, source_language=bibliographic.get("source_language", "unspecified"),
+                                   target_language=bibliographic.get("target_language", "unspecified")),
+            style, old_findings)
+        if len(system) + len(compact_user) <= 120_000:
+            return system, compact_user
     user = (
         "BOUND REVIEW PART " + chunk["id"] + " OF " + str(total) +
         ". Only this source CORE is assigned; the orchestrator verifies exact "
@@ -4457,7 +4500,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
             "review_context": "independent_session",
-            "execution_mode": "bounded-review-chunks",
+            "execution_mode": ("compact-paired-review" if user.startswith("Independent paired review, ") else "bounded-review-chunks"),
             "review_helper_revision": plan["helper_revision"],
             "incremental_stage_version": stage["schema_version"],
             "reused_clean_chunks": len(stage.get("reused", {})),
@@ -4469,11 +4512,17 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         try:
-            normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
+            if compact_review.enabled() and user.startswith("Independent paired review, "):
+                normalized = compact_review.compile_response(answer, source, translation, next_part,
+                    review_chunks.find_previous_for_chunk(previous, next_part, source))
+            else:
+                normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
+        except compact_review.CompactReviewError as exc:
+            raise ModelError("compact reviewer evidence rejected: " + str(exc)) from exc
         except ValueError as exc:
             raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
         outcome, report, style = parse_literary_review(normalized)
-        reviewer_glossary = reviewer_glossary_proposals(answer)
+        reviewer_glossary = reviewer_glossary_proposals(normalized)
         if report.get("evidence_version") != 2:
             raise ModelError("automatic reviewer must return anchored v2 evidence")
         try:
@@ -4733,7 +4782,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                             status, unit_id, review_chunks.sha(source), proactive)
                         pinned_review_target = proactive
             chunked_review = (candidate_target is not None and
-                              (status.get("review_chunk_fallback_unit") == unit_id
+                              (compact_review.prefer_initial_chunks(source, candidate_target)
+                               or status.get("review_chunk_fallback_unit") == unit_id
                                or provider_partition or archived_stage
                                or pinned_review_target < review_chunks.TARGET_CHARS
                                or (coherent_batches.enabled() and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS)
@@ -4916,7 +4966,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             recoverable_code = helper.failure_code(str(exc))
             if str(exc) == "reviewer-anchored corrections intersect protected EPUB markers":
                 recoverable_code = "protected_review_anchor"
-            elif str(exc) == "all correction candidates were unsafe; no accepted patch":
+            elif str(exc) in {"all correction candidates were unsafe; no accepted patch",
+                              "corrector block reconstruction rejected"}:
                 recoverable_code = "unsafe_correction_exhausted"
             if (recoverable_code is None
                     and str(exc).startswith("typed correction repair invalid: ")):

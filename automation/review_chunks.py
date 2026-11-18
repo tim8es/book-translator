@@ -248,6 +248,22 @@ def new_stage(plan_value: dict, unit_id: str, revision: str) -> dict:
             "unit_id": unit_id, "workflow_revision": revision, "completed": {}}
 
 
+def _evidence_offset(text: str, anchor: dict) -> int:
+    quote=anchor["quote"]
+    occurrence=anchor["occurrence"]
+    if not isinstance(quote,str) or not quote or type(occurrence) is not int or occurrence<0:
+        raise ValueError("invalid review evidence anchor")
+    hits=[];cursor=0
+    while True:
+        at=text.find(quote,cursor)
+        if at<0:
+            break
+        hits.append(at);cursor=at+len(quote)
+    if occurrence>=len(hits) or (occurrence==0 and len(hits)!=1):
+        raise ValueError("review evidence quote is absent or ambiguous")
+    return hits[occurrence]
+
+
 def find_previous_for_chunk(previous: dict | None, chunk: dict, source: str) -> list[dict]:
     if not previous:
         return []
@@ -259,10 +275,7 @@ def find_previous_for_chunk(previous: dict | None, chunk: dict, source: str) -> 
         if item["resolved"]:
             continue
         anchor = item["source_anchor"]
-        quote = anchor["quote"]
-        if source.count(quote) != 1:
-            raise ValueError("previous review source quote is not unique")
-        offset = source.find(quote)
+        offset = _evidence_offset(source, anchor)
         if chunk["source_core"][0] <= offset < chunk["source_core"][1]:
             result.append({
                 "id": item["id"], "category": item["category"],
@@ -283,17 +296,15 @@ def validate_chunk_report(chunk: dict, report: dict, source: str,
         raise ValueError("chunk lacks complete reviewer checks")
     for item in report["findings"]:
         src = item["source_anchor"]
-        spos = source.find(src["quote"])
+        spos = _evidence_offset(source, src)
         if (spos < chunk["source_core"][0]
-                or spos >= chunk["source_core"][1]
-                or source.count(src["quote"]) != 1):
+                or spos >= chunk["source_core"][1]):
             raise ValueError("review finding not anchored to the assigned source core")
         tgt = item["translation_anchor"]
         if tgt is not None:
-            tpos = translation.find(tgt["quote"])
+            tpos = _evidence_offset(translation, tgt)
             if (tpos < chunk["translation_window"][0]
-                    or tpos >= chunk["translation_window"][1]
-                    or translation.count(tgt["quote"]) != 1):
+                    or tpos >= chunk["translation_window"][1]):
                 raise ValueError("review finding not anchored to the corresponding translation")
         if item["id"].startswith("chunk-"):
             raise ValueError("review chunk IDs must be local and unprefixed")

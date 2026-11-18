@@ -109,7 +109,15 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             reason = "wall-clock-budget"; break
         if status_path.exists():
             status = json.loads(status_path.read_text("utf-8"))
-        print(json.dumps({"arm":mode,"phase":status.get("phase"),"calls":status.get("model_calls_started",0)},ensure_ascii=False),flush=True)
+        prompt = status.get("prompt_context") or {}
+        retry = status.get("provider_retry") or {}
+        metrics = status.get("execution_metrics", {})
+        print(json.dumps({"arm":mode,"phase":status.get("phase"),"calls":status.get("model_calls_started",0),
+                          "unit_id":(status.get("active") or {}).get("unit_id"),
+                          "execution_mode":prompt.get("execution_mode"),"chunk":prompt.get("chunk_id"),
+                          "chunk_count":prompt.get("chunk_count"),"error_code":status.get("last_error_code"),
+                          "review_failure":(status.get("last_review_failure") or {}).get("kind"),
+                          "retry_code":retry.get("code"),"accepted":metrics.get("accepted_operations",{})},ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
