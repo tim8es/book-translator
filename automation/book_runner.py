@@ -37,6 +37,7 @@ import candidate_review
 import incremental_review
 import adaptive_budget
 import coherent_batches
+import transactional_quality
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -2269,10 +2270,11 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     staged_candidate = apply_correction_patches(translation, verified)
     check_markers(source, staged_candidate)
     try:
+        transactional_quality.require_safe(source, translation, staged_candidate, verified, unresolved, _anchor_position)
         correction_regression.require_no_new_repetitions(
             translation, staged_candidate)
     except correction_regression.CorrectionRegression as exc:
-        raise JobError("staged correction has a repeated-text regression") from exc
+        raise JobError("staged correction failed pre-acceptance quality guard: " + exc.code) from exc
     return path, stage
 
 
@@ -2285,6 +2287,91 @@ def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict]
         raise ModelError("corrector proposed too many unique literary decisions")
     return updated
 
+
+
+def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine: Path,
+                                   chapter: dict, record: dict, source: str,
+                                   translation: str, patches: list[dict], stage_path: Path) -> bool:
+    """One independently vetted group per durable checkpoint, never PASS."""
+    findings=[f for f in record["quality_report"]["findings"] if not f["resolved"]]
+    candidate=apply_correction_patches(translation,patches)
+    try:
+        transactional_quality.require_safe(source,translation,candidate,patches,findings,_anchor_position)
+        cases=transactional_quality.transaction_cases(source,translation,candidate,patches,findings,_anchor_position)
+        instructions,paths=role_contracts(engine,"reviewer")
+        groups=transactional_quality.group_prompts(cases,instructions)
+    except (correction_regression.CorrectionRegression,candidate_review.CandidateReviewError) as exc:
+        raise ModelError("transactional candidate cannot be safely verified: "+str(exc)) from exc
+    keys=[transactional_quality.group_key(*g) for g in groups]
+    if not keys:
+        raise JobError("empty transactional gate")
+    binding={"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+             "source_sha256":record["source_sha256"],"candidate_sha256":transactional_quality.digest(candidate),
+             "workflow_revision":status["workflow_revision"],"groups":keys,
+             "glossary_sha256":fingerprint(ROOT/"books"/slug/"glossary.md"),
+             "style_sha256":fingerprint(ROOT/"books"/slug/"style-guide.md")}
+    progress=status.get("transactional_gate",{})
+    if not isinstance(progress,dict) or progress.get("binding")!=binding:
+        progress={"binding":binding,"approved":[]}
+    approved=progress.get("approved")
+    if not isinstance(approved,list) or approved!=keys[:len(approved)]:
+        raise JobError("invalid transaction approval sequence")
+    status["transactional_gate"]=progress
+    if len(approved)==len(keys):
+        return True
+    count=status.get("model_calls_started",0)
+    if type(count) is not int or count<0:
+        raise JobError("invalid durable model call counter")
+    if count>=model_call_limit():
+        cli("release",slug,str(chapter["number"]),"--session-id",status["active"]["session_id"])
+        status["active"]=None
+        status.update({"state":"blocked","phase":"model-call-limit-reached",
+                       "last_error":"transactional gate call budget reached"})
+        checkpoint(job_id,status,slug)
+        return False
+    index=len(approved)
+    group,system,user=groups[index]
+    status.update({"model_calls_started":count+1,"phase":"candidate-semantic-preflight-reserved",
+                   "prompt_context":{"role":"reviewer","execution_mode":"transactional-block-veto",
+                                     "workflow_revision":status["workflow_revision"],"loaded_contracts":paths,
+                                     "case_count":len(group),"system_chars":len(system),"user_chars":len(user),
+                                     "group":index+1,"groups":len(groups)}})
+    checkpoint(job_id,status,slug)
+    answer=complete_for_job(status,"REVIEWER",system,user)
+    try:
+        rejected=candidate_review.parse_verdict(answer,[c["finding_id"] for c in group])
+    except candidate_review.CandidateReviewError as exc:
+        raise ModelError("transactional gate returned invalid evidence") from exc
+    if rejected:
+        rejected_ids={fid for case in group if case["finding_id"] in rejected for fid in case["patch_ids"]}
+        audit=status.setdefault("correction_regression_rejections",[])
+        for p in patches:
+            if p["finding_id"] in rejected_ids:
+                audit.append({"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+                              "finding_id":p["finding_id"],"patch_sha256":correction_regression.patch_fingerprint(p),
+                              "reason":"transactional-semantic-veto","at":clock()})
+        status["correction_regression_rejections"]=audit[-64:]
+        # Keep other edits staged, not accepted. A new candidate requires fresh approval.
+        stage=read_json(stage_path)
+        if stage.get("patches")!=patches:
+            raise JobError("transactional veto stage identity changed")
+        stage["patches"]=[p for p in patches if p["finding_id"] not in rejected_ids]
+        stage["glossary"]=[];stage["style_guide"]=[]
+        store_json(stage_path,stage)
+        status.pop("transactional_gate",None)
+        status["last_semantic_preflight"]={"unit_id":chapter["unit_id"],"decision":"veto",
+                                          "candidate_sha256":binding["candidate_sha256"],
+                                          "rejected_count":len(rejected_ids),"model_call":count+1}
+        checkpoint(job_id,status,slug)
+        raise ModelError("transactional independent gate vetoed candidate")
+    approved.append(keys[index])
+    status["phase"]="candidate-semantic-preflight-staged"
+    status["last_semantic_preflight"]={"unit_id":chapter["unit_id"],"decision":"candidate_only_approved",
+                                      "candidate_sha256":binding["candidate_sha256"],
+                                      "approved_groups":len(approved),"total_groups":len(keys),
+                                      "model_call":count+1}
+    checkpoint(job_id,status,slug)
+    return len(approved)==len(keys)
 
 
 def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
@@ -2303,6 +2390,9 @@ def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
         active = candidate_review.enabled()
     except candidate_review.CandidateReviewError as exc:
         raise JobError(str(exc)) from exc
+    if transactional_quality.enabled():
+        return verify_transactional_candidate(job_id, slug, status, engine, chapter, record,
+                                              source, translation, patches, stage_path)
     if not active:
         return True
     if not patches:
@@ -2647,6 +2737,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 conflicting.append(patch["finding_id"])
                 continue
             try:
+                transactional_quality.require_safe(source, translation, candidate, combined + [patch], unresolved, _anchor_position)
                 correction_regression.require_no_new_repetitions(
                     translation, candidate)
             except correction_regression.CorrectionRegression as exc:
@@ -2739,10 +2830,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
     try:
+        transactional_quality.require_safe(source, translation, translated, stage["patches"], unresolved, _anchor_position)
         correction_regression.require_no_new_repetitions(translation, translated)
     except correction_regression.CorrectionRegression as exc:
         # Do not leave a live claim stuck on an uncaught guard exception.
-        raise ModelError("final correction candidate introduces duplicated text") from exc
+        raise ModelError("final correction candidate failed quality guard: " + exc.code) from exc
     if not verify_semantic_correction_candidate(
             job_id, slug, status, engine, chapter, record, source,
             translation, stage["patches"], stage_path):
@@ -3553,6 +3645,10 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                                      if item["translation_anchor"] else None)}
             for item in unresolved
         ], ensure_ascii=False)
+        if transactional_quality.enabled():
+            pairs = [transactional_quality.correction_context(source, translation_raw, item, _anchor_position)
+                     for item in unresolved]
+            source_display += "\nCOMPLETE ALIGNED SOURCE AND TARGET BLOCKS (when available):\n" + json.dumps(pairs, ensure_ascii=False)
         if any(item["translation_anchor"] is None for item in unresolved):
             source_display += ("\nCURRENT TRANSLATION FOR OMITTED-PASSAGE PLACEMENT:\n"
                                + mask_translation_links(source, translation_raw))
@@ -3620,6 +3716,13 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         else:
             user += "\nCURRENT ACCEPTED TRANSLATION:\n" + mask_translation_links(source, translation_raw)
             user += "\nREVIEW FINDINGS TO CORRECT:\n" + json.dumps(findings, ensure_ascii=False)
+    if patch_mode and transactional_quality.enabled():
+        user += ("\nEXACT REPLACEMENT SAFETY: replacement is the entire text replacing the "
+                 "reviewer's exact quote, not just the corrected word. If the quote is a whole "
+                 "sentence or paragraph, return the whole corrected sentence or paragraph. "
+                 "Retain every unchanged clause, dialogue tag and detail. Never remove source-supported "
+                 "text to fix terminology or style. For insert operations return only inserted text. "
+                 "Complete aligned blocks are context, not new replacement coordinates.")
     if role == "reviewer":
         user += (
             "\nREVIEW REPORT CONTRACT: Use evidence_version=2 with exactly "
@@ -4108,7 +4211,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "without chunk prefix; "
         "categories omission|addition|meaning|modality|referent|terminology|"
         "register|voice|style|structure; severity minor|major|critical. "
-        "Anchors: {quote:string,occurrence:0}, translation anchor may "
+        "Anchors: {quote:string,occurrence:0} (optional block_id as defined below), translation anchor may "
         "be null only for omissions. An unresolved finding requires "
         "outcome=CORRECTIONS_REQUIRED. "
         "style_guide is [] or source-grounded entries with exactly "
@@ -4125,6 +4228,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "do not turn acceptable stylistic variants into blocking issues. "
         "First reconcile old findings before adding genuinely new ones. "
         "Never claim checks for passages you did not compare.")
+    user += coherent_batches.block_address_prompt(source, translation)
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
     return system, user
@@ -4914,6 +5018,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # claim-bound glossary reconciliation have succeeded.
             correction_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
+            status.pop("transactional_gate", None)
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)
