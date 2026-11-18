@@ -100,3 +100,49 @@ def stalled_rejected_reviews(ledger: dict, chapter: dict,
         "major_or_critical_counts": [item["major_or_critical"] for item in summaries],
         "action": "operator-attention-no-pass",
     }
+
+
+def costly_nonconvergence(ledger: dict, chapter: dict, status: dict) -> dict | None:
+    """Two rejected artifacts, measured cost and worsening severity; no PASS.
+
+    Use only observed work for this unit. This is a conservative early
+    attention candidate, not a literary judgment or an override of admission.
+    """
+    acceptance = chapter.get("translation_acceptance", {})
+    unit = chapter.get("unit_id")
+    if (not isinstance(acceptance, dict) or not isinstance(unit, str)
+            or not isinstance(status.get("correction_rounds"), dict)
+            or type(status["correction_rounds"].get(unit)) is not int
+            or status["correction_rounds"][unit] < 1):
+        return None
+    records = [r for r in ledger.get("records", [])
+               if isinstance(r, dict) and r.get("unit_id") == unit
+               and r.get("source_sha256") == acceptance.get("source_sha256")]
+    if len(records) < 2:
+        return None
+    a, b = records[-2:]
+    if (a.get("outcome") != "CORRECTIONS_REQUIRED" or b.get("outcome") != "CORRECTIONS_REQUIRED"
+            or a.get("translation_sha256") == b.get("translation_sha256")
+            or b.get("translation_sha256") != acceptance.get("translation_sha256")):
+        return None
+    first, last = _summary(a), _summary(b)
+    if (not first or not last or last["score"] <= first["score"]
+            or last["major_or_critical"] < first["major_or_critical"]):
+        return None
+    calls = [m for m in status.get("provider_call_metrics", [])
+             if isinstance(m, dict) and m.get("unit_id") == unit
+             and m.get("role") in {"reviewer", "corrector"}
+             and m.get("outcome") == "response"
+             and type(m.get("duration_ms")) is int and m["duration_ms"] >= 0]
+    elapsed = sum(m["duration_ms"] for m in calls)
+    if len(calls) < 10 or elapsed < 1_200_000:
+        return None
+    return {"reason": "costly-rejected-reviews-without-net-improvement",
+            "review_record_ids": [a["record_id"], b["record_id"]],
+            "translation_sha256": b["translation_sha256"],
+            "source_sha256": b["source_sha256"],
+            "severity_scores": [first["score"], last["score"]],
+            "unresolved_counts": [first["unresolved"], last["unresolved"]],
+            "major_or_critical_counts": [first["major_or_critical"], last["major_or_critical"]],
+            "observed_responses": len(calls), "observed_duration_ms": elapsed,
+            "action": "operator-attention-no-pass"}

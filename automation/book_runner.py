@@ -36,6 +36,9 @@ import correction_regression
 import candidate_review
 import incremental_review
 import adaptive_budget
+import execution_scheduler
+import execution_metrics
+import agent_orchestrator
 import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
@@ -259,6 +262,8 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
         if not isinstance(history, list):
             history = []
         status["provider_call_metrics"] = (history + [metric])[-40:]
+        if metric.get("outcome") != "response":
+            execution_metrics.provider(status, metric)
     # The transport returns string-compatible output and optional safe
     # metadata. Diagnostics must never contain source text or credentials.
     diagnostics = getattr(answer, "diagnostics", None)
@@ -273,6 +278,7 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
             "role": role.lower(),
             "unit_id": active.get("unit_id") if isinstance(active, dict) else None,
         }
+    execution_metrics.provider(status, metric)
     return answer
 
 
@@ -2376,6 +2382,45 @@ def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
     return True
 
 
+def correction_orchestrator_strategy(job_id: str, slug: str, status: dict,
+                                     engine: Path, chapter: dict, record: dict,
+                                     pending: list[dict], isolated: set[str]) -> str:
+    """One optional advisory call per unchanged rejected record; never a PASS."""
+    key = {"unit_id": chapter["unit_id"], "review_record_id": record["record_id"],
+           "translation_sha256": record["translation_sha256"]}
+    prior = status.get("correction_orchestrator_decision")
+    if isinstance(prior, dict) and all(prior.get(k) == v for k, v in key.items()):
+        return prior["strategy"] if prior.get("strategy") in agent_orchestrator.STRATEGIES else "batch_remaining"
+    if not os.environ.get("OMNIROUTE_ORCHESTRATOR_MODEL", "").strip():
+        return "batch_remaining"
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0 or count + 1 >= model_call_limit():
+        return "batch_remaining"
+    rules, _ = role_contracts(engine, "orchestrator")
+    system, user = agent_orchestrator.prompt(rules, pending, isolated)
+    status["correction_orchestrator_decision"] = {
+        **key, "strategy": "batch_remaining", "outcome": "reserved"}
+    status["model_calls_started"] = count + 1
+    status["phase"] = "orchestrator-advice-reserved"
+    checkpoint(job_id, status, slug)
+    started = time.monotonic()
+    try:
+        answer = complete("ORCHESTRATOR", system, user)
+        strategy = agent_orchestrator.parse(answer)
+        outcome = "accepted"
+    except (ModelError, ValueError):
+        strategy, outcome = "batch_remaining", "fallback"
+    duration = max(0, round((time.monotonic() - started) * 1000))
+    status["correction_orchestrator_decision"].update(
+        {"strategy": strategy, "outcome": outcome, "duration_ms": duration})
+    execution_metrics.provider(status, {"role": "orchestrator",
+        "request_chars": len(system) + len(user), "duration_ms": duration,
+        "outcome": "response" if outcome == "accepted" else "advice_error"})
+    status["phase"] = "orchestrator-advice-recorded"
+    checkpoint(job_id, status, slug)
+    return strategy
+
+
 def process_correction_batches(job_id: str, slug: str, status: dict, engine: Path,
                                chapter: dict, record: dict) -> tuple[str, list, list] | None:
     """Stage at most two small LLM calls per Actions checkpoint.
@@ -2414,8 +2459,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
+    continue_batches = execution_scheduler.continue_corrections()
+    isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
+                if continue_batches else set())
     initially_pending = [
-        item for item in unresolved if item["id"] not in already_staged]
+        item for item in unresolved if item["id"] not in already_staged | isolated]
     try:
         adaptive = adaptive_budget.enabled()
         initial_budget = (adaptive_budget.plan(
@@ -2432,7 +2480,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                                    CORRECTION_BATCH_CALLS_PER_CHECKPOINT))
     for _ in range(calls_this_checkpoint):
         completed = {patch["finding_id"] for patch in stage["patches"]}
-        pending = [finding for finding in unresolved if finding["id"] not in completed]
+        pending = [finding for finding in unresolved
+                   if finding["id"] not in completed | isolated]
         if not pending:
             break
         if adaptive:
@@ -2454,6 +2503,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             selected = pending[:CORRECTION_BATCH_SIZE]
         if adaptive_budget.provider_pressure(status, chapter["unit_id"], "corrector"):
             selected = selected[:1]
+        if continue_batches and isolated and len(pending) > 1:
+            strategy = correction_orchestrator_strategy(
+                job_id, slug, status, engine, chapter, record, pending, isolated)
+            if strategy == "isolate_remaining":
+                selected = selected[:1]
         system, user, _ = context(
             engine, slug, chapter, "corrector", correction_findings=selected)
         earlier = [item["finding_id"] for item in
@@ -2462,6 +2516,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                    and item.get("unit_id") == chapter["unit_id"]
                    and item.get("review_record_id") == record["record_id"]
                    and item.get("finding_id") in {f["id"] for f in selected}]
+        overlap = status.get("correction_overlap_deferred", {})
+        if (isinstance(overlap, dict) and overlap.get("unit_id") == chapter["unit_id"]
+                and overlap.get("review_record_id") == record["record_id"]):
+            earlier += [fid for fid in overlap.get("unapplied_finding_ids", [])
+                        if fid in {item["id"] for item in selected}]
         if earlier:
             user += (
                 "\nPREVIOUS UNSAFE CORRECTION CANDIDATES: The proposed "
@@ -2561,6 +2620,9 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                    and item.get("review_record_id") == record["record_id"]
                    and item.get("patch_sha256") == signature
                    for item in status.get("correction_regression_rejections", [])):
+                if continue_batches:
+                    regressed.append(patch["finding_id"])
+                    continue
                 raise ModelError("corrector repeated an unchanged rejected regression patch")
             try:
                 candidate = apply_correction_patches(translation, combined + [patch])
@@ -2602,7 +2664,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 regressed.append(patch["finding_id"])
             else:
                 combined.append(patch)
-        if not combined:
+        if not combined and not (continue_batches and (conflicting or regressed)):
             if conflicting:
                 # A review quote may cover a protected XHTML boundary.
                 raise ModelError(
@@ -2611,8 +2673,12 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             if regressed:
                 raise ModelError("corrector candidate introduces new duplicated text")
             raise ModelError("corrector proposed no safely non-overlapping patches")
-        updated_glossary = merge_unique_correction_decisions(stage["glossary"], glossary)
-        updated_style = merge_unique_correction_decisions(stage["style_guide"], style)
+        # Do not persist literary proposals from a batch with no accepted patch.
+        accepted_now = len(combined) > len(stage["patches"])
+        updated_glossary = merge_unique_correction_decisions(
+            stage["glossary"], glossary if accepted_now else [])
+        updated_style = merge_unique_correction_decisions(
+            stage["style_guide"], style if accepted_now else [])
         # Stage only safe edits. Conflicted findings remain unresolved and are
         # independently rechecked after a partial translation improvement.
         stage.update({"patches": combined, "glossary": updated_glossary,
@@ -2635,9 +2701,12 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 "review_record_id": record["record_id"],
                 "unapplied_finding_ids": regressed,
             }
+        if continue_batches and (conflicting or regressed):
+            isolated.update(conflicting + regressed)
+            execution_scheduler.record_isolated(status, chapter, record, isolated)
         status["phase"] = "correction-batch-staged"
         checkpoint(job_id, status, slug)
-        if conflicting or regressed:
+        if (conflicting or regressed) and not continue_batches:
             # Unsafe findings remain unresolved. Only accepted, disjoint
             # changes proceed to a fresh independent full source review.
             partial = apply_correction_patches(translation, combined)
@@ -2649,9 +2718,14 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 return None
             return partial, stage["glossary"], stage["style_guide"]
     covered = {patch["finding_id"] for patch in stage["patches"]}
-    if covered != {finding["id"] for finding in unresolved}:
+    if covered | isolated != {finding["id"] for finding in unresolved}:
         # Keep the live claim. Next bounded Action continues the same stage.
         return None
+    if not covered:
+        # A fresh bounded attempt must try a different candidate, not re-read
+        # an all-isolated empty stage. Keep hashed unsafe-patch rejections.
+        status.pop("correction_isolation", None)
+        raise ModelError("all correction candidates were unsafe; no accepted patch")
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
     try:
@@ -2923,6 +2997,47 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
             or correction_progressed(ledger, chapter))
 
 
+def queue_orchestrator_strategy(slug: str, status: dict, chapter: dict,
+                               evidence: dict) -> str:
+    """One optional choice per exact rejected record; canonical gate follows."""
+    fallback = "defer_attention"
+    unit = chapter["unit_id"]
+    key = evidence["review_record_ids"][-1]
+    decisions = status.setdefault("queue_orchestrator_decisions", {})
+    if not isinstance(decisions, dict):
+        raise JobError("invalid queue decisions")
+    old = decisions.get(unit)
+    if isinstance(old, dict) and old.get("record_id") == key:
+        return old["strategy"] if old.get("strategy") in agent_orchestrator.QUEUE_STRATEGIES else fallback
+    if not os.environ.get("OMNIROUTE_ORCHESTRATOR_MODEL", "").strip():
+        return fallback
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0 or count + 1 >= model_call_limit():
+        return fallback
+    rules, _ = role_contracts(pinned_scripts_dir().parent, "orchestrator")
+    system, user = agent_orchestrator.queue_prompt(
+        rules, evidence, status.get("queue_snapshot", {}))
+    decisions[unit] = {"record_id": key, "strategy": fallback, "outcome": "reserved"}
+    status["model_calls_started"] = count + 1
+    status["phase"] = "queue-advice-reserved"
+    checkpoint(status["job_id"], status, slug)
+    started = time.monotonic()
+    try:
+        answer = complete("ORCHESTRATOR", system, user)
+        strategy = agent_orchestrator.parse(answer, agent_orchestrator.QUEUE_STRATEGIES)
+        outcome = "accepted"
+    except (ModelError, ValueError):
+        strategy, outcome = fallback, "fallback"
+    duration = max(0, round((time.monotonic() - started) * 1000))
+    decisions[unit].update({"strategy": strategy, "outcome": outcome, "duration_ms": duration})
+    execution_metrics.provider(status, {"role": "orchestrator",
+        "request_chars": len(system) + len(user), "duration_ms": duration,
+        "outcome": "response" if outcome == "accepted" else "advice_error"})
+    status["phase"] = "queue-advice-recorded"
+    checkpoint(status["job_id"], status, slug)
+    return strategy
+
+
 def defer_stalled_review(slug: str, status: dict, ledger: dict,
                          chapter: dict) -> bool:
     """Escalate repeated rejected reviews instead of paying for another loop.
@@ -2938,6 +3053,15 @@ def defer_stalled_review(slug: str, status: dict, ledger: dict,
             > MAX_CORRECTIONS):
         return False
     report = review_convergence.stalled_rejected_reviews(ledger, chapter)
+    if (report is None
+            and os.environ.get("BOOK_TRANSLATOR_QUEUE_BUDGET") == "on"
+            and status.get("queue_snapshot", {}).get("extracted", 0) > 0
+            and status.get("active") is None
+            and isinstance(status.get("job_id"), str)
+            and (pinned_scripts_dir() / "workflow" / "attention.py").exists()):
+        report = review_convergence.costly_nonconvergence(ledger, chapter, status)
+        if report is not None and queue_orchestrator_strategy(slug, status, chapter, report) == "continue_same":
+            return False
     if report is None:
         return False
     # The actual current ledger, not remembered failure counters, is used.
@@ -3187,6 +3311,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
     literary Reviewer PASS: the existing verified approval path handles them.
     """
     _, ledger, chapters = chapter_data(slug)
+    status["queue_snapshot"] = execution_metrics.queue_snapshot(chapters, ledger)
     if approved_unit_ids(slug, chapters):
         return next_operation(slug, status)
     # Canonical vNext owns the durable attention queue and selection. Older
@@ -4004,18 +4129,31 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                       if isinstance(prior_plan, dict) else None)
     # Keep an in-flight stage on its original planner, even if opt-in settings
     # change. Neither setting changes a book's canonical literary revision.
-    if prior_revision not in {None, review_chunks.HELPER_REVISION,
-                             review_chunks.ALIGNMENT_REVISION}:
+    if prior_revision not in ({None, review_chunks.HELPER_REVISION} | review_chunks.ALIGNED_REVISIONS):
         raise JobError("unsupported durable reviewer helper revision")
     alignment_mode = os.environ.get("BOOK_TRANSLATOR_MARKER_ALIGNMENT", "off")
     incremental_mode = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW", "off")
     if alignment_mode not in {"on", "off"} or incremental_mode not in {"on", "off"}:
         raise JobError("review alignment/incremental flags must be on or off")
     pressure = adaptive_budget.provider_pressure(status, chapter["unit_id"], "reviewer")
-    marker_plan = (prior_revision == review_chunks.ALIGNMENT_REVISION
+    marker_plan = (prior_revision in review_chunks.ALIGNED_REVISIONS
                    or (prior_revision is None and
                        (alignment_mode == "on" or incremental_mode == "on" or pressure)))
-    planner = review_chunks.plan_aligned if marker_plan else review_chunks.plan
+    stable = (prior_revision == review_chunks.STABLE_ALIGNMENT_REVISION
+              or (prior_revision is None and incremental_mode == "on"))
+    remembered = execution_scheduler.review_target(status, chapter["unit_id"],
+                                                   review_chunks.sha(source))
+    target = min(remembered, adaptive_budget.review_target_chars(pressure))
+    def planner(original, translated, *, target_chars, keep_count=False):
+        if marker_plan:
+            count = (len(prior_plan["chunks"]) if keep_count and stable
+                     and prior_revision == review_chunks.STABLE_ALIGNMENT_REVISION
+                     and prior_plan.get("source_sha256") == review_chunks.sha(original)
+                     else None)
+            return review_chunks.plan_aligned(original, translated,
+                                              target_chars=target_chars,
+                                              stable=stable, count=count)
+        return review_chunks.plan(original, translated, target_chars=target_chars)
     try:
         # Preserve successful staged parts and their exact coverage. A fresh
         # plan (or a still-empty plan) may shrink after repeated slow failures.
@@ -4027,20 +4165,22 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             plan = prior_plan
             if pressure and not stage.get("completed"):
                 smaller = planner(source, translation,
-                                  target_chars=adaptive_budget.review_target_chars(pressure))
+                                  target_chars=target)
                 if len(smaller["chunks"]) > len(plan["chunks"]):
                     stage = None
                     plan = smaller
         else:
-            plan = planner(source, translation,
-                           target_chars=adaptive_budget.review_target_chars(pressure))
+            plan = planner(source, translation, target_chars=target, keep_count=True)
     except ValueError as exc:
         raise JobError("cannot safely partition independent review: " + str(exc)) from exc
+    if pressure or remembered < review_chunks.TARGET_CHARS:
+        execution_scheduler.record_review_target(
+            status, chapter["unit_id"], review_chunks.sha(source), target)
     binding = None
     if ((stage is not None and isinstance(stage, dict)
          and stage.get("schema_version") == incremental_review.STAGE_VERSION)
             or (stage is None and incremental_mode == "on"
-                and plan["helper_revision"] == review_chunks.ALIGNMENT_REVISION)):
+                and plan["helper_revision"] in review_chunks.ALIGNED_REVISIONS)):
         try:
             reviewer_contract, _ = role_contracts(engine, "reviewer")
             binding = incremental_review.binding(
@@ -4428,9 +4568,27 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 except ValueError:
                     # Cannot safely split this input; retain normal retry/failover.
                     pass
+            pinned_review_target = execution_scheduler.review_target(
+                status, unit_id, review_chunks.sha(source))
+            incremental_enabled = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW") == "on"
+            archived_stage = (review_chunk_stage_path(slug, unit_id).is_file()
+                              and incremental_enabled)
+            if incremental_enabled and candidate_target is not None and not archived_stage:
+                proactive = execution_scheduler.proactive_review_target(status, len(system) + len(user))
+                if proactive < pinned_review_target:
+                    try:
+                        review_chunks.plan_aligned(source, candidate_target,
+                                                   target_chars=proactive, stable=True)
+                    except ValueError:
+                        pass
+                    else:
+                        execution_scheduler.record_review_target(
+                            status, unit_id, review_chunks.sha(source), proactive)
+                        pinned_review_target = proactive
             chunked_review = (candidate_target is not None and
                               (status.get("review_chunk_fallback_unit") == unit_id
-                               or provider_partition
+                               or provider_partition or archived_stage
+                               or pinned_review_target < review_chunks.TARGET_CHARS
                                or (len(source) <= MAX_DIRECT_REVIEW_CHARS
                                    and should_chunk_review(source, candidate_target, scoped_count))))
         if (role == "reviewer" and not chunked_review
@@ -4600,6 +4758,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             recoverable_code = helper.failure_code(str(exc))
             if str(exc) == "reviewer-anchored corrections intersect protected EPUB markers":
                 recoverable_code = "protected_review_anchor"
+            elif str(exc) == "all correction candidates were unsafe; no accepted patch":
+                recoverable_code = "unsafe_correction_exhausted"
             if (recoverable_code is None
                     and str(exc).startswith("typed correction repair invalid: ")):
                 recoverable_code = "invalid_typed_repair"
@@ -4731,6 +4891,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # claim-bound glossary reconciliation have succeeded.
             correction_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
+            status.pop("correction_isolation", None)
+            status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)
         if role == "corrector":
             rounds = status["correction_rounds"]
@@ -4759,6 +4921,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     # Historical protocol errors from other roles never select its model.
     status.setdefault("role_protocol_failures", {}).pop(f"{unit_id}:{role}", None)
     status["phase"] = role + "-completed"
+    execution_metrics.accepted(status, role, outcome if role == "reviewer" else None)
     status["prompt_context"] = prompt_context
     status.pop("blocked_unit_id", None)
     status.pop("last_error", None)
@@ -5145,6 +5308,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
         elif role == "promote":
             cli("accept-review", slug, str(chapter["number"]))
             status["phase"] = "review-promoted"
+            execution_metrics.accepted(status, "promote")
             checkpoint(job_id, status, slug)
         elif role == "finalize":
             finalize(job_id, slug, status)
@@ -5236,7 +5400,15 @@ def main() -> int:
     parser.add_argument("--job-id")
     parser.add_argument("--resume-blocked", action="store_true")
     parser.add_argument("--resume-interrupted", action="store_true")
+    parser.add_argument("--batch", action="store_true")
     args = parser.parse_args()
+    if args.batch:
+        if args.select or args.book_key or args.retry_status or args.retry_at or args.list_ready_json:
+            parser.error("batch requires an explicit book job")
+        job_id = safe_id(args.job_id)
+        return execution_scheduler.run_checkpoints(
+            ROOT, Path(__file__).resolve(), job_id,
+            resume_blocked=args.resume_blocked, resume_interrupted=args.resume_interrupted)
     if args.retry_status:
         if (args.select or args.book_key or args.list_ready_json
                 or args.resume_blocked or args.resume_interrupted
