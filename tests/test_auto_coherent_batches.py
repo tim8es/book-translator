@@ -81,3 +81,26 @@ class CoherentTests(unittest.TestCase):
             self.assertFalse(coherent.prefer_direct_review(30000, 60000, 49000, 48000, 210000))
         with patch.dict(os.environ, {"BOOK_TRANSLATOR_COHERENT_BATCHES": "off"}):
             self.assertFalse(coherent.prefer_direct_review(30000, 60000, 28000, 48000, 210000))
+
+    def test_block_address_adapter(self):
+        import json
+        s = "<!-- bt-block:000001 -->\nA phrase.\n<!-- bt-block:000002 -->\nA phrase."
+        t = "<!-- bt-block:000001 -->\nOld phrase.\n<!-- bt-block:000002 -->\nOld phrase."
+        report = {"findings": [{"source_anchor": {"quote":"A phrase.", "occurrence":0, "block_id":"000002"},
+                                "translation_anchor": {"quote":"Old phrase.", "occurrence":0, "block_id":"000002"},
+                                "detail":"Do not change this"}]}
+        raw = json.dumps(report)
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_COHERENT_BATCHES":"on"}):
+            normalized = json.loads(coherent.normalize_block_addresses(raw,s,t))
+            self.assertEqual(normalized["findings"][0]["source_anchor"], {"quote":"A phrase.","occurrence":1})
+            self.assertEqual(normalized["findings"][0]["translation_anchor"], {"quote":"Old phrase.","occurrence":1})
+            self.assertEqual(normalized["findings"][0]["detail"], "Do not change this")
+            self.assertIn("000", s)
+            with self.assertRaises(ValueError):
+                coherent.normalize_block_addresses(raw.replace("000002","000001"),s,t)
+            with self.assertRaises(ValueError):
+                coherent.normalize_block_addresses(raw,s,t.replace("000002","000003"))
+            with self.assertRaises(ValueError):
+                coherent.normalize_block_addresses(raw.replace("Old phrase.","Invented"),s,t)
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_COHERENT_BATCHES":"off"}):
+            self.assertEqual(coherent.normalize_block_addresses(raw,s,t), raw)

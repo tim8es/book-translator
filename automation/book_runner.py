@@ -3802,6 +3802,8 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                      + "\nCheck each candidate against the original and contextual "
                        "target-language morphology. Do not blindly change a "
                        "translation or accept a warning as proof of an error.")
+    if role == "reviewer" and not bounded_review:
+        user += coherent_batches.block_address_prompt(source, translation_raw)
     if (role == "reviewer" and len(source) > MAX_CHAPTER_CHARS
             and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS):
         raise JobError("complete reviewer prompt exceeds safe budget; bounded review required")
@@ -3882,7 +3884,11 @@ def checked_reviewer_response(answer: str, *, review_context: str, source: str,
                               translation: bytes, previous_record: dict | None,
                               claim: dict) -> tuple[str, dict, list[dict]]:
     """Validate a complete reviewer report before any canonical ledger write."""
-    outcome, report, style = parse_literary_review(answer, context=review_context)
+    try:
+        normalized = coherent_batches.normalize_block_addresses(answer, source, translation.decode("utf-8"))
+    except ValueError as exc:
+        raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
+    outcome, report, style = parse_literary_review(normalized, context=review_context)
     if report.get("evidence_version") != 2:
         raise ModelError("automatic reviewer must return anchored v2 evidence")
     try:
@@ -4337,7 +4343,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         status["prompt_context"] = prompt_context
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
-        outcome, report, style = parse_literary_review(answer)
+        try:
+            normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
+        except ValueError as exc:
+            raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
+        outcome, report, style = parse_literary_review(normalized)
         reviewer_glossary = reviewer_glossary_proposals(answer)
         if report.get("evidence_version") != 2:
             raise ModelError("automatic reviewer must return anchored v2 evidence")
