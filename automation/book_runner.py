@@ -81,8 +81,13 @@ PUBLIC_STRUCTURAL_HELPER_REVISION = "4c584fe5534871cd05aa851d9b7bdbfa696d0edd"
 # Separate immutable public compatibility helper: does NOT change a book's
 # pinned literary revision or reviewer contract.
 PUBLIC_CORRECTION_HELPER_REVISION = "abe8cb030c2e792e2543fdbd2c0295cd9e629024"
-STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT = 2
+STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT = 20
 STRUCTURAL_MODEL_SEGMENTS_PER_CALL = 24
+# Do not start a request unless the 25-minute work window still has room
+# for the transport's 900-second timeout plus a small publication margin.
+STRUCTURAL_WORK_SECONDS = 25 * 60
+STRUCTURAL_CALL_RESERVE_SECONDS = 16 * 60
+STRUCTURAL_GROW_AFTER = 2
 DEFAULT_MODEL_CALL_LIMIT = 36
 # shortcut: focused review falls back to a full review above 30k chars; raise only if measured.
 MAX_FOCUSED_CONTEXT_CHARS = 30_000
@@ -241,11 +246,35 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
     # A route name, not model ID or credential, is safe in metadata.
     status["provider_model_route"] = "fallback" if route != role else "primary"
     status.pop("model_response_diagnostics", None)
-    answer = complete(route, system, user)
+    metrics = status.setdefault("model_role_metrics", {})
+    if not isinstance(metrics, dict):
+        raise JobError("invalid model role metrics")
+    role_metrics = metrics.setdefault(current_role, {"responses": 0, "errors": 0,
+                                                    "elapsed_ms": 0, "prompt_tokens": 0,
+                                                    "completion_tokens": 0, "usage_responses": 0})
+    if not isinstance(role_metrics, dict) or any(
+            type(role_metrics.get(k)) is not int or role_metrics[k] < 0
+            for k in ("responses", "errors", "elapsed_ms", "prompt_tokens",
+                      "completion_tokens", "usage_responses")):
+        raise JobError("invalid model role metric counters")
+    started = time.monotonic()
+    try:
+        answer = complete(route, system, user)
+    except ModelError:
+        role_metrics["errors"] += 1
+        raise
+    finally:
+        role_metrics["elapsed_ms"] += max(0, int((time.monotonic() - started) * 1000))
+    role_metrics["responses"] += 1
     # The transport returns string-compatible output and optional safe
     # metadata. Diagnostics must never contain source text or credentials.
     diagnostics = getattr(answer, "diagnostics", None)
     if isinstance(diagnostics, dict):
+        if all(type(diagnostics.get(k)) is int and diagnostics[k] >= 0
+               for k in ("prompt_tokens", "completion_tokens")):
+            role_metrics["usage_responses"] += 1
+            for k in ("prompt_tokens", "completion_tokens"):
+                role_metrics[k] += diagnostics[k]
         status["model_response_diagnostics"] = {
             **diagnostics,
             "route": status["provider_model_route"],
@@ -2019,31 +2048,140 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
     return path, stage
 
 
+def structural_batch_state(status: dict, unit_id: str, source_sha256: str) -> dict:
+    """Durable adaptive scheduling only; never an acceptance record."""
+    units = status.setdefault("structural_adaptive_batches", {})
+    legacy = status.get("structural_protocol_fallback_units", {})
+    if not isinstance(units, dict) or not isinstance(legacy, dict):
+        raise JobError("invalid structural protocol fallback checkpoint")
+    entry = units.get(unit_id)
+    maximum = STRUCTURAL_MODEL_SEGMENTS_PER_CALL
+    if entry is not None and not isinstance(entry, dict):
+        raise JobError("invalid structural adaptive batch checkpoint")
+    if entry is None or entry.get("source_sha256") != source_sha256:
+        migrated = legacy.get(unit_id) == source_sha256
+        entry = {"source_sha256": source_sha256,
+                 "limit": min(3, maximum) if migrated else maximum,
+                 "success_streak": 0, "single_failures": 0,
+                 "calls": 0, "staged_segments": 0, "rejected_batches": 0,
+                 "partial_batches": 0, "legacy_single_mode": migrated}
+        units[unit_id] = entry
+    for key in ("limit", "success_streak", "single_failures", "calls",
+                "staged_segments", "rejected_batches", "partial_batches"):
+        value = entry.get(key)
+        if type(value) is not int or value < 0:
+            raise JobError("invalid adaptive structural batch counter")
+    if not 1 <= entry["limit"] <= maximum or entry["success_streak"] >= STRUCTURAL_GROW_AFTER:
+        raise JobError("invalid adaptive structural batch limit")
+    return entry
+
+
+def structural_batch_feedback(entry: dict, selected_count: int, staged_count: int,
+                              error_code: str | None = None) -> None:
+    """Shrink on incomplete/invalid output; cautiously regain throughput."""
+    if error_code or staged_count != selected_count:
+        entry["success_streak"] = 0
+        entry["limit"] = max(1, min(entry["limit"], selected_count) // 2)
+        entry["last_error_code"] = error_code or "partial_batch"
+        if staged_count:
+            entry["partial_batches"] += 1
+        else:
+            entry["rejected_batches"] += 1
+        if selected_count == 1 and not staged_count:
+            entry["single_failures"] += 1
+        else:
+            entry["single_failures"] = 0
+    else:
+        entry["single_failures"] = 0
+        entry["success_streak"] += 1
+        entry.pop("last_error_code", None)
+        if entry["success_streak"] >= STRUCTURAL_GROW_AFTER:
+            entry["limit"] = min(STRUCTURAL_MODEL_SEGMENTS_PER_CALL, entry["limit"] * 2)
+            entry["success_streak"] = 0
+    entry["staged_segments"] += staged_count
+
+
+def structural_local_batch(selected: list[dict]) -> tuple[list[dict], dict]:
+    """Only the adapter sees durable IDs; aliases are scoped to this request."""
+    aliases = {str(i): item["id"] for i, item in enumerate(selected, 1)}
+    if len(set(aliases.values())) != len(selected):
+        raise JobError("duplicate source segment in structural model request")
+    return ([{"id": alias, "source": item["source"]}
+             for alias, item in zip(aliases, selected)], aliases)
+
+
+def parse_structural_local_batch(answer: str, aliases: dict, helper) -> tuple[dict, list, list]:
+    """Never infer an ID by position or accept a model-generated durable ID."""
+    value = answer.strip()
+    if value.startswith("```"):
+        lines = value.splitlines()
+        if len(lines) < 3 or not lines[-1].strip().startswith("```"):
+            raise ValueError("incomplete structural translation JSON")
+        value = "\n".join(lines[1:-1])
+    try:
+        data = json.loads(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("structural translator must return JSON") from exc
+    if not isinstance(data, dict) or set(data) != {"segments", "glossary", "style_guide"}:
+        raise ValueError("structural translator JSON schema mismatch")
+    raw = data["segments"]
+    if (not isinstance(raw, list) or not raw or len(raw) > len(aliases)
+            or not isinstance(data["glossary"], list)
+            or not isinstance(data["style_guide"], list)):
+        raise ValueError("structural translation omitted or overflowed a batch")
+    seen = set()
+    for item in raw:
+        if (not isinstance(item, dict) or set(item) != {"id", "translation"}
+                or not isinstance(item["id"], str) or item["id"] not in aliases
+                or item["id"] in seen):
+            raise ValueError("unknown or duplicate translation segment")
+        seen.add(item["id"])
+        item["id"] = aliases[item["id"]]
+    # Preserve the immutable helper's markup/text validation and durable IDs.
+    return helper.parse_batch(json.dumps(data, ensure_ascii=False), list(aliases.values()))
+
+
 def process_structural_translation(job_id: str, slug: str, status: dict,
                                    engine: Path, chapter: dict, helper,
-                                   plan: dict) -> tuple[str, list, list] | None:
-    """Bounded public-helper execution, book-scoped durable staging, no lost work."""
+                                   plan: dict, *, claim_expires_at: str | None = None
+                                   ) -> tuple[str, list, list] | None:
+    """Bound actual paid calls and time; retain every validated staged span."""
+    started = time.monotonic()
     book = ROOT / "books" / slug
     source = (book / chapter["source_path"]).read_bytes().decode("utf-8")
     if hashlib.sha256(source.encode("utf-8")).hexdigest() != plan["source_sha256"]:
         raise JobError("source changed during structural translation")
     stage_path, stage = load_structural_stage(slug, chapter, status, helper, plan)
     status["structural_helper_revision"] = PUBLIC_STRUCTURAL_HELPER_REVISION
+    unit_id = chapter["unit_id"]
+    entry = structural_batch_state(status, unit_id, plan["source_sha256"])
+    expiry = (datetime.fromisoformat(claim_expires_at.replace("Z", "+00:00"))
+              if claim_expires_at else None)
+    if expiry is not None and expiry.tzinfo is None:
+        raise JobError("structural claim expiry is missing timezone")
     for _ in range(STRUCTURAL_MODEL_CALLS_PER_CHECKPOINT):
-        fallback = status.get("structural_protocol_fallback_units", {})
-        if not isinstance(fallback, dict):
-            raise JobError("invalid structural protocol fallback checkpoint")
-        batch_limit = (1 if fallback.get(chapter["unit_id"]) == plan["source_sha256"]
-                       else STRUCTURAL_MODEL_SEGMENTS_PER_CALL)
         try:
-            selected = helper.next_spans(
-                plan, stage["segments"], limit=batch_limit)
+            selected = helper.next_spans(plan, stage["segments"], limit=entry["limit"])
         except ValueError as exc:
             raise JobError("invalid source-bound structural translation progress") from exc
         if not selected:
             break
-        system, user, _ = context(
-            engine, slug, chapter, "translator", structural_segments=selected)
+        if time.monotonic() - started + STRUCTURAL_CALL_RESERVE_SECONDS >= STRUCTURAL_WORK_SECONDS:
+            break
+        if expiry is not None and (expiry - datetime.now(timezone.utc)).total_seconds() <= STRUCTURAL_CALL_RESERVE_SECONDS:
+            # A subsequent canonical claim can resume this exact source-bound stage.
+            cli("release", slug, str(chapter["number"]), "--session-id",
+                status["active"]["session_id"])
+            status.update({"active": None, "phase": "structural-claim-yielded"})
+            checkpoint(job_id, status, slug)
+            return None
+        local, aliases = structural_local_batch(selected)
+        system, user, _ = context(engine, slug, chapter, "translator",
+                                  structural_segments=local)
+        if entry.get("last_error_code"):
+            system += ("\nPrevious batch was incomplete or invalid. Translate each supplied "
+                       "source span fully; copy its exact request-local string ID once, "
+                       "without using IDs from earlier requests. Return only the required JSON.")
         prompt_context = {
             "role": "translator",
             "workflow_revision": status["workflow_revision"],
@@ -2054,91 +2192,54 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             "execution_mode": "shared-structural-segments",
             "helper_revision": PUBLIC_STRUCTURAL_HELPER_REVISION,
             "batch_segment_count": len(selected),
+            "adaptive_batch_limit": entry["limit"],
+            "segment_id_protocol": "request-local-v1",
         }
         count = status.get("model_calls_started", 0)
         if type(count) is not int or count < 0:
             raise JobError("invalid durable model call counter")
         if count >= model_call_limit():
-            cli("release", slug, str(chapter["number"]),
-                "--session-id", status["active"]["session_id"])
+            cli("release", slug, str(chapter["number"]), "--session-id", status["active"]["session_id"])
             status["active"] = None
             status.update({"state": "blocked", "phase": "model-call-limit-reached",
                            "last_error": "configured model invocation cap reached"})
             checkpoint(job_id, status, slug)
             return None
-        status.update({"model_calls_started": count + 1,
-                       "phase": "model-call-reserved",
+        entry["calls"] += 1
+        status.update({"model_calls_started": count + 1, "phase": "model-call-reserved",
                        "prompt_context": prompt_context})
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "TRANSLATOR", system, user)
         try:
-            translated, new_glossary, new_style = helper.parse_batch(
-                answer, [item["id"] for item in selected])
+            translated, new_glossary, new_style = parse_structural_local_batch(answer, aliases, helper)
         except ValueError as exc:
             code = helper.protocol_failure_code(str(exc))
             if code is None:
-                raise ModelError("structural translator rejected model output: "
-                                 + str(exc)) from exc
-            # Bad generated output cannot authorize a write. Keep every
-            # previously staged span and use single-span batches from now on.
-            status.setdefault("structural_protocol_fallback_units", {})[
-                chapter["unit_id"]] = plan["source_sha256"]
+                raise ModelError("structural translator rejected model output: " + str(exc)) from exc
+            structural_batch_feedback(entry, len(selected), 0, code)
             status["last_error_code"] = code
-            count = status.get("model_calls_started", 0)
-            if type(count) is not int or count >= model_call_limit():
-                raise ModelError("structural protocol repair exhausted paid model budget") from exc
-            focused = selected[:1]
-            repair_system, repair_user, _ = context(
-                engine, slug, chapter, "translator", structural_segments=focused)
-            status["model_calls_started"] = count + 1
-            status["phase"] = "structural-json-repair-reserved"
-            status["prompt_context"] = {
-                **prompt_context, "repair_code": code,
-                "batch_segment_count": len(focused),
-                "execution_mode": "shared-structural-json-repair",
-            }
+            status["phase"] = "structural-batch-rejected"
             checkpoint(job_id, status, slug)
-            repaired = complete_for_job(
-                status, "TRANSLATOR", repair_system,
-                repair_user + "\nREJECTED STRUCTURAL OUTPUT:\n"
-                + helper.repair_guidance(focused, str(exc)))
-            try:
-                translated, new_glossary, new_style = helper.parse_batch(
-                    repaired, [item["id"] for item in focused])
-            except ValueError as repair_exc:
-                raise ModelError("structural translator repair rejected: "
-                                 + str(repair_exc)) from repair_exc
-        incomplete = incomplete_structural_batch(selected, translated)
-        if incomplete:
-            reserved = status["model_calls_started"]
-            if reserved >= model_call_limit():
-                raise ModelError("structural translation omitted content and exhausted model budget")
-            status["model_calls_started"] = reserved + 1
-            status["phase"] = "structural-span-repair-reserved"
-            prompt_context["short_output_repair"] = len(incomplete)
-            checkpoint(job_id, status, slug)
-            # The second invocation sees only the rejected source spans,
-            # not all three again. Keep individually acceptable initial
-            # translations so a failed sibling does not erase good work.
-            rejected = [item for item in selected if item["id"] in incomplete]
-            repair_system, repair_user, _ = context(
-                engine, slug, chapter, "translator", structural_segments=rejected)
-            repaired = complete_for_job(
-                status, "TRANSLATOR", repair_system,
-                repair_user + "\nREJECTED SHORT TRANSLATION: Translate EVERY "
-                "sentence and preserve paragraph boundaries for the supplied "
-                "source span(s). Do not summarize or omit passages; return "
-                "the normal source-identified JSON output.")
-            try:
-                corrected, extra_glossary, extra_style = helper.parse_batch(
-                    repaired, [item["id"] for item in rejected])
-            except ValueError as exc:
+            if entry["single_failures"] >= 2:
+                entry["single_failures"] = 0
                 raise ModelError("structural translator repair rejected: " + str(exc)) from exc
-            translated.update(corrected)
-            new_glossary = merge_unique_correction_decisions(new_glossary, extra_glossary)
-            new_style = merge_unique_correction_decisions(new_style, extra_style)
-            if incomplete_structural_batch(selected, translated):
+            continue
+        incomplete = incomplete_structural_batch(selected, translated)
+        # Safe, individually validated siblings survive a partial/short response.
+        for segment_id in incomplete:
+            translated.pop(segment_id)
+        if incomplete:
+            # Do not retain memory proposed against a rejected translation.
+            new_glossary, new_style = [], []
+        if not translated:
+            structural_batch_feedback(entry, len(selected), 0, "translation_coverage")
+            status["phase"] = "structural-batch-rejected"
+            status["last_error_code"] = "translation_coverage"
+            checkpoint(job_id, status, slug)
+            if entry["single_failures"] >= 2:
+                entry["single_failures"] = 0
                 raise ModelError("focused structural translator repair still omitted source text")
+            continue
         _, new_glossary, new_style = parse_translation(json.dumps({
             "translation": "validated placeholder",
             "glossary": new_glossary, "style_guide": new_style,
@@ -2148,29 +2249,28 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             helper.next_spans(plan, combined)
         except ValueError as exc:
             raise ModelError("structural translation batch is not source-bound") from exc
-        merged_glossary = merge_unique_correction_decisions(stage["glossary"],
-                                                             new_glossary)
-        merged_style = merge_unique_correction_decisions(stage["style_guide"],
-                                                          new_style)
-        stage.update({"segments": combined, "glossary": merged_glossary,
-                      "style_guide": merged_style})
+        stage.update({"segments": combined,
+                      "glossary": merge_unique_correction_decisions(stage["glossary"], new_glossary),
+                      "style_guide": merge_unique_correction_decisions(stage["style_guide"], new_style)})
         store_json(stage_path, stage)
+        structural_batch_feedback(entry, len(selected), len(translated),
+                                  "translation_coverage" if incomplete else None)
         status["structural_segment_progress"] = {
-            "unit_id": chapter["unit_id"],
-            "source_sha256": plan["source_sha256"],
-            "completed": len(combined),
-            "total": len(helper.spans(plan)),
+            "unit_id": unit_id, "source_sha256": plan["source_sha256"],
+            "completed": len(combined), "total": len(helper.spans(plan)),
         }
+        if entry.get("last_error_code"):
+            status["last_error_code"] = entry["last_error_code"]
+        else:
+            status.pop("last_error_code", None)
         status["phase"] = "structural-segments-staged"
         checkpoint(job_id, status, slug)
     try:
-        remaining = helper.next_spans(plan, stage["segments"])
-        if remaining:
+        if helper.next_spans(plan, stage["segments"]):
             return None
         result = helper.render(plan, stage["segments"])
     except ValueError as exc:
         raise ModelError("structural translation assembly rejected: " + str(exc)) from exc
-    # The book's pinned engine still owns canonical acceptance and review.
     check_markers(source, result)
     status.setdefault("prompt_context", {
         "role": "translator", "execution_mode": "shared-structural-segments",
@@ -4414,7 +4514,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         elif structural_plan is not None:
             batched = process_structural_translation(
                 job_id, slug, status, engine, chapter,
-                structural_helper, structural_plan)
+                structural_helper, structural_plan, claim_expires_at=owned.get("expires_at"))
             if batched is None:
                 return
             translated, proposed_glossary, proposed_style = batched
