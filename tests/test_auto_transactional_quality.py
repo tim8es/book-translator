@@ -74,5 +74,22 @@ class TransactionalQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(candidate_review.CandidateReviewError,"unaligned transaction"):
             q.transaction_cases("s"*10000,"t"*10000,"u"*10000,[edit(self.f,"Новый текст")],[self.f],book_runner._anchor_position)
 
+    def test_exact_case_cache_invalidates_changed_context_or_memory(self):
+        binding={"source":"s","baseline":"b","policy":"p"}
+        case={"finding_id":"one","candidate_translation_excerpt":{"block":"good","after_context":"same"}}
+        status={}
+        cache=q.approval_cache(status,binding)
+        q.remember_approved(cache,[case],binding,[])
+        self.assertIn(q.approval_key(case,binding),cache["approved"])
+        case["candidate_translation_excerpt"]["after_context"]="changed"
+        self.assertNotIn(q.approval_key(case,binding),cache["approved"])
+        self.assertEqual(q.approval_cache(status,{**binding,"policy":"new"})["approved"],[])
+    def test_veto_never_cached_as_approval(self):
+        binding={"source":"s"}
+        case={"finding_id":"one"}
+        cache=q.approval_cache({},binding)
+        q.remember_approved(cache,[case],binding,["one"])
+        self.assertEqual(cache["approved"],[])
+
 if __name__=="__main__":
     unittest.main()

@@ -154,3 +154,28 @@ def group_prompts(cases,contract):
 
 def group_key(group,system,user):
     return digest(json.dumps([group,system,user],ensure_ascii=False,sort_keys=True))
+
+
+def approval_key(case,binding):
+    """Exact candidate case plus every local policy/memory dependency."""
+    return digest(json.dumps([binding,case],ensure_ascii=False,sort_keys=True))
+
+def approval_cache(status,binding):
+    prior=status.get("transactional_case_approvals")
+    if not isinstance(prior,dict) or prior.get("binding")!=binding:
+        prior={"binding":binding,"approved":[]}
+    approved=prior.get("approved")
+    if (not isinstance(approved,list) or len(approved)>300 or len(set(approved))!=len(approved)
+            or any(not isinstance(x,str) or not re.fullmatch("[0-9a-f]{64}",x) for x in approved)):
+        raise ValueError("transaction case approval cache invalid")
+    status["transactional_case_approvals"]=prior
+    return prior
+
+def remember_approved(cache,cases,binding,rejected):
+    approved=cache["approved"]
+    for case in cases:
+        if case["finding_id"] not in rejected:
+            key=approval_key(case,binding)
+            if key not in approved:
+                approved.append(key)
+    del approved[:-300]

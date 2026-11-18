@@ -2304,12 +2304,27 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
         transactional_quality.require_safe(source,translation,candidate,patches,findings,_anchor_position)
         cases=transactional_quality.transaction_cases(source,translation,candidate,patches,findings,_anchor_position)
         instructions,paths=role_contracts(engine,"reviewer")
-        groups=transactional_quality.group_prompts(cases,instructions)
+        # Supply the same literary memory to the veto as to the ordinary review.
+        root=ROOT/"books"/slug
+        glossary,style=full_shared_context(root)
+        metadata=read_json(root/"metadata.json")
+        instructions += "\n\nCURRENT LITERARY MEMORY:\n"+model_glossary_context(glossary,
+            source_language=metadata.get("source_language","unspecified"),
+            target_language=metadata.get("target_language","unspecified"))+"\nSTYLE GUIDE:\n"+style
+        cache_binding={"version":2,"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+                       "source_sha256":record["source_sha256"],"baseline_sha256":record["translation_sha256"],
+                       "workflow_revision":status["workflow_revision"],"contract_sha256":transactional_quality.digest(instructions),
+                       "glossary_sha256":fingerprint(root/"glossary.md"),"style_sha256":fingerprint(root/"style-guide.md")}
+        cache=transactional_quality.approval_cache(status,cache_binding)
+        pending=[case for case in cases if transactional_quality.approval_key(case,cache_binding) not in cache["approved"]]
+        groups=transactional_quality.group_prompts(pending,instructions)
     except (correction_regression.CorrectionRegression,candidate_review.CandidateReviewError) as exc:
         raise ModelError("transactional candidate cannot be safely verified: "+str(exc)) from exc
-    keys=[transactional_quality.group_key(*g) for g in groups]
-    if not keys:
+    if not cases:
         raise JobError("empty transactional gate")
+    if not groups:
+        return True
+    keys=[transactional_quality.group_key(*g) for g in groups]
     binding={"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
              "source_sha256":record["source_sha256"],"candidate_sha256":transactional_quality.digest(candidate),
              "workflow_revision":status["workflow_revision"],"groups":keys,
@@ -2347,6 +2362,7 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
         rejected=candidate_review.parse_verdict(answer,[c["finding_id"] for c in group])
     except candidate_review.CandidateReviewError as exc:
         raise ModelError("transactional gate returned invalid evidence") from exc
+    transactional_quality.remember_approved(cache,group,cache_binding,rejected)
     if rejected:
         rejected_ids={fid for case in group if case["finding_id"] in rejected for fid in case["patch_ids"]}
         audit=status.setdefault("correction_regression_rejections",[])
@@ -2563,9 +2579,14 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     # reconstruction before it is deferred. This remains a reviewer-bound patch.
     if transactional_quality.enabled() and isolated:
         seen_recovery = status.get("block_recovery_attempts", [])
+        known_unsafe = {x["finding_id"] for x in status.get("correction_regression_rejections", [])
+                        if x.get("unit_id")==chapter["unit_id"] and x.get("review_record_id")==record["record_id"]}
+        overlap = status.get("correction_overlap_deferred", {})
+        if overlap.get("unit_id")==chapter["unit_id"] and overlap.get("review_record_id")==record["record_id"]:
+            known_unsafe.update(overlap.get("unapplied_finding_ids", []))
         for item in unresolved:
             key = record["record_id"] + ":" + item["id"]
-            if (item["id"] in isolated and key not in seen_recovery
+            if (item["id"] in isolated and item["id"] in known_unsafe and key not in seen_recovery
                     and block_recovery.spec(source, translation, item, _anchor_position) is not None):
                 isolated.remove(item["id"])
                 execution_scheduler.record_isolated(status, chapter, record, isolated)
@@ -4515,6 +4536,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             if compact_review.enabled() and user.startswith("Independent paired review, "):
                 normalized = compact_review.compile_response(answer, source, translation, next_part,
                     review_chunks.find_previous_for_chunk(previous, next_part, source))
+                normalized = coherent_batches.normalize_block_addresses(normalized, source, translation)
             else:
                 normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
         except compact_review.CompactReviewError as exc:
@@ -4967,7 +4989,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if str(exc) == "reviewer-anchored corrections intersect protected EPUB markers":
                 recoverable_code = "protected_review_anchor"
             elif str(exc) in {"all correction candidates were unsafe; no accepted patch",
-                              "corrector block reconstruction rejected"}:
+                              "corrector block reconstruction rejected",
+                              "transactional independent gate vetoed candidate",
+                              "transactional gate returned invalid evidence"}:
                 recoverable_code = "unsafe_correction_exhausted"
             if (recoverable_code is None
                     and str(exc).startswith("typed correction repair invalid: ")):
@@ -5101,6 +5125,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             correction_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
             status.pop("transactional_gate", None)
+            status.pop("transactional_case_approvals", None)
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)

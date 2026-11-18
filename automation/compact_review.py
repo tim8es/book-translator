@@ -106,6 +106,9 @@ def anchor(text,interval,quote):
     if not isinstance(quote,str) or not quote.strip() or len(quote)>300 or "<!--" in quote:
         raise CompactReviewError("invalid exact block quote")
     lo,hi=interval
+    marker=BLOCK.match(text,lo,hi)
+    if marker:
+        lo=marker.end()
     local=occurrences(text[lo:hi],quote)
     if len(local)!=1:
         raise CompactReviewError("block quote absent or locally ambiguous")
@@ -142,6 +145,10 @@ def compile_response(answer,source,target,chunk,prior):
         raw=json.loads(answer)
     except (TypeError,ValueError) as exc:
         raise CompactReviewError("compact response is not JSON") from exc
+    if isinstance(raw,dict) and raw.get("evidence_version")==2:
+        # Preserve a well-formed legacy canonical response. The runner still
+        # revalidates the exact anchors, chunk boundaries, checks and lineage.
+        return json.dumps(raw,ensure_ascii=False)
     if not isinstance(raw,dict) or set(raw)!={"outcome","checks","findings","glossary","style_guide"}:
         raise CompactReviewError("compact response has invalid fields")
     if raw["checks"]!={k:True for k in CHECKS} or any(type(v) is not bool for v in raw["checks"].values()):

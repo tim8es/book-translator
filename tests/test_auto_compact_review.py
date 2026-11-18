@@ -54,6 +54,9 @@ class CompactReviewTests(unittest.TestCase):
             pos=rc._evidence_offset(self.source,a)
             self.assertTrue(intervals["%06d"%(i+1)][0]<=pos<intervals["%06d"%(i+1)][1])
             self.assertIn("home.",a["quote"])
+    def test_protected_marker_never_anchor(self):
+        with self.assertRaises(c.CompactReviewError):
+            c.anchor(self.source,(0,len(self.source)),"bt-block:000001")
     def test_prior_recheck_compiled(self):
         self.item.update(prior="old",resolved=True)
         r=json.loads(c.compile_response(self.payload([self.item],"PASS"),self.source,self.target,self.chunk,
