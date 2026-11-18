@@ -37,6 +37,7 @@ import candidate_review
 import incremental_review
 import adaptive_budget
 import execution_scheduler
+import execution_metrics
 import agent_orchestrator
 import review_convergence
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
@@ -261,6 +262,8 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
         if not isinstance(history, list):
             history = []
         status["provider_call_metrics"] = (history + [metric])[-40:]
+        if metric.get("outcome") != "response":
+            execution_metrics.provider(status, metric)
     # The transport returns string-compatible output and optional safe
     # metadata. Diagnostics must never contain source text or credentials.
     diagnostics = getattr(answer, "diagnostics", None)
@@ -275,6 +278,7 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
             "role": role.lower(),
             "unit_id": active.get("unit_id") if isinstance(active, dict) else None,
         }
+    execution_metrics.provider(status, metric)
     return answer
 
 
@@ -2406,9 +2410,12 @@ def correction_orchestrator_strategy(job_id: str, slug: str, status: dict,
         outcome = "accepted"
     except (ModelError, ValueError):
         strategy, outcome = "batch_remaining", "fallback"
+    duration = max(0, round((time.monotonic() - started) * 1000))
     status["correction_orchestrator_decision"].update(
-        {"strategy": strategy, "outcome": outcome,
-         "duration_ms": max(0, round((time.monotonic() - started) * 1000))})
+        {"strategy": strategy, "outcome": outcome, "duration_ms": duration})
+    execution_metrics.provider(status, {"role": "orchestrator",
+        "request_chars": len(system) + len(user), "duration_ms": duration,
+        "outcome": "response" if outcome == "accepted" else "advice_error"})
     status["phase"] = "orchestrator-advice-recorded"
     checkpoint(job_id, status, slug)
     return strategy
@@ -2982,6 +2989,47 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
             or correction_progressed(ledger, chapter))
 
 
+def queue_orchestrator_strategy(slug: str, status: dict, chapter: dict,
+                               evidence: dict) -> str:
+    """One optional choice per exact rejected record; canonical gate follows."""
+    fallback = "defer_attention"
+    unit = chapter["unit_id"]
+    key = evidence["review_record_ids"][-1]
+    decisions = status.setdefault("queue_orchestrator_decisions", {})
+    if not isinstance(decisions, dict):
+        raise JobError("invalid queue decisions")
+    old = decisions.get(unit)
+    if isinstance(old, dict) and old.get("record_id") == key:
+        return old["strategy"] if old.get("strategy") in agent_orchestrator.QUEUE_STRATEGIES else fallback
+    if not os.environ.get("OMNIROUTE_ORCHESTRATOR_MODEL", "").strip():
+        return fallback
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0 or count + 1 >= model_call_limit():
+        return fallback
+    rules, _ = role_contracts(pinned_scripts_dir().parent, "orchestrator")
+    system, user = agent_orchestrator.queue_prompt(
+        rules, evidence, status.get("queue_snapshot", {}))
+    decisions[unit] = {"record_id": key, "strategy": fallback, "outcome": "reserved"}
+    status["model_calls_started"] = count + 1
+    status["phase"] = "queue-advice-reserved"
+    checkpoint(status["job_id"], status, slug)
+    started = time.monotonic()
+    try:
+        answer = complete("ORCHESTRATOR", system, user)
+        strategy = agent_orchestrator.parse(answer, agent_orchestrator.QUEUE_STRATEGIES)
+        outcome = "accepted"
+    except (ModelError, ValueError):
+        strategy, outcome = fallback, "fallback"
+    duration = max(0, round((time.monotonic() - started) * 1000))
+    decisions[unit].update({"strategy": strategy, "outcome": outcome, "duration_ms": duration})
+    execution_metrics.provider(status, {"role": "orchestrator",
+        "request_chars": len(system) + len(user), "duration_ms": duration,
+        "outcome": "response" if outcome == "accepted" else "advice_error"})
+    status["phase"] = "queue-advice-recorded"
+    checkpoint(status["job_id"], status, slug)
+    return strategy
+
+
 def defer_stalled_review(slug: str, status: dict, ledger: dict,
                          chapter: dict) -> bool:
     """Escalate repeated rejected reviews instead of paying for another loop.
@@ -2997,6 +3045,15 @@ def defer_stalled_review(slug: str, status: dict, ledger: dict,
             > MAX_CORRECTIONS):
         return False
     report = review_convergence.stalled_rejected_reviews(ledger, chapter)
+    if (report is None
+            and os.environ.get("BOOK_TRANSLATOR_QUEUE_BUDGET") == "on"
+            and status.get("queue_snapshot", {}).get("extracted", 0) > 0
+            and status.get("active") is None
+            and isinstance(status.get("job_id"), str)
+            and (pinned_scripts_dir() / "workflow" / "attention.py").exists()):
+        report = review_convergence.costly_nonconvergence(ledger, chapter, status)
+        if report is not None and queue_orchestrator_strategy(slug, status, chapter, report) == "continue_same":
+            return False
     if report is None:
         return False
     # The actual current ledger, not remembered failure counters, is used.
@@ -3246,6 +3303,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
     literary Reviewer PASS: the existing verified approval path handles them.
     """
     _, ledger, chapters = chapter_data(slug)
+    status["queue_snapshot"] = execution_metrics.queue_snapshot(chapters, ledger)
     if approved_unit_ids(slug, chapters):
         return next_operation(slug, status)
     # Canonical vNext owns the durable attention queue and selection. Older
@@ -4504,8 +4562,21 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                     pass
             pinned_review_target = execution_scheduler.review_target(
                 status, unit_id, review_chunks.sha(source))
+            incremental_enabled = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW") == "on"
             archived_stage = (review_chunk_stage_path(slug, unit_id).is_file()
-                              and os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW") == "on")
+                              and incremental_enabled)
+            if incremental_enabled and candidate_target is not None and not archived_stage:
+                proactive = execution_scheduler.proactive_review_target(status, len(system) + len(user))
+                if proactive < pinned_review_target:
+                    try:
+                        review_chunks.plan_aligned(source, candidate_target,
+                                                   target_chars=proactive, stable=True)
+                    except ValueError:
+                        pass
+                    else:
+                        execution_scheduler.record_review_target(
+                            status, unit_id, review_chunks.sha(source), proactive)
+                        pinned_review_target = proactive
             chunked_review = (candidate_target is not None and
                               (status.get("review_chunk_fallback_unit") == unit_id
                                or provider_partition or archived_stage
@@ -4840,6 +4911,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     # Historical protocol errors from other roles never select its model.
     status.setdefault("role_protocol_failures", {}).pop(f"{unit_id}:{role}", None)
     status["phase"] = role + "-completed"
+    execution_metrics.accepted(status, role, outcome if role == "reviewer" else None)
     status["prompt_context"] = prompt_context
     status.pop("blocked_unit_id", None)
     status.pop("last_error", None)
@@ -5226,6 +5298,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
         elif role == "promote":
             cli("accept-review", slug, str(chapter["number"]))
             status["phase"] = "review-promoted"
+            execution_metrics.accepted(status, "promote")
             checkpoint(job_id, status, slug)
         elif role == "finalize":
             finalize(job_id, slug, status)

@@ -48,6 +48,19 @@ def record_review_target(status: dict, unit: str, source_sha256: str, target: in
     status.setdefault("review_partition_targets", {})[unit] = {
         "source_sha256": source_sha256, "target_chars": target}
 
+def proactive_review_target(status: dict, request_chars: int) -> int:
+    """Cap large reviews using observed slow failures of this book/role."""
+    threshold = 80_000
+    for m in status.get("provider_call_metrics", []):
+        if not isinstance(m, dict) or m.get("role") != "reviewer":
+            continue
+        if (m.get("outcome") in {"http_503", "http_504", "transport"}
+                and type(m.get("duration_ms")) is int and m["duration_ms"] >= 120_000
+                and type(m.get("request_chars")) is int and m["request_chars"] > 0):
+            threshold = min(threshold, max(50_000, int(m["request_chars"] * .85)))
+    return 6000 if request_chars >= threshold else 12000
+
+
 def run_checkpoints(root: Path, runner: Path, job_id: str, *,
                     resume_blocked: bool = False, resume_interrupted: bool = False,
                     max_steps: int = 5, soft_seconds: float = 600) -> int:

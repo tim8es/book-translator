@@ -66,3 +66,49 @@ class ThroughputTests(unittest.TestCase):
                 self.assertEqual(scheduler.run_checkpoints(root, root/"runner.py", "a"*32), 0)
                 self.assertEqual(child.call_count, 2)
             self.assertEqual(final.read_text("utf-8"), "continue_queue=true\nretry_at=tomorrow\n")
+
+
+class QueueAndMetricsTests(unittest.TestCase):
+    def test_proactive_size_uses_slow_reviewer_failures_not_other_roles(self):
+        self.assertEqual(scheduler.proactive_review_target({}, 79000), 12000)
+        self.assertEqual(scheduler.proactive_review_target({}, 81000), 6000)
+        m = {"role": "reviewer", "outcome": "http_503",
+             "duration_ms": 300000, "request_chars": 80000}
+        self.assertEqual(scheduler.proactive_review_target({"provider_call_metrics":[m]}, 70000), 6000)
+        self.assertEqual(scheduler.proactive_review_target(
+            {"provider_call_metrics":[{**m, "role": "translator"}]}, 70000), 12000)
+
+    def test_metrics_never_count_response_as_accepted_section(self):
+        import execution_metrics as metrics
+        s = {}
+        metrics.provider(s, {"role":"reviewer","outcome":"response",
+                             "duration_ms":123, "prompt_tokens":7, "content":"secret"})
+        self.assertEqual(s["execution_metrics"]["accepted_operations"], {})
+        metrics.accepted(s, "reviewer", "CORRECTIONS_REQUIRED")
+        self.assertEqual(s["execution_metrics"]["accepted_operations"], {"review_rejected":1})
+        metrics.accepted(s, "reviewer", "PASS")
+        self.assertEqual(s["execution_metrics"]["accepted_operations"]["reviewed"], 1)
+        self.assertNotIn("secret", json.dumps(s))
+
+    def test_costly_queue_candidate_requires_distinct_canonical_artifacts_and_cost(self):
+        import review_convergence as convergence
+        unit = "chapter-000001"
+        def review(record, target, n):
+            return {"unit_id":unit,"record_id":record,"source_sha256":"source",
+                    "translation_sha256":target,"outcome":"CORRECTIONS_REQUIRED",
+                    "quality_report":{"evidence_version":2,"findings":[
+                        {"severity":"major","resolved":False} for _ in range(n)]}}
+        ledger = {"records":[review("r1","t1",1), review("r2","t2",2)]}
+        chapter = {"unit_id":unit,"translation_acceptance":{
+            "source_sha256":"source","translation_sha256":"t2"}}
+        status = {"correction_rounds":{unit:1},"provider_call_metrics":[
+            {"unit_id":unit,"role":"reviewer","outcome":"response","duration_ms":150000}
+            for _ in range(10)]}
+        self.assertEqual(convergence.costly_nonconvergence(ledger, chapter,status)["action"],
+                         "operator-attention-no-pass")
+        self.assertIsNone(convergence.costly_nonconvergence(ledger, chapter,
+            {**status,"provider_call_metrics":status["provider_call_metrics"][:2]}))
+        self.assertIsNone(convergence.costly_nonconvergence(ledger,
+            {**chapter,"translation_acceptance":{"source_sha256":"source","translation_sha256":"stale"}},status))
+        self.assertEqual(agent.parse('{"strategy":"defer_attention"}', agent.QUEUE_STRATEGIES),
+                         "defer_attention")
