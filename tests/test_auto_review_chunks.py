@@ -57,6 +57,24 @@ class ReviewChunkPlanTests(unittest.TestCase):
                 and chunk[kind + "_window"][1] >= chunk[kind + "_core"][1]
                 for chunk in self.plan["chunks"]))
 
+    def test_adaptive_aligned_plan_stays_deterministic_and_complete(self):
+        source = "\n\n".join(
+            f"<!-- bt-block:{i:06d} -->\n" + "Original words. " * 80
+            for i in range(1, 23))
+        target = "\n\n".join(
+            f"<!-- bt-block:{i:06d} -->\n" + "Translated words. " * 80
+            for i in range(1, 23))
+        normal = chunks.plan_aligned(source, target)
+        smaller = chunks.plan_aligned(source, target, target_chars=3000)
+        self.assertGreater(len(smaller["chunks"]), len(normal["chunks"]))
+        chunks.validate_plan(smaller, source, target)
+        self.assertEqual(smaller, chunks.plan_aligned(source, target, target_chars=3000))
+        for kind, text in (("source", source), ("translation", target)):
+            self.assertEqual("".join(text[slice(*p[kind + "_core"])]
+                                     for p in smaller["chunks"]), text)
+        self.assertEqual(chunks.plan_aligned(source, target, target_chars=6000)["helper_revision"],
+                         chunks.ALIGNMENT_REVISION)
+
     def test_modified_plan_rejected(self):
         mutated = json.loads(json.dumps(self.plan))
         mutated["chunks"][0]["source_core"][1] -= 1

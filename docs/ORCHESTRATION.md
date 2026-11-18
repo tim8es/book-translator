@@ -495,3 +495,7 @@ earlier audits remain separate quality obligations and must not be silenced
 by reusing historical PASS. Correct affected text or decisions with a
 targeted source-grounded check; do not blindly redo every chapter and do
 not confuse migration reuse with fresh literary review.
+
+### Adaptive provider recovery in Auto
+
+Retain the durable 5/15/30 minute, 12/24 hour backoff and total model-call cap. Repeated potentially size-related provider failures (transport, 408/504, or slow 5xx) are scoped to the failed unit and role, not literary evidence. Auto may reduce structural translation batches, isolate correction findings, or use bounded marker-aligned review with smaller deterministic partitions. A rate-limit or rapid 5xx alone does not shrink work. Persist safe request-size, duration, route label and token counts, never credentials or literary excerpts. Preserve accepted partial review evidence and source/target hashes; do not regenerate completed parts or infer PASS. Fallback route remains optional and configured by the operator. No book workflow revision changes.

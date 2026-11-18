@@ -58,10 +58,12 @@ def _window(text: str, start: int, end: int) -> list[int]:
     return [left, right]
 
 
-def plan(source: str, translation: str) -> dict:
+def plan(source: str, translation: str, *, target_chars: int = TARGET_CHARS) -> dict:
     if not source.strip() or not translation.strip():
         raise ValueError("review requires both complete source and translation")
-    count = max(2, math.ceil(max(len(source), len(translation)) / TARGET_CHARS))
+    if type(target_chars) is not int or not 3000 <= target_chars <= TARGET_CHARS:
+        raise ValueError("invalid adaptive review target")
+    count = max(2, math.ceil(max(len(source), len(translation)) / target_chars))
     if count > MAX_CHUNKS:
         raise ValueError("source exceeds bounded review capacity")
     sb = _cuts(source, count)
@@ -85,7 +87,8 @@ def plan(source: str, translation: str) -> dict:
 
 
 
-def _marker_cuts(source: str, translation: str) -> tuple[list[int], list[int]] | None:
+def _marker_cuts(source: str, translation: str, *, count: int | None = None,
+                 target_chars: int = TARGET_CHARS) -> tuple[list[int], list[int]] | None:
     """Find paired boundaries at exact protected EPUB block IDs.
 
     Unlike independent target-length cuts, corresponding cores start/end on
@@ -107,8 +110,13 @@ def _marker_cuts(source: str, translation: str) -> tuple[list[int], list[int]] |
     dst = [0] + [item.start() for item in tm[1:]] + [len(translation)]
     masses = [max(src[i + 1] - src[i], dst[i + 1] - dst[i])
               for i in range(len(sm))]
-    desired = min(len(sm), max(2, math.ceil(max(len(source), len(translation))
-                                          / TARGET_CHARS)))
+    if type(target_chars) is not int or not 3000 <= target_chars <= TARGET_CHARS:
+        raise ValueError("invalid adaptive review target")
+    desired = (count if count is not None else
+               min(len(sm), max(2, math.ceil(max(len(source), len(translation))
+                                             / target_chars))))
+    if not 2 <= desired <= len(sm):
+        raise ValueError("invalid aligned review partition count")
     if desired > MAX_CHUNKS:
         raise ValueError("source exceeds bounded aligned review capacity")
     cumul = [0]
@@ -130,7 +138,8 @@ def _marker_cuts(source: str, translation: str) -> tuple[list[int], list[int]] |
     return scuts, tcuts
 
 
-def plan_aligned(source: str, translation: str) -> dict:
+def plan_aligned(source: str, translation: str, *,
+                 target_chars: int = TARGET_CHARS) -> dict:
     """Opt-in marker-aligned reviewer plan; legacy fallback when no markers.
 
     This is a new helper revision for *new* checkpoints. Legacy checkpoints
@@ -138,9 +147,9 @@ def plan_aligned(source: str, translation: str) -> dict:
     """
     if not source.strip() or not translation.strip():
         raise ValueError("review requires both complete source and translation")
-    pair = _marker_cuts(source, translation)
+    pair = _marker_cuts(source, translation, target_chars=target_chars)
     if pair is None:
-        return plan(source, translation)
+        return plan(source, translation, target_chars=target_chars)
     sb, tb = pair
     chunks = []
     for i in range(len(sb) - 1):
@@ -194,7 +203,7 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
             raise ValueError("review final chunk leaves unreviewed text")
     # Persisted plans must be deterministic, not user/model supplied.
     if value["helper_revision"] == ALIGNMENT_REVISION:
-        aligned = _marker_cuts(source, translation)
+        aligned = _marker_cuts(source, translation, count=len(value["chunks"]))
         if aligned is None or len(aligned[0]) != len(value["chunks"]) + 1:
             raise ValueError("aligned review plan has lost marker boundaries")
         source_cuts, target_cuts = aligned

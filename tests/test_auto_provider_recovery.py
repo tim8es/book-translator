@@ -173,6 +173,36 @@ class ProviderRecoveryTests(unittest.TestCase):
         worker.schedule_provider_retry(self.status, self.chapter, "translator", failure)
         self.assertEqual(self.status["phase"], "provider-retry-exhausted")
 
+    def test_slow_provider_pressure_is_scoped_and_rate_limit_is_not_size_failure(self):
+        unit = self.chapter["unit_id"]
+        retry = {"unit_id": unit, "role": "reviewer", "attempts": 2, "code": "http_503"}
+        status = {"provider_retry": retry}
+        self.assertEqual(worker.adaptive_budget.provider_pressure(status, unit, "reviewer"), 1)
+        self.assertEqual(worker.adaptive_budget.provider_pressure(status, unit, "translator"), 0)
+        self.assertEqual(worker.adaptive_budget.provider_pressure(status, "chapter-000002", "reviewer"), 0)
+        status["provider_call_metric"] = {"unit_id": unit, "role": "reviewer",
+                                          "outcome": "http_503", "duration_ms": 1000}
+        self.assertEqual(worker.adaptive_budget.provider_pressure(status, unit, "reviewer"), 0)
+        status["provider_call_metric"]["duration_ms"] = 300000
+        self.assertEqual(worker.adaptive_budget.provider_pressure(status, unit, "reviewer"), 1)
+        retry["attempts"] = 3
+        self.assertEqual(worker.adaptive_budget.review_target_chars(
+            worker.adaptive_budget.provider_pressure(status, unit, "reviewer")), 3000)
+        retry["code"] = "http_429"
+        self.assertEqual(worker.adaptive_budget.provider_pressure(status, unit, "reviewer"), 0)
+
+    def test_safe_call_timing_survives_provider_failure(self):
+        self.status["active"]["unit_id"] = self.chapter["unit_id"]
+        with patch.dict(os.environ, self.env), patch.object(
+                worker, "complete", side_effect=TransientModelError("503", code="http_503")):
+            with self.assertRaises(TransientModelError):
+                worker.complete_for_job(self.status, "TRANSLATOR", "secret phrase", "text")
+        metric = self.status["provider_call_metric"]
+        self.assertEqual(metric["outcome"], "http_503")
+        self.assertEqual(metric["request_chars"], 17)
+        self.assertGreaterEqual(metric["duration_ms"], 0)
+        self.assertNotIn("secret phrase", json.dumps(metric))
+
     def test_corrupted_checkpoint_blocks_no_external_requests(self):
         self.status["provider_retry"] = {"not_before": "invalid"}
         with self.assertRaisesRegex(worker.JobError, "invalid provider retry checkpoint"):
