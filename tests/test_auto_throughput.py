@@ -112,3 +112,17 @@ class QueueAndMetricsTests(unittest.TestCase):
             {**chapter,"translation_acceptance":{"source_sha256":"source","translation_sha256":"stale"}},status))
         self.assertEqual(agent.parse('{"strategy":"defer_attention"}', agent.QUEUE_STRATEGIES),
                          "defer_attention")
+
+    def test_orchestrator_advice_uses_bounded_transport_timeout(self):
+        from contextlib import nullcontext
+        from io import BytesIO
+        import omniroute
+        payload = {"choices":[{"finish_reason":"stop",
+                               "message":{"content":"{}"}}]}
+        with patch.dict(os.environ, {"OMNIROUTE_BASE_URL":"https://example.invalid/v1",
+                                     "OMNIROUTE_API_KEY":"dummy",
+                                     "OMNIROUTE_ORCHESTRATOR_MODEL":"dummy"}), \
+             patch.object(omniroute, "urlopen", return_value=nullcontext(
+                 BytesIO(json.dumps(payload).encode()))) as send:
+            omniroute.complete("ORCHESTRATOR", "system", "user")
+        self.assertEqual(send.call_args.kwargs["timeout"], 90)

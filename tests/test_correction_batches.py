@@ -152,6 +152,34 @@ class BoundedCorrectionTests(unittest.TestCase):
             self.assertIn("piece-01", output[0])
             self.assertIn("fixed-10", output[0])
 
+    def test_all_unsafe_stage_does_not_prevent_a_new_model_attempt(self):
+        import os
+        from correction_regression import CorrectionRegression
+        self.findings[:] = self.findings[:2]
+        original = self.original_translation
+        def invalid(role, system, user):
+            ids = json.loads(user.split("\nPREVIOUS UNSAFE")[0])
+            return json.dumps({"patches": [
+                {"finding_id": fid, "operation": "replace",
+                 "replacement": "unsafe duplicate"}
+                for fid in ids], "glossary": [], "style_guide": []})
+        real = worker.correction_regression.require_no_new_repetitions
+        def guard(before, candidate):
+            if "unsafe duplicate" in candidate:
+                raise CorrectionRegression("new-duplicated-phrase", {"count": 1})
+            return real(before, candidate)
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_CONTINUE_CORRECTIONS": "on",
+                                     "OMNIROUTE_ORCHESTRATOR_MODEL": ""}), \
+             patch.object(worker.correction_regression, "require_no_new_repetitions", side_effect=guard):
+            with self.assertRaisesRegex(ModelError, "all correction candidates"):
+                self.run_once(response=invalid)
+            self.assertNotIn("correction_isolation", self.status)
+            count = self.status["model_calls_started"]
+            with self.assertRaisesRegex(ModelError, "all correction candidates"):
+                self.run_once(response=invalid)
+            self.assertGreater(self.status["model_calls_started"], count)
+        self.assertEqual((self.book / self.chapter["translation_path"]).read_bytes(), original)
+
     def test_stale_stage_review_identity_never_resumes(self):
         self.run_once()
         changed = {**self.review, "record_id": "d" * 32}

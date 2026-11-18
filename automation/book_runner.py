@@ -2516,6 +2516,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                    and item.get("unit_id") == chapter["unit_id"]
                    and item.get("review_record_id") == record["record_id"]
                    and item.get("finding_id") in {f["id"] for f in selected}]
+        overlap = status.get("correction_overlap_deferred", {})
+        if (isinstance(overlap, dict) and overlap.get("unit_id") == chapter["unit_id"]
+                and overlap.get("review_record_id") == record["record_id"]):
+            earlier += [fid for fid in overlap.get("unapplied_finding_ids", [])
+                        if fid in {item["id"] for item in selected}]
         if earlier:
             user += (
                 "\nPREVIOUS UNSAFE CORRECTION CANDIDATES: The proposed "
@@ -2717,6 +2722,9 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         # Keep the live claim. Next bounded Action continues the same stage.
         return None
     if not covered:
+        # A fresh bounded attempt must try a different candidate, not re-read
+        # an all-isolated empty stage. Keep hashed unsafe-patch rejections.
+        status.pop("correction_isolation", None)
         raise ModelError("all correction candidates were unsafe; no accepted patch")
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
@@ -4750,6 +4758,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             recoverable_code = helper.failure_code(str(exc))
             if str(exc) == "reviewer-anchored corrections intersect protected EPUB markers":
                 recoverable_code = "protected_review_anchor"
+            elif str(exc) == "all correction candidates were unsafe; no accepted patch":
+                recoverable_code = "unsafe_correction_exhausted"
             if (recoverable_code is None
                     and str(exc).startswith("typed correction repair invalid: ")):
                 recoverable_code = "invalid_typed_repair"
