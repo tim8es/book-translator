@@ -7,3 +7,6 @@ Phase 2: accepted structural and correction artifacts now persist source/target 
 
 
 Phase 3: mapped correction groups pack full source-owned context once per passage, select up to twelve disjoint exact reviewer-anchored edits within 20k combined core characters, and retain existing limits on repeated/critical/structural/ambiguous work. Independent preflight compares the actual combined candidate for a complete mapped span, not synthetic unaligned excerpts. The single-review policy still applies per risky case. No overlap is marked resolved, no anchor is expanded, all existing canonical rechecks remain required. Addressed response protocol defects use the established bounded recovery classification. The feature is gated by the same span-map flag; no production change.
+
+
+Phase 4: provider-size recovery can now split an unfinished mapped review core at a real paired span boundary. Complete independently reviewed windows are preserved under exact artifact and memory binding. Rebuild stable refined partitions after a local edit; if exact geometry changes, only byte-identical clean windows with identical source scope and target-core geometry may be reused. A changed glossary/style revision still forces fresh evidence. No old report is synthesized or promoted by recovery.

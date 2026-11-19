@@ -234,7 +234,7 @@ def plan_paragraphs(source,translation,*,target_chars=TARGET_CHARS,count=None,wi
     return None
 
 
-def _split_part(part,source,translation,base_revision):
+def _split_part(part,source,translation,base_revision,*,mapping=None):
     sc,tc=part["source_core"],part["translation_core"]
     def interior(text,interval,markers=False):
         lo,hi=interval
@@ -242,7 +242,17 @@ def _split_part(part,source,translation,base_revision):
             return [(m.group(1),m.start()) for m in BLOCK_MARKER.finditer(text,lo,hi) if lo<m.start()<hi]
         return [(i,m.end()) for i,m in enumerate(re.finditer(r"\n[ \t]*\n",text[lo:hi])) if 0<m.end()<hi-lo]
     marked=base_revision in {ALIGNMENT_REVISION,STABLE_ALIGNMENT_REVISION}
-    if marked:
+    if base_revision==MAPPED_REVISION:
+        if mapping is None:
+            raise ValueError("mapped refinement requires original span map")
+        # Never split the paired cores using independently chosen target cuts.
+        choices=[(row["source"][0],row["target"][0]) for row in mapping["spans"]
+                 if sc[0]+500<=row["source"][0]<=sc[1]-500
+                 and tc[0]+500<=row["target"][0]<=tc[1]-500]
+        if not choices:
+            return None
+        s,t=min(choices,key=lambda p:(abs(p[0]-sum(sc)/2),p[0]))
+    elif marked:
         sa,ta=interior(source,sc,True),interior(translation,tc,True)
         if [k for k,_ in sa]!=[k for k,_ in ta] or not sa:
             return None
@@ -280,7 +290,7 @@ def _refined_chunks(base,steps,source,translation):
     for i in steps:
         if type(i) is not int or not 0<=i<len(parts):
             raise ValueError("invalid review refinement index")
-        pair=_split_part(parts[i],source,translation,base["helper_revision"])
+        pair=_split_part(parts[i],source,translation,base["helper_revision"],mapping=base.get("mapping"))
         if pair is None:
             raise ValueError("review refinement cannot safely split part")
         parts[i:i+1]=pair
@@ -311,6 +321,40 @@ def plan_mapped(source,translation,mapping,budget=TARGET_CHARS):
            "translation_sha256":sha(translation),"chunks":groups,"mapping":mapping,"map_budget":budget}
     validate_plan(value,source,translation)
     return value
+
+
+def source_owned_map(plan):
+    """Return map of a validated mapped or mapped-refined review plan."""
+    if not isinstance(plan,dict):return None
+    base=plan["base_plan"] if plan.get("helper_revision")==REFINED_REVISION else plan
+    return base.get("mapping") if base.get("helper_revision")==MAPPED_REVISION else None
+
+def recreate_mapped_plan(previous,source,translation,mapping,budget=TARGET_CHARS):
+    """Replay old split operations only if exact source partitions survive.
+
+    If target size/shape changed enough to alter the plan, use the new bounded
+    source-owned plan. Reuse remains restricted to identical verified windows.
+    """
+    old_map=source_owned_map(previous)
+    if old_map is None:
+        return plan_mapped(source,translation,mapping,budget)
+    old_base=previous["base_plan"] if previous["helper_revision"]==REFINED_REVISION else previous
+    fresh=plan_mapped(source,translation,mapping,old_base["map_budget"])
+    if fresh is None or previous["helper_revision"]!=REFINED_REVISION:
+        return fresh
+    if [p["source_core"] for p in fresh["chunks"]]!=[p["source_core"] for p in old_base["chunks"]]:
+        return fresh
+    try:
+        parts=_refined_chunks(fresh,previous["split_steps"],source,translation)
+    except ValueError:
+        return fresh
+    if [p["source_core"] for p in parts]!=[p["source_core"] for p in previous["chunks"]]:
+        return fresh
+    result={"schema_version":SCHEMA_VERSION,"helper_revision":REFINED_REVISION,
+            "source_sha256":sha(source),"translation_sha256":sha(translation),
+            "chunks":parts,"base_plan":fresh,"split_steps":list(previous["split_steps"])}
+    validate_plan(result,source,translation)
+    return result
 
 
 def validate_plan(value: dict, source: str, translation: str) -> None:

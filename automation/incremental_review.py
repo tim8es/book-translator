@@ -204,15 +204,25 @@ def rebase(stage: dict, new_plan: dict, source: str, translation: str,
     elif stage["binding"]["previous_record_id"] != current_binding["previous_record_id"]:
         return fresh, 0
     old_by_id = {item["id"]: item for item in stage["plan"]["chunks"]}
+    mapped = (review_chunks.source_owned_map(stage["plan"]) is not None
+              and review_chunks.source_owned_map(new_plan) is not None)
+    old_by_source = {(tuple(item["source_core"]),tuple(item["source_window"])):item
+                     for item in stage["plan"]["chunks"]} if mapped else {}
+    def relative_target_core(item):
+        start=item["translation_window"][0]
+        return [i-start for i in item["translation_core"]]
     for part in new_plan["chunks"]:
-        key = part["id"]
-        old = old_by_id.get(key)
-        evidence = stage["completed"].get(key)
-        if (old is None or evidence is None or evidence["outcome"] != "PASS"
-                or evidence["report"].get("findings") != []
-                or old["source_core"] != part["source_core"]
-                or old["source_window"] != part["source_window"]
-                or stage["windows"][key] != window_hashes(part, source, translation)):
+        key=part["id"]
+        old=(old_by_source.get((tuple(part["source_core"]),tuple(part["source_window"])))
+             if mapped else old_by_id.get(key))
+        old_key=old["id"] if old is not None else None
+        evidence=stage["completed"].get(old_key)
+        if (old is None or evidence is None or evidence["outcome"]!="PASS"
+                or evidence["report"].get("findings")!=[]
+                or old["source_core"]!=part["source_core"]
+                or old["source_window"]!=part["source_window"]
+                or relative_target_core(old)!=relative_target_core(part)
+                or stage["windows"][old_key]!=window_hashes(part,source,translation)):
             continue
         # Every *current* previous unresolved finding must be freshly checked,
         # even if it is in an otherwise byte-identical source/target window.
@@ -224,7 +234,7 @@ def rebase(stage: dict, new_plan: dict, source: str, translation: str,
         if previous_findings:
             continue
         fresh["completed"][key] = evidence
-        fresh["windows"][key] = stage["windows"][key]
+        fresh["windows"][key] = stage["windows"][old_key]
         fresh["reused"][key] = {
             "from_translation_sha256": stage["plan"]["translation_sha256"],
             "from_record_id": archive_record,

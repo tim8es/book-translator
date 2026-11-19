@@ -4491,9 +4491,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     target = min(remembered, adaptive_budget.review_target_chars(pressure))
     def planner(original, translated, *, target_chars, keep_count=False):
         if current_map is not None and not EPUB_MARKER_RE.search(original) and not MARKDOWN_LINK_RE.search(original):
-            budget=(prior_plan["map_budget"] if keep_count and prior_revision==review_chunks.MAPPED_REVISION
-                    else target_chars)
-            mapped=review_chunks.plan_mapped(original,translated,current_map,budget)
+            mapped=review_chunks.recreate_mapped_plan(prior_plan if keep_count else None,
+                original,translated,current_map,target_chars)
             if mapped is not None:return mapped
         if (single_review_gate.paragraph_preserving() and
                 prior_revision in {None,review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION}):
@@ -4520,7 +4519,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                           and prior_plan.get("translation_sha256") == review_chunks.sha(translation))
         if current_hashes:
             review_chunks.validate_plan(prior_plan, source, translation)
-            if prior_revision==review_chunks.MAPPED_REVISION and prior_plan["mapping"]!=read_span_map(slug,chapter["unit_id"],source,translation):
+            existing_mapping=review_chunks.source_owned_map(prior_plan)
+            if existing_mapping is not None and existing_mapping!=read_span_map(slug,chapter["unit_id"],source,translation):
                 raise JobError("review plan lacks matching artifact span map")
             plan = prior_plan
             if pressure and not stage.get("completed") and not resilient_recovery.enabled():
@@ -4537,7 +4537,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         execution_scheduler.record_review_target(
             status, chapter["unit_id"], review_chunks.sha(source), target)
     if (prior_revision in {review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION,review_chunks.MAPPED_REVISION}
-            and plan["helper_revision"]!=prior_revision):
+            and plan["helper_revision"]!=prior_revision
+            and not (review_chunks.source_owned_map(prior_plan) is not None and review_chunks.source_owned_map(plan) is not None)):
         stage=None
     binding = None
     if ((stage is not None and isinstance(stage, dict)
@@ -4623,7 +4624,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 stage, plan, chapter["unit_id"], status["workflow_revision"])
         except ValueError as exc:
             raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
-    if (resilient_recovery.enabled() and pressure and plan["helper_revision"]!=review_chunks.MAPPED_REVISION
+    if (resilient_recovery.enabled() and pressure
             and stage["schema_version"]==incremental_review.STAGE_VERSION
             and status.get("provider_retry",{}).get("code") in adaptive_budget.SIZE_RETRY_CODES):
         # Existing stage and current memory/contract binding have already been validated.
@@ -4672,7 +4673,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     next_part = next((p for p in plan["chunks"]
                       if p["id"] not in stage["completed"]), None)
     if next_part is not None:
-        id_map=plan["mapping"] if plan["helper_revision"]==review_chunks.MAPPED_REVISION else None
+        id_map=review_chunks.source_owned_map(plan)
         if id_map is None:
             system,user=review_chunk_prompt(engine,slug,chapter,source,translation,next_part,len(plan["chunks"]),previous)
         else:
