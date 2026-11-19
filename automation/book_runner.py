@@ -57,7 +57,7 @@ from review_diagnostics import (review_advisories, reviewer_failure_detail,
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
                               parse_correction_patches, parse_translation, PatchAnchorMismatch, role_contracts,
                               save_claim_bound_decisions, updated_glossary, model_glossary_context,
-                              reviewer_glossary_proposals)
+                              reviewer_glossary_proposals, normalize_optional_memory)
 
 # The shared runtime lives in the public repository but all mutable state
 # lives in the invoking book-state checkout (private or otherwise).
@@ -291,6 +291,11 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
             "unit_id": active.get("unit_id") if isinstance(active, dict) else None,
         }
     execution_metrics.provider(status, metric)
+    if os.environ.get("BOOK_TRANSLATOR_OPTIONAL_MEMORY_ISOLATION") == "on":
+        answer, rejected = normalize_optional_memory(answer)
+        if rejected:
+            status["optional_memory_proposals_rejected"] = (
+                status.get("optional_memory_proposals_rejected", 0) + rejected)
     return answer
 
 
@@ -3685,7 +3690,10 @@ GLOSSARY_POLICY = (
     "LITERARY GLOSSARY (model-authored): Independently identify stable, recurring "
     "names, aliases, titles, places, organizations and domain terms in the assigned "
     "source and its translation. Return only source-grounded decisions in the "
-    "existing glossary array (original, translation, type, notes); use dictionary "
+    "existing glossary array (original, translation, type, notes). Each optional "
+    "style_guide entry must have exactly source_pattern, translation_approach, evidence "
+    "(all nonempty single-line strings, max 700 chars each). Both arrays may be empty; "
+    "do not include other keys in their items. Use dictionary "
     "forms rather than incidental grammatical case. Classify semantically, not by "
     "capitalization, hyperlinks, EPUB markers or metadata tags. Do not promote "
     "generic tags or ordinary phrases merely because they are linked. Write type "
@@ -4571,6 +4579,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 stage, chapter["unit_id"], status["workflow_revision"])
             changed = stage["plan"] != plan or stage["binding"] != binding
             if changed:
+                reuse_audit = {}
                 old_hash = stage["plan"]["translation_sha256"]
                 if (old_hash != plan["translation_sha256"]
                         and stage["binding"] != binding
@@ -4579,11 +4588,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                     # partial review findings from a different context.
                     resumed, reused = incremental_review.rebase(
                         stage, plan, source, translation, binding, previous,
-                        chapter["unit_id"], status["workflow_revision"])
+                        chapter["unit_id"], status["workflow_revision"], audit=reuse_audit)
                 elif old_hash != plan["translation_sha256"]:
                     resumed, reused = incremental_review.rebase(
                         stage, plan, source, translation, binding, previous,
-                        chapter["unit_id"], status["workflow_revision"])
+                        chapter["unit_id"], status["workflow_revision"], audit=reuse_audit)
                 else:
                     resumed = incremental_review.new_stage(
                         plan, chapter["unit_id"], status["workflow_revision"],
@@ -4599,6 +4608,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                     "translation_sha256": plan["translation_sha256"],
                     "reused_clean_chunks": reused,
                     "total_chunks": len(plan["chunks"]),
+                    "reason_counts": reuse_audit.get("reasons", {}),
                     "at": clock()})
                 status["review_incremental_rebases"] = audits[-40:]
             elif stage["accepted_review_record_id"] is not None:

@@ -133,6 +133,8 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "incremental_reused":prompt.get("reused_clean_chunks"),
                           "review_refinement":status.get("review_refinement_summary"),
                           "memory_proposals_deferred":status.get("optional_memory_proposals_deferred",0),
+                          "memory_proposals_rejected":status.get("optional_memory_proposals_rejected",0),
+                          "last_reuse_audit":(status.get("review_incremental_rebases") or [{}])[-1],
                           "span_map":status.get("span_map_summary"),
                           "span_map_unavailable":status.get("span_map_unavailable_count",0),
                           "correction_mode":prompt.get("correction_mode")},ensure_ascii=False),flush=True)
@@ -171,6 +173,8 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             "state":status.get("state"),"stop_reason":reason,"wall_seconds":round(time.monotonic()-started,2),
             "calls_reserved":status.get("model_calls_started",0),"api":metrics.get("api",{}),
             "requested_api":metrics.get("requested_api",{}),
+            "memory_proposals_rejected":status.get("optional_memory_proposals_rejected",0),
+            "review_rebases":status.get("review_incremental_rebases",[]),
             "accepted_operations":metrics.get("accepted_operations",{}),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}
