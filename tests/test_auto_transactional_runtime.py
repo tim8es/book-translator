@@ -118,5 +118,37 @@ class TransactionalGateRuntimeTests(unittest.TestCase):
             self.assertEqual(model.call_count,2)
         self.assert_unchanged()
 
+    def test_veto_feedback_is_not_a_protocol_failure_and_only_failing_case_retried(self):
+        record,patches=self.fixture([2,18])
+        def reply(ids, reject=()):
+            return json.dumps({"schema_version":2,"checks":dict.fromkeys(candidate_review.CHECKS,True),
+                "decisions":[{"finding_id":key,"verdict":"reject" if key in reject else "approve",
+                    "risk":"meaning" if key in reject else "none",
+                    "reason":"Preserve the implied action." if key in reject else "The corrected meaning is supported."}
+                    for key in ids]})
+        import correction_feedback as feedback
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_CORRECTION_FEEDBACK":"on"}):
+            with patch.object(runner,"complete_for_job",side_effect=[
+                    reply(["block-000002","block-000018"],["block-000018"]),
+                    reply(["block-000018"],["block-000018"])]) as model:
+                self.assertFalse(self.verify(record,patches))
+                self.assertUnchangedStage= json.loads(self.stage.read_text("utf-8"))["patches"]
+                self.assertEqual(self.assertUnchangedStage,[patches[0]])
+                self.assertEqual(self.status["phase"],"candidate-veto-feedback-staged")
+                self.assertEqual(self.status.get("failures",0),0)
+                self.reload_status()
+                items=feedback.state(self.status,self.chapter,record)
+                self.assertIn("Preserve the implied action",feedback.prompt_feedback(items,record["quality_report"]["findings"]))
+                second=[patches[0],{**patches[1],"replacement":"Another token 18."}]
+                self.stage.write_text(json.dumps({"patches":second,"glossary":[],"style_guide":[]}),encoding="utf-8")
+                self.assertFalse(self.verify(record,second))
+                self.assertEqual(feedback.exhausted(feedback.state(self.status,self.chapter,record)),{"fix-18"})
+                remaining=json.loads(self.stage.read_text("utf-8"))["patches"]
+                self.assertEqual(remaining,[patches[0]])
+                self.assertTrue(self.verify(record,remaining))
+                self.assertEqual(model.call_count,2)
+                self.assertEqual(self.status.get("failures",0),0)
+                self.assert_unchanged()
+
 if __name__=="__main__":
     unittest.main()

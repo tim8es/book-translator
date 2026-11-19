@@ -41,6 +41,7 @@ import transactional_quality
 import block_delta_review
 import compact_review
 import block_recovery
+import correction_feedback
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -250,7 +251,7 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
     status["provider_model_route"] = "fallback" if route != role else "primary"
     status.pop("model_response_diagnostics", None)
     started = time.monotonic()
-    metric = {"unit_id": current_unit, "role": current_role,
+    metric = {"unit_id": current_unit, "role": current_role, "requested_role":role.lower(),
               "route": status["provider_model_route"],
               "request_chars": len(system) + len(user)}
     try:
@@ -2311,7 +2312,7 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
         instructions += "\n\nCURRENT LITERARY MEMORY:\n"+model_glossary_context(glossary,
             source_language=metadata.get("source_language","unspecified"),
             target_language=metadata.get("target_language","unspecified"))+"\nSTYLE GUIDE:\n"+style
-        cache_binding={"version":2,"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+        cache_binding={"version":3 if correction_feedback.enabled() else 2,"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
                        "source_sha256":record["source_sha256"],"baseline_sha256":record["translation_sha256"],
                        "workflow_revision":status["workflow_revision"],"contract_sha256":transactional_quality.digest(instructions),
                        "glossary_sha256":fingerprint(root/"glossary.md"),"style_sha256":fingerprint(root/"style-guide.md")}
@@ -2361,8 +2362,13 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
                                      "group":index+1,"groups":len(groups)}})
     checkpoint(job_id,status,slug)
     answer=complete_for_job(status,"REVIEWER",system,user)
+    verdicts=None
     try:
-        rejected=candidate_review.parse_verdict(answer,[c["finding_id"] for c in group])
+        if correction_feedback.enabled():
+            verdicts=correction_feedback.decisions(answer,[c["finding_id"] for c in group])
+            rejected=[fid for fid,d in verdicts.items() if d["verdict"]=="reject"]
+        else:
+            rejected=candidate_review.parse_verdict(answer,[c["finding_id"] for c in group])
     except candidate_review.CandidateReviewError as exc:
         raise ModelError("transactional gate returned invalid evidence") from exc
     transactional_quality.remember_approved(cache,group,cache_binding,rejected)
@@ -2386,6 +2392,23 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
         status["last_semantic_preflight"]={"unit_id":chapter["unit_id"],"decision":"veto",
                                           "candidate_sha256":binding["candidate_sha256"],
                                           "rejected_count":len(rejected_ids),"model_call":count+1}
+        if verdicts is not None:
+            feedback_ids=correction_feedback.record_veto(status,chapter,record,group,verdicts,patches,
+                                                       correction_regression.patch_fingerprint)
+            if feedback_ids!=rejected_ids:
+                raise JobError("feedback veto identity mismatch")
+            items=correction_feedback.state(status,chapter,record)
+            exhausted=correction_feedback.exhausted(items)
+            status["last_semantic_preflight"].update({"risk_counts":{risk:sum(d["risk"]==risk for d in verdicts.values())
+                for risk in sorted({d["risk"] for d in verdicts.values()}-{"none"})},
+                "exhausted_findings":len(exhausted)})
+            status["correction_batch_progress"]={"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+                "completed":len(stage["patches"]),"total":len(findings)}
+            status["phase"]="candidate-veto-feedback-staged"
+            checkpoint(job_id,status,slug)
+            # Valid negative literary evidence is not a broken model response.
+            # Preserve live claim, replan only the affected finding IDs.
+            return False
         checkpoint(job_id,status,slug)
         raise ModelError("transactional independent gate vetoed candidate")
     approved.append(keys[index])
@@ -2578,6 +2601,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
                 if continue_batches else set())
+    feedback_items=correction_feedback.state(status,chapter,record) if correction_feedback.enabled() else {}
+    exhausted=correction_feedback.exhausted(feedback_items)
+    if exhausted:
+        isolated.update(exhausted)
+        execution_scheduler.record_isolated(status,chapter,record,isolated)
     # A previously rejected isolated block gets one alternate, scope-preserving
     # reconstruction before it is deferred. This remains a reviewer-bound patch.
     if transactional_quality.enabled() and isolated:
@@ -2589,7 +2617,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             known_unsafe.update(overlap.get("unapplied_finding_ids", []))
         for item in unresolved:
             key = record["record_id"] + ":" + item["id"]
-            if (item["id"] in isolated and item["id"] in known_unsafe and key not in seen_recovery
+            if (item["id"] in isolated and item["id"] not in exhausted and item["id"] in known_unsafe and key not in seen_recovery
                     and block_recovery.spec(source, translation, item, _anchor_position) is not None):
                 isolated.remove(item["id"])
                 execution_scheduler.record_isolated(status, chapter, record, isolated)
@@ -2683,6 +2711,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                         system, user, _ = context(engine, slug, chapter, "corrector", correction_findings=selected)
                         user += block_recovery.prompt(recovery)
                         break
+        if feedback_items:
+            user+=correction_feedback.prompt_feedback(feedback_items,selected)
         prompt_context = {
             "role": "corrector",
             "workflow_revision": status["workflow_revision"],
@@ -2883,6 +2913,10 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         # Keep the live claim. Next bounded Action continues the same stage.
         return None
     if not covered:
+        if correction_feedback.enabled() and exhausted:
+            # No safe improvement exists. Keep the accepted text unchanged and
+            # let canonical blocked-unit handling stop this unit, not invent PASS.
+            raise ModelError("all correction candidates were unsafe; no accepted patch")
         # A fresh bounded attempt must try a different candidate, not re-read
         # an all-isolated empty stage. Keep hashed unsafe-patch rejections.
         status.pop("correction_isolation", None)
@@ -5129,6 +5163,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             status.pop("correction_batch_progress", None)
             status.pop("transactional_gate", None)
             status.pop("transactional_case_approvals", None)
+            status.pop("correction_feedback", None)
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)

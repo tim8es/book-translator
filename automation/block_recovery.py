@@ -2,6 +2,8 @@
 import json
 import re
 from transactional_quality import blocks, containing
+import plain_review_scope
+import correction_feedback
 
 class RecoveryError(ValueError):
     pass
@@ -10,15 +12,23 @@ def spec(source,target,finding,position):
     if finding.get("translation_anchor") is None:
         return None
     left,right=blocks(source),blocks(target)
-    if not left or list(left)!=list(right):
-        return None
     ss,se=position(source,finding["source_anchor"])
     ts,te=position(target,finding["translation_anchor"])
-    bid=containing(left,ss,se)
-    if bid is None or bid!=containing(right,ts,te):
-        return None
-    a,b=right[bid]
-    original=source[slice(*left[bid])]
+    if correction_feedback.enabled() and plain_review_scope.plain(source,target):
+        try:
+            sl,sh=plain_review_scope.paragraph_window(source,ss,se)
+            a,b=plain_review_scope.paragraph_window(target,ts,te)
+        except plain_review_scope.ScopeError:
+            return None
+        original=source[sl:sh]
+    else:
+        if not left or list(left)!=list(right):
+            return None
+        bid=containing(left,ss,se)
+        if bid is None or bid!=containing(right,ts,te):
+            return None
+        a,b=right[bid]
+        original=source[slice(*left[bid])]
     text=target[a:b]
     if len(original)+len(text)>8000 or re.search(r"<!--|\]\(",text):
         return None

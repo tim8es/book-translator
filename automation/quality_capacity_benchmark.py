@@ -66,7 +66,8 @@ def main():
         lengths=make_epub(path,[(n,chapter_text(chapter_bytes(n,sha))) for n,sha in CHAPTERS])
         print(json.dumps({"fixture":lengths,"upstream_revision":REV}),flush=True)
         row=run_arm(home,path.read_bytes(),"on",100,environment={
-            "BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY":"on","BOOK_TRANSLATOR_COMPACT_REVIEW":"on"},wall_budget_seconds=3600)
+            "BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY":"on","BOOK_TRANSLATOR_COMPACT_REVIEW":"on",
+            "BOOK_TRANSLATOR_CORRECTION_FEEDBACK":"on"},wall_budget_seconds=3600)
     passed=(row["sections"]==2 and row["reviewed"]==2 and row["epub_verified"]
             and row["wall_seconds"]<=3600)
     payload={"schema_version":1,"fixture":lengths,"upstream_revision":REV,

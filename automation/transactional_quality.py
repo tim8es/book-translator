@@ -7,6 +7,7 @@ import re
 from correction_regression import CorrectionRegression
 import candidate_review
 import plain_review_scope
+import correction_feedback
 
 BLOCK = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 MARKUP = re.compile(r"<!--\s*bt-[^>]*-->")
@@ -55,6 +56,8 @@ def require_safe(source,before,after,patches,findings,position):
         replacement=p["replacement"]
         if not replacement.strip() and not (replace and f["category"]=="addition"):
             alarm("empty-non-addition")
+        if correction_feedback.enabled() and replace and replacement==p["target_anchor"]["quote"]:
+            alarm("unchanged-correction")
         st,en=position(before,p["target_anchor"])
         if replace and f["category"]!="addition":
             a,b=visible_size(before[st:en]),visible_size(replacement)
@@ -141,6 +144,9 @@ def transaction_cases(source,before,after,patches,findings,position):
                     "block":text[a:b],
                     "after_context":text[slice(*ranges[ids[i+1]])][:350] if i+1<len(ids) else ""}
         result.append({"finding_id":"block-"+bid,"patch_ids":fs,"reviewer_claim":claim(fs),
+                       "exact_edits":[{"finding_id":p["finding_id"],"operation":p["operation"],
+                                       "old_quote":p["target_anchor"]["quote"],"replacement":p["replacement"]}
+                                      for p in patches if p["finding_id"] in fs],
                        "original_excerpt":paired(source,left),
                        "current_translation_excerpt":paired(before,old),
                        "candidate_translation_excerpt":paired(after,new)})
@@ -150,6 +156,8 @@ def group_prompts(cases,contract):
     """Bound each paid request by size, without omitting any case."""
     groups=[];current=[]
     def build(items):
+        if correction_feedback.enabled():
+            return correction_feedback.prompt(items,contract)
         system,user=candidate_review.build_prompt(items,contract,max_prompt_chars=52_000)
         user+=("\nCheck the actual COMBINED candidate for a source-owned block "
                "or an exact reviewer-anchor-linked paragraph window. Separate source excerpts are "

@@ -127,7 +127,8 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "last_error":message,"gate_failure":status.get("transactional_gate_failure"),
                           "patch_progress":status.get("correction_batch_progress"),
                           "review_progress":status.get("review_chunk_progress"),
-                          "batch_size":prompt.get("batch_finding_count")},ensure_ascii=False),flush=True)
+                          "batch_size":prompt.get("batch_finding_count"),
+                          "semantic_preflight_summary":status.get("last_semantic_preflight")},ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
@@ -162,6 +163,7 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
     return {"arm":mode,"source_sha256":hashlib.sha256(source).hexdigest(),"workflow_revision":PIN,
             "state":status.get("state"),"stop_reason":reason,"wall_seconds":round(time.monotonic()-started,2),
             "calls_reserved":status.get("model_calls_started",0),"api":metrics.get("api",{}),
+            "requested_api":metrics.get("requested_api",{}),
             "accepted_operations":metrics.get("accepted_operations",{}),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}

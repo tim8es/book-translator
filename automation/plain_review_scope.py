@@ -107,7 +107,13 @@ def candidate_cases(source,before,after,patches,findings,position):
             # Keep a bounded scope rather than truncating a changed passage.
             # Adjacent (but not overlapping) paragraphs can be separated below.
             raise ScopeError("combined changed paragraph window exceeds safe bound")
-        nl,nr=after_offset(edits,lo),after_offset(edits,hi,right=True)
+        # Include only boundary insertions owned by this case. Other boundary
+        # edits shift the interval but are not themselves part of this passage.
+        own={p["finding_id"] for p in items}
+        nl=after_offset(edits,lo)+sum(len(p["replacement"]) for a,b,p in edits
+                                    if a==b==lo and p["finding_id"] not in own)
+        nr=after_offset(edits,hi)+sum(len(p["replacement"]) for a,b,p in edits
+                                    if a==b==hi and p["finding_id"] in own)
         if not 0<=nl<=nr<=len(after) or nr-nl>MAX_PASSAGE:
             raise ScopeError("candidate paragraph window exceeds safe bound")
         claims=[];sources={}
@@ -123,7 +129,10 @@ def candidate_cases(source,before,after,patches,findings,position):
             sources[key]["finding_ids"].append(f["id"])
             claims.append({"id":f["id"],"detail":f["detail"],"category":f["category"],
                            "severity":f["severity"],"source_quote":f["source_anchor"]["quote"]})
-        result.append({"finding_id":"paragraph-%03d"%i,"patch_ids":[p["finding_id"] for p in items],
+        result.append({"finding_id":"paragraph-%d-%d"%(lo,hi),"patch_ids":[p["finding_id"] for p in items],
+                       "exact_edits":[{"finding_id":p["finding_id"],"operation":p["operation"],
+                                       "old_quote":p["target_anchor"]["quote"],"replacement":p["replacement"]}
+                                      for p in items],
                        "reviewer_claim":claims,"original_excerpt":{"anchor_linked_passages":list(sources.values()),
                            "alignment":"source and target correspondence must be verified, not assumed"},
                        "current_translation_excerpt":context(before,lo,hi),
