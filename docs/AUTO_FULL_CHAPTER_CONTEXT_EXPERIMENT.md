@@ -1,9 +1,15 @@
-# Experimental full-chapter Auto translation context
+# Experimental chapter-context translation
 
-**Purpose:** distinguish poor first-pass fidelity due to missing chapter context from reviewer/corrector non-convergence. A/B requires the exact same fixture, models and independent review contracts; compare first-review new/major findings, translated/reviewed counts, provider prompt/completion tokens, wall time and EPUB verification.
+**Goal:** restore enough context for literary translation across Auto requests, keeping source-identified fragments and canonical independent review unchanged.
 
-**Opt-in:** \`BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT=on\` for structural Auto Translator calls. Each call reads exact source-hash-bound full original, includes all previously checkpointed translated spans in source order, and constrains generation to only selected source span IDs. This is **not** actual conversational model session memory; it explicitly reconstructs literary context from durable data. Unbounded chapters or oversized prompts use legacy bounded segments with a content-free reason in \`prompt_context.chapter_context\`. No content, tokens, book data or secrets are put into diagnostic records. No modification to canonical state/claims/review/EPUB acceptance or pinned book revision.
+- Opt-in: \`BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT=on\`.
+- Typical coherent Auto batch: up to ~12,000 original characters. Internal spans may be smaller for protected EPUB markup, but the model translates a *group*, not necessarily each individual segment as a separate call.
+- Short/medium chapters (up to 65,000 original characters): transmit the complete original chapter alongside the selected source-IDs. Include prior translated text in source order when it fits the bounded prompt. If the context exceeds the prompt character budget, discard older prior target excerpts first.
+- Longer chapters: translate contiguous source-ID batches with an overlapping contextual source window (target 56,000 source characters) surrounding the current batch, and up to 15,000 characters of nearby completed target text. The window shifts deterministically as the translation progresses. This is *not* a chapter summary and does not rewrite previous segments.
+- Hard ceiling: 145,000 characters across system and user prompts including serialized context. If needed, shrink *only the contextual window*, not the assigned source batch; fail closed if even the selected batch cannot be represented. No silent bare-segment fallback. The budget is a heuristic, **not** a guarantee of model-specific token capacity.
+- Provider pressure or rejected output may still invoke existing smaller rescue calls; all their prompts receive context through the same source-bound adapter. Protocol and accepted state remain unchanged.
+- Audit records store only mode, character counts, selection counts, and original-source offsets, not literary text or API secrets.
 
-**Limitations:** repeated full source and accumulated translated spans consume extra input tokens. Expanded context can trigger provider context pressure, output truncation or timeout. A/B must show a *lower independent first-pass error rate*, not just higher token usage. One live run cannot establish a general quality conclusion.
+**Verification:** deterministic tests exercise the complete chapter, the large sliding window, a final-window resume, model-prompt reduction and source identity. A real-model comparison must measure first-review quality, accepted chapters/hour, model calls, tokens and verified EPUB. Current existing test #11 tests only chapters of about 27k and 30k characters; it does not exercise this large-chapter mode.
 
-**Prior baseline:** run #9 (b45d17) produced 2 translated, 0 independently reviewed, 22 calls and 383,399 measured model tokens in 3600 seconds, 7 new first-review findings. Run #10 tests the same fixture with complete mapped review but without full chapter translation context; use it as the closer control once finalized.
+**Release:** draft PR only; do not merge or modify existing pinned book revisions without separate authorization.
