@@ -95,6 +95,9 @@ def build_user(data,chunk,total,metadata,glossary,style,prior,s,sr):
 
 def compile_response(answer,s,t,c,m,prior):
     _,sr,tr=packet(s,t,c,m)
+    return compile_tables(answer,s,t,sr,tr,prior)
+
+def compile_tables(answer,s,t,sr,tr,prior):
     try:raw=json.loads(answer)
     except (ValueError,TypeError) as exc:raise ValueError("invalid addressed JSON") from exc
     if (not isinstance(raw,dict) or set(raw)!={"outcome","checks","findings","glossary","style_guide"}
