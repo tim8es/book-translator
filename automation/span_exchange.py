@@ -29,6 +29,49 @@ def translation_map(source,translation,segments,helper,plan_builder):
     return span_map.from_render(plan,segments,source,translation)
 
 
+def correction_map(source,before,candidate,mapping,record,acceptance,intents,helper):
+    """Verify a correction against the same current evidence and patch rules as Auto.
+
+    The returned map describes only actual applied bytes. It is not review
+    evidence or permission to promote the corrected translation to reviewed.
+    """
+    import book_runner as runner
+    import transactional_quality
+    import correction_regression
+    if (not isinstance(record,dict) or record.get("outcome")!="CORRECTIONS_REQUIRED"
+            or not isinstance(acceptance,dict)
+            or record.get("source_sha256")!=span_map.sha(source)
+            or record.get("translation_sha256")!=span_map.sha(before)
+            or acceptance.get("source_sha256")!=record["source_sha256"]
+            or acceptance.get("translation_sha256")!=record["translation_sha256"]):
+        raise ValueError("correction requires current accepted rejected version")
+    report=record.get("quality_report")
+    if not isinstance(report,dict) or report.get("evidence_version")!=2:
+        raise ValueError("correction requires anchored canonical review")
+    findings=[f for f in report["findings"] if not f["resolved"]]
+    if not findings:
+        raise ValueError("no current unresolved correction finding")
+    # Same parser and versioned protocol as the Auto runner. Partial progress
+    # is allowed but all unaddressed issues remain for canonical re-review.
+    patches,_,_=runner.parse_correction_patches(json.dumps(
+        {"patches":intents,"glossary":[],"style_guide":[]},ensure_ascii=False),
+        findings,allow_partial=True)
+    by_id={f["id"]:f for f in findings}
+    for p in patches:
+        helper.validate_intent(p,by_id[p["finding_id"]])
+        if p["operation"]=="replace" and p["replacement"]==p["target_anchor"]["quote"]:
+            raise ValueError("unchanged correction")
+    after=runner.apply_correction_patches(before,patches)
+    if after==before or after!=candidate:
+        raise ValueError("exact patches do not reproduce submitted corrected text")
+    runner.check_markers(source,after)
+    transactional_quality.require_safe(source,before,after,patches,findings,runner._anchor_position,force=True)
+    correction_regression.require_no_new_repetitions(before,after)
+    if mapping is None:
+        return None
+    return span_map.after_patches(mapping,source,before,after,patches,runner._anchor_position)
+
+
 def parts(source,target,mapping):
     # Match the Auto mapped review planner. Single-part human-led review is
     # valid for small units; it still covers all original and accepted text.

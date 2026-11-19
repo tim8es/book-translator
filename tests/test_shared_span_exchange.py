@@ -102,4 +102,57 @@ class SharedSpanExchangeTests(unittest.TestCase):
             self.assertTrue(any("review-record" in c for c in calls))
             self.assertFalse(any("accept-review" in c for c in calls))
 
+
+    def test_chat_correction_rebases_same_map_and_rejects_stale_or_unbound(self):
+        s="She might return. She never promised.\n\nThe station was empty.\n"
+        before="Она точно вернётся. Она не обещала.\n\nСтанция была пустой.\n"
+        m=exchange.translation_map(s,before,{"s00001":before.strip()},helper,book_runner.bounded_source_plan)
+        protocol=load("correction_shared_test",ROOT/"scripts/workflow/correction_protocol.py")
+        acceptance={"source_sha256":span_map.sha(s),"translation_sha256":span_map.sha(before)}
+        f={"id":"f1","category":"modality","severity":"major","resolved":False,
+           "detail":"Possibility became certainty.",
+           "source_anchor":{"quote":"She might return.","occurrence":0},
+           "translation_anchor":{"quote":"Она точно вернётся.","occurrence":0}}
+        record={"record_id":"b"*32,"outcome":"CORRECTIONS_REQUIRED",**acceptance,
+                "quality_report":{"evidence_version":2,"findings":[f]}}
+        edit={"finding_id":"f1","operation":"replace","replacement":"Она, возможно, вернётся."}
+        new=before.replace(f["translation_anchor"]["quote"],edit["replacement"])
+        mapped=exchange.correction_map(s,before,new,m,record,acceptance,[edit],protocol)
+        span_map.validate(mapped,s,new)
+        self.assertEqual(mapped["spans"][0]["source_sha256"],m["spans"][0]["source_sha256"])
+        for current,p in ((new+"Extra",[edit]),(new,[{**edit,"finding_id":"invented"}]),
+                          (before,[{**edit,"replacement":f["translation_anchor"]["quote"]}])):
+            from omniroute import ModelError
+            with self.assertRaises((ValueError,RuntimeError,ModelError)):
+                exchange.correction_map(s,before,current,m,record,acceptance,p,protocol)
+        with self.assertRaises(ValueError):
+            exchange.correction_map(s,before,new,m,{**record,"translation_sha256":"0"*64},acceptance,[edit],protocol)
+        # The existing bridge uses the same current ledger, claim and
+        # accepted-translation boundary, and persists a newly bound map.
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);book=root/"books/test-book";book.mkdir(parents=True)
+            (book/"source.md").write_bytes(s.encode());(book/"target.md").write_bytes(before.encode())
+            unit={"unit_id":"chapter-000001","source_path":"source.md","translation_path":"target.md",
+                  "translation_acceptance":acceptance}
+            record.update({"unit_id":unit["unit_id"],"sequence":1})
+            (book/"review-ledger.json").write_text(json.dumps({"records":[record]}))
+            span_map.persist_artifact(book,unit["unit_id"],m,s,before)
+            request={"schema_version":1,"request_id":RID,"book_slug":"test-book",
+                     "workflow_revision":"c"*40,"chapter":1,"session_id":"corrector",
+                     "operation":"accept-translation","translation":new,
+                     "source_sha256":span_map.sha(s),"translation_sha256":span_map.sha(new),"claim_sha256":"d"*64,
+                     "correction_patches":[edit],"previous_review_record_id":record["record_id"]}
+            self.assertEqual(bridge.validate(request,RID),request)
+            with self.assertRaises(bridge.RequestError):
+                bridge.validate({**request,"structural_segments":{"s00001":new.strip()}},RID)
+            with patch.object(bridge,"expected_book",return_value=(book,{})),patch.object(bridge,"pinned_engine",return_value=root),\
+                    patch.object(bridge,"chapter_and_claim",return_value=unit),patch.object(bridge,"cli",return_value={}) as cli,\
+                    patch.object(book_runner,"load_public_correction_helper",return_value=protocol):
+                with self.assertRaises(bridge.RequestError):
+                    bridge.execute(root,root,{**request,"previous_review_record_id":"0"*32})
+                self.assertEqual((book/"target.md").read_text(),before)
+                bridge.execute(root,root,request)
+                self.assertEqual(span_map.read_artifact(book,unit["unit_id"],s,new),mapped)
+                self.assertFalse(any("accept-review" in c.args for c in cli.call_args_list))
+
 if __name__=="__main__":unittest.main()

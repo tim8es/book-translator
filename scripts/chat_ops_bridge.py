@@ -93,7 +93,9 @@ def validate(raw: dict, file_id: str) -> dict:
     }[op]
     expected=common|extras
     if op=="accept-translation":
-        require(set(raw) in (expected,expected|{"structural_segments"}),"missing or unexpected request fields")
+        require(set(raw) in (expected,expected|{"structural_segments"},
+                             expected|{"correction_patches","previous_review_record_id"}),
+                "missing or unexpected request fields")
     elif op=="review-record":
         require(set(raw) in (expected,(expected-{"quality_report"})|{"addressed_parts"}),"missing or unexpected request fields")
     else:
@@ -127,6 +129,14 @@ def validate(raw: dict, file_id: str) -> dict:
                     all(re.fullmatch(r"s[0-9]{5}",k) and isinstance(v,str) and v.strip() for k,v in rows.items())
                     and len(json.dumps(rows,ensure_ascii=False).encode("utf-8"))<=600000,
                     "invalid structural segment response")
+        if "correction_patches" in raw:
+            rows=raw["correction_patches"]
+            require(type(rows) is list and 1<=len(rows)<=100 and
+                    len(json.dumps(rows,ensure_ascii=False).encode("utf-8"))<=524288,
+                    "invalid correction response size")
+            require(isinstance(raw["previous_review_record_id"],str) and
+                    HEX32.fullmatch(raw["previous_review_record_id"]) is not None,
+                    "invalid previous review identity")
     if op == "review-record":
         require(raw["outcome"] in {"PASS", "CORRECTIONS_REQUIRED"}, "invalid outcome")
         if "addressed_parts" in raw:
@@ -338,6 +348,20 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
                 runner.check_markers(original,request["translation"])
             except (ValueError,KeyError,TypeError,RuntimeError) as exc:
                 raise RequestError("structural segment evidence rejected") from exc
+        elif "correction_patches" in request:
+            runner,maps,exchange=span_helpers()
+            original=(book/unit["source_path"]).read_bytes().decode("utf-8")
+            before=path.read_bytes().decode("utf-8")
+            try:
+                previous=runner.latest_record(strict_json(book/"review-ledger.json"),unit)
+                require(isinstance(previous,dict) and previous.get("record_id")==request["previous_review_record_id"],
+                        "review record changed")
+                old_map=maps.read_artifact(book,unit["unit_id"],original,before)
+                helper=runner.load_public_correction_helper(pinned)
+                mapping=exchange.correction_map(original,before,request["translation"],old_map,previous,
+                    unit.get("translation_acceptance"),request["correction_patches"],helper)
+            except (ValueError,KeyError,TypeError,RuntimeError) as exc:
+                raise RequestError("correction evidence rejected") from exc
         # Not durable until canonical acceptance, shared map and receipt push together.
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(request["translation"].encode("utf-8"))

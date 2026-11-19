@@ -41,8 +41,8 @@ def alarm(code,**proof):
 def shortened(a,b):
     return a>=35 and a-b>=20 and b*100<a*65
 
-def require_safe(source,before,after,patches,findings,position):
-    if not enabled():
+def require_safe(source,before,after,patches,findings,position,*,force=False):
+    if not (force or enabled()):
         return
     by_id={f["id"]:f for f in findings}
     left,old,new=blocks(source),blocks(before),blocks(after)
