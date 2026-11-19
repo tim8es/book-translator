@@ -68,6 +68,29 @@ def select(text,ids,table):
             if not PROTECTED.search(q) and text.count(q)==1:return {"quote":q,"occurrence":0},(lo,hi)
     raise ValueError("first repeated address cannot be represented uniquely")
 
+def response_contract(*, followup=False):
+    """Wire format only; pinned literary requirements and validators still apply."""
+    return (
+        "\n\nID-ADDRESSED REVIEW RESPONSE PROTOCOL (runtime adapter): "
+        "For this call the model-facing JSON format is the ID format specified below, "
+        "not the pinned contract's illustrative canonical quote/occurrence report. "
+        "The runtime compiles IDs to exact v2 anchors and attaches review provenance. "
+        "Return precisely one JSON object with keys outcome, checks, findings, glossary, style_guide. "
+        "Each finding has exactly source_ids, target_ids, category, severity, detail, prior, resolved. "
+        "Do not include evidence_version, context, id, source_anchor, translation_anchor or resolves "
+        "in the model-facing response. Do not copy quotes. Use actual supplied passage IDs only. "
+        "All five checks must be JSON booleans true only after performing them; never fabricate evidence. "
+        'For an actual clean first review the complete shape is {"outcome":"PASS","checks":'
+        '{"coverage":true,"meaning":true,"terminology":true,"style":true,"structure":true},'
+        '"findings":[],"glossary":[],"style_guide":[]}. This is a format example, not an outcome instruction. '
+        "For a follow-up include every required prior recheck, including resolved findings. "
+        "Do not mark a new finding resolved. Use CORRECTIONS_REQUIRED when any issue remains. "
+        "Return JSON only, without commentary."
+        + (' For this bounded follow-up, {"outcome":"FULL_REQUIRED"} is the sole alternative '
+           "when the supplied evidence is insufficient; it is not approval." if followup else "")
+    )
+
+
 def build_user(data,chunk,total,metadata,glossary,style,prior,s,sr):
     old=[]
     for f in prior:
@@ -100,12 +123,19 @@ def compile_response(answer,s,t,c,m,prior):
 def compile_tables(answer,s,t,sr,tr,prior):
     try:raw=json.loads(answer)
     except (ValueError,TypeError) as exc:raise ValueError("invalid addressed JSON") from exc
-    if (not isinstance(raw,dict) or set(raw)!={"outcome","checks","findings","glossary","style_guide"}
-            or raw["outcome"] not in {"PASS","CORRECTIONS_REQUIRED"}
+    # Fixed diagnostic codes: do not expose the model response or book text.
+    if not isinstance(raw,dict) or set(raw)!={"outcome","checks","findings","glossary","style_guide"}:
+        raise ValueError("invalid addressed review evidence: envelope fields")
+    if raw["outcome"] not in {"PASS","CORRECTIONS_REQUIRED"}:
+        raise ValueError("invalid addressed review evidence: outcome")
+    if (not isinstance(raw["checks"],dict)
             or raw["checks"]!=dict.fromkeys(compact_review.CHECKS,True)
-            or any(type(v) is not bool for v in raw["checks"].values())
-            or not isinstance(raw["findings"],list) or len(raw["findings"])>100):
-        raise ValueError("invalid addressed review evidence")
+            or any(type(v) is not bool for v in raw["checks"].values())):
+        raise ValueError("invalid addressed review evidence: checks")
+    if not isinstance(raw["findings"],list) or len(raw["findings"])>100:
+        raise ValueError("invalid addressed review evidence: findings")
+    if not isinstance(raw["glossary"],list) or not isinstance(raw["style_guide"],list):
+        raise ValueError("invalid addressed review evidence: literary proposal arrays")
     old={f["id"]:f for f in prior};seen=set();items=[]
     for i,f in enumerate(raw["findings"],1):
         if (not isinstance(f,dict) or set(f)!={"source_ids","target_ids","category","severity","detail","prior","resolved"}

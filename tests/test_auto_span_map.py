@@ -49,6 +49,27 @@ class SpanMapTests(unittest.TestCase):
         with self.assertRaises(ValueError):ar.compile_response(json.dumps(raw),s,t,c,m,[])
         raw["outcome"]="CORRECTIONS_REQUIRED";f["target_ids"]=["invented"]
         with self.assertRaises(ValueError):ar.compile_response(json.dumps(raw),s,t,c,m,[])
+    def test_addressed_wire_contract_and_diagnostics(self):
+        s,t,m=fixture();c=chunk(s,t)
+        contract=ar.response_contract()
+        self.assertIn("not the pinned contract",contract)
+        self.assertNotIn("FULL_REQUIRED",contract)
+        self.assertIn("FULL_REQUIRED",ar.response_contract(followup=True))
+        raw={"outcome":"PASS","checks":dict.fromkeys(("coverage","meaning","terminology","style","structure"),True),
+             "findings":[],"glossary":[],"style_guide":[]}
+        self.assertEqual(json.loads(ar.compile_response(json.dumps(raw),s,t,c,m,[]))["outcome"],"PASS")
+        cases=[({**raw,"context":"private text"},"envelope fields"),
+               ({**raw,"outcome":"FULL_REQUIRED"},"outcome"),
+               ({**raw,"checks":{**raw["checks"],"meaning":False}},"checks"),
+               ({**raw,"checks":{**raw["checks"],"meaning":1}},"checks"),
+               ({**raw,"findings":{}},"findings"),
+               ({**raw,"glossary":{}},"literary proposal arrays")]
+        for invalid,code in cases:
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(ValueError,code) as error:
+                    ar.compile_response(json.dumps(invalid),s,t,c,m,[])
+                self.assertNotIn("private text",str(error.exception))
+
     def test_prior_recheck_wrong_source_rejected(self):
         s,t,m=fixture();old={"id":"old","previous_record_id":"a"*32,"source_anchor":{"quote":"He might have seen the station.","occurrence":0}}
         f={"source_ids":["s00002.s1"],"target_ids":["s00002.t1"],"category":"modality","severity":"major",

@@ -3779,7 +3779,14 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                    "markers. They will be restored deterministically. Translate "
                    "only the provided original-source text spans; do not add "
                    "technical markup or URLs or repeat any unrelated unit. "
-                   "The pinned Translator literary fidelity requirements still apply.")
+                   "The pinned Translator literary fidelity requirements still apply. "
+                   "For structural mode ONLY, the output wire format overrides any illustrative "
+                   "full-unit translation schema above: return exactly one JSON object with keys "
+                   "segments, glossary, style_guide. segments is an array of objects with exactly "
+                   "id and translation; use each supplied source ID at most once. "
+                   "Translate all selected IDs; if returning a partial result use a nonempty subset "
+                   "of those IDs only. Both literary proposal fields must be arrays, even when empty. "
+                   "Never return a full-unit translation field, extra segment IDs or commentary.")
     else:
         system += ("\n\nTokens beginning ZXBTLINK mark a visible link label; "
                    "preserve each STARTXZ/ENDXZ token exactly and in order.")
@@ -4380,8 +4387,9 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
             model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
                                    target_language=bibliographic.get("target_language","unspecified")),
             style,old_findings,source,sr)
-        if len(system)+len(user)<=120_000:
-            return system,user
+        addressed_system=system+addressed_review.response_contract()
+        if len(addressed_system)+len(user)<=120_000:
+            return addressed_system,user
     paired = compact_review.packet(source, translation, chunk) if compact_review.enabled() else None
     if paired is not None:
         compact_user = compact_review.build_user(paired, chunk, total, bibliographic,
@@ -4884,7 +4892,7 @@ def mapped_followup_context(engine,slug,chapter,previous,source,target):
     bibliographic={k:meta[k] for k in ("title","author","source_language","target_language")
                    if isinstance(meta.get(k),str)}
     system,_=role_contracts(engine,"reviewer")
-    system+="\n\n"+GLOSSARY_POLICY
+    system+="\n\n"+GLOSSARY_POLICY+addressed_review.response_contract(followup=True)
     user=addressed_review.build_user(data,{"id":"mapped-followup"},1,bibliographic,
         model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
                                target_language=bibliographic.get("target_language","unspecified")),
