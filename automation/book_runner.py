@@ -3857,6 +3857,9 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                 pairs = [transactional_quality.correction_context(source, translation_raw, item, _anchor_position)
                          for item in unresolved]
                 source_display += "\nCOMPLETE ALIGNED SOURCE AND TARGET BLOCKS (when available):\n" + json.dumps(pairs, ensure_ascii=False)
+        if os.environ.get("BOOK_TRANSLATOR_CORRECTION_LINEAGE_FEEDBACK")=="on":
+            history=review_convergence.prior_attempts(ledger,record,unresolved,source,_anchor_position)
+            source_display+=review_convergence.prior_attempt_prompt(history)
         if any(item["translation_anchor"] is None for item in unresolved):
             source_display += ("\nCURRENT TRANSLATION FOR OMITTED-PASSAGE PLACEMENT:\n"
                                + mask_translation_links(source, translation_raw))
@@ -5368,6 +5371,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             quality_report.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
             cli("review-record", slug, str(chapter["number"]), "--outcome", outcome,
                 "--session-id", active["session_id"], "--quality-report", str(quality_report))
+        if os.environ.get("BOOK_TRANSLATOR_CORRECTION_LINEAGE_FEEDBACK")=="on":
+            history=status.setdefault("review_convergence_history",[])
+            history.append({"unit_id":unit_id,"model_calls":status.get("model_calls_started",0),
+                            **review_convergence.round_counts(report,previous_record,outcome)})
+            status["review_convergence_history"]=history[-40:]
         status.pop("memory_recheck_unit", None)
         if status.get("force_full_review_unit") == unit_id:
             status.pop("force_full_review_unit", None)

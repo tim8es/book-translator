@@ -103,6 +103,9 @@ class MappedRecoveryTests(unittest.TestCase):
         baseline,n0=run("off");audit={};fresh,n1=run("on",audit=audit)
         self.assertNotIn(last["id"],baseline["completed"])
         self.assertEqual(n1,n0+1)
+        print("DETERMINISTIC_REUSE_METRICS", {"windows":len(next_plan["chunks"]),
+               "before_pending":len(next_plan["chunks"])-n0,
+               "after_pending":len(next_plan["chunks"])-n1})
         self.assertEqual(fresh["completed"][last["id"]]["report"]["findings"],[])
         self.assertEqual(fresh["reused"][last["id"]]["from_record_id"],record["record_id"])
         self.assertEqual(audit["reused"],n1)

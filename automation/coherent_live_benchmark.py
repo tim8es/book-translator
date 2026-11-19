@@ -176,6 +176,7 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             "requested_api":metrics.get("requested_api",{}),
             "memory_proposals_rejected":status.get("optional_memory_proposals_rejected",0),
             "review_rebases":status.get("review_incremental_rebases",[]),
+            "review_convergence":status.get("review_convergence_history",[]),
             "accepted_operations":metrics.get("accepted_operations",{}),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}

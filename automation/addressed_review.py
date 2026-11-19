@@ -183,6 +183,62 @@ def compile_response(answer,s,t,c,m,prior):
         # core boundaries and recheck lineage. Only the transport is different.
         raw=json.loads(answer)
         if isinstance(raw,dict) and raw.get("evidence_version")==2:
+            # The canonical pipeline validates ordinary v2 evidence again.
+            # Do not let fallback bypass outcome or prior-lineage checks.
+            if (set(raw)!={"evidence_version","outcome","checks","findings","glossary","style_guide"}
+                    or type(raw["evidence_version"]) is not int
+                    or raw["outcome"] not in {"PASS","CORRECTIONS_REQUIRED"}
+                    or not isinstance(raw["checks"],dict)
+                    or raw["checks"]!=dict.fromkeys(compact_review.CHECKS,True)
+                    or any(type(v) is not bool for v in raw["checks"].values())
+                    or not isinstance(raw["findings"],list) or not 1<=len(raw["findings"])<=100
+                    or not isinstance(raw["glossary"],list) or not isinstance(raw["style_guide"],list)):
+                raise ValueError("invalid protected canonical evidence")
+            old={f["id"]:f for f in prior};seen=set();ids=set();needs_fallback=False
+            def locate(text,q,bounds):
+                if (not isinstance(q,dict) or set(q)!={"quote","occurrence"}
+                        or not isinstance(q["quote"],str) or not 1<=len(q["quote"])<=300
+                        or not q["quote"].strip() or type(q["occurrence"]) is not int
+                        or not 0<=q["occurrence"]<10000):
+                    raise ValueError("invalid protected quote")
+                hits=compact_review.occurrences(text,q["quote"]);n=q["occurrence"]
+                if n>=len(hits) or (n==0 and len(hits)!=1):
+                    raise ValueError("ambiguous protected quote")
+                x=hits[n];y=x+len(q["quote"])
+                if not bounds[0]<=x<y<=bounds[1]:raise ValueError("protected quote outside assigned scope")
+                return x,y
+            for f in raw["findings"]:
+                if (not isinstance(f,dict) or set(f)!={"id","category","severity","detail","resolved","source_anchor","translation_anchor","resolves"}
+                        or not isinstance(f["id"],str) or f["id"] in ids
+                        or not re.fullmatch(r"[a-z][a-z0-9-]{0,19}",f["id"])
+                        or f["id"].startswith("chunk-") or type(f["resolved"]) is not bool
+                        or f["category"] not in {"omission","addition","meaning","modality","referent","terminology","register","voice","style","structure"}
+                        or f["severity"] not in {"minor","major","critical"}
+                        or not isinstance(f["detail"],str) or not 1<=len(f["detail"].strip())<=1000):
+                    raise ValueError("invalid protected canonical finding")
+                ids.add(f["id"])
+                x,y=locate(s,f["source_anchor"],c["source_core"])
+                needs_fallback|=overlaps_protected(protected_ranges(s),x,y)
+                if f["translation_anchor"] is None:
+                    if f["category"]!="omission" or f["resolved"]:raise ValueError("invalid missing target anchor")
+                else:
+                    u,v=locate(t,f["translation_anchor"],c["translation_window"])
+                    needs_fallback|=overlaps_protected(protected_ranges(t),u,v)
+                lin=f["resolves"]
+                if lin is None:
+                    if f["resolved"]:raise ValueError("new protected finding cannot resolve itself")
+                else:
+                    if not isinstance(lin,dict) or set(lin)!={"record_id","finding_id"}:
+                        raise ValueError("invalid protected lineage")
+                    fid=lin["finding_id"]
+                    if not isinstance(fid,str) or fid not in old or fid in seen or lin["record_id"]!=old[fid]["previous_record_id"]:
+                        raise ValueError("wrong protected lineage")
+                    u,v=locate(s,old[fid]["source_anchor"],[0,len(s)])
+                    if not (x<v and u<y):raise ValueError("protected recheck changed source passage")
+                    needs_fallback|=overlaps_protected(protected_ranges(s),u,v)
+                    seen.add(fid)
+            if not needs_fallback or seen!=set(old) or (raw["outcome"]=="PASS")==any(not f["resolved"] for f in raw["findings"]):
+                raise ValueError("protected canonical fallback not justified or incomplete")
             return json.dumps(raw,ensure_ascii=False)
     return compile_tables(answer,s,t,sr,tr,prior)
 
