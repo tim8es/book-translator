@@ -47,6 +47,7 @@ import resilient_recovery
 import span_map
 import addressed_review
 import mapped_followup
+import mapped_correction
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -335,7 +336,8 @@ def reviewer_model_output_code(error: ModelError) -> str | None:
     if not isinstance(error, ModelError) or isinstance(error, TransientModelError):
         return None
     message = str(error)
-    if message.startswith("compact reviewer evidence rejected: "):
+    if message.startswith(("compact reviewer evidence rejected: ","reviewer evidence is invalid: mapped follow-up ",
+                           "reviewer evidence is invalid: addressed review ")):
         return "review_evidence_invalid"
     if message in {
         "reviewer must return JSON",
@@ -2356,12 +2358,18 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
     candidate=apply_correction_patches(translation,patches)
     try:
         transactional_quality.require_safe(source,translation,candidate,patches,findings,_anchor_position)
-        cases=transactional_quality.transaction_cases(source,translation,candidate,patches,findings,_anchor_position)
+        cases=None
+        if span_map.enabled():
+            mapping=read_span_map(slug,chapter["unit_id"],source,translation)
+            cases=mapped_correction.cases(mapping,source,translation,candidate,patches,findings,_anchor_position)
+        mapped_cases=cases is not None
+        if cases is None:
+            cases=transactional_quality.transaction_cases(source,translation,candidate,patches,findings,_anchor_position)
         complete_case_count=len(cases)
         cases=single_review_gate.select_cases(cases,patches,findings)
         if single_review_gate.enabled():
             status["single_review_gate_summary"]={"unit_id":chapter["unit_id"],"total_cases":complete_case_count,
-                "high_risk_preflight_cases":len(cases),"canonical_review_required":True,
+                "high_risk_preflight_cases":len(cases),"canonical_review_required":True,"source_owned_cases":mapped_cases,
                 "candidate_sha256":transactional_quality.digest(candidate)}
         if not cases and complete_case_count and single_review_gate.enabled():
             # Machine acceptance only; next canonical independent review is mandatory.
@@ -2659,6 +2667,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
+    correction_map=read_span_map(slug,chapter["unit_id"],source,translation) if span_map.enabled() else None
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
@@ -2731,6 +2740,10 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 pending, translation, selected, status.get("correction_regression_rejections", []),
                 chapter["unit_id"], record["record_id"], failures=status.get("failures", 0),
                 pressure=pressure, isolated=bool(isolated))
+            if correction_map is not None:
+                selected=mapped_correction.selection(correction_map,source,translation,pending,selected,stage["patches"],
+                    status.get("correction_regression_rejections",[]),chapter["unit_id"],record["record_id"],
+                    _anchor_position,failures=status.get("failures",0),pressure=pressure,isolated=bool(isolated))
             if coherent_batches.enabled():
                 status["adaptive_correction_budget"]["current_selection_size"] = len(selected)
         if continue_batches and isolated and len(pending) > 1 and not single_review_gate.enabled():
@@ -2782,7 +2795,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             "glossary_sha256": fingerprint(book / "glossary.md"),
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
-            "correction_mode": ("block-reconstruction" if recovery is not None else "bounded-review-patches"),
+            "correction_mode": ("block-reconstruction" if recovery is not None else
+                                "mapped-coherent-patches" if correction_map is not None and "EXACT SOURCE-OWNED CORRECTION GROUPS" in user else "bounded-review-patches"),
             "batch_finding_count": len(selected),
         }
         count = status.get("model_calls_started", 0)
@@ -3808,17 +3822,28 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                       [item for item in findings if not item.get("resolved")])
         if not unresolved:
             raise JobError("correction requested without unresolved reviewer findings")
-        source_display = json.dumps([
-            {"finding_id": item["id"], "finding": item,
-             "source_context": _anchor_excerpt(source, item["source_anchor"]),
-             "translation_context": (_anchor_excerpt(translation_raw, item["translation_anchor"])
-                                     if item["translation_anchor"] else None)}
-            for item in unresolved
-        ], ensure_ascii=False)
-        if transactional_quality.enabled():
-            pairs = [transactional_quality.correction_context(source, translation_raw, item, _anchor_position)
-                     for item in unresolved]
-            source_display += "\nCOMPLETE ALIGNED SOURCE AND TARGET BLOCKS (when available):\n" + json.dumps(pairs, ensure_ascii=False)
+        grouped=None
+        if span_map.enabled() and correction_findings is not None:
+            mapping=read_span_map(slug,chapter["unit_id"],source,translation_raw)
+            if mapping is not None:
+                grouped=mapped_correction.packet(mapping,source,translation_raw,unresolved,_anchor_position)
+        if grouped is not None:
+            source_display=("EXACT SOURCE-OWNED CORRECTION GROUPS:\n"+json.dumps(grouped,ensure_ascii=False,separators=(",",":"))+
+                "\nCompare the entire corresponding span before proposing an edit. Resolve the selected findings coherently; "
+                "retain every source-supported detail and use only the existing original reviewer anchor for each patch. "
+                "Never return a whole span unless its exact anchor is the whole span. Do not claim a finding closed.")
+        else:
+            source_display = json.dumps([
+                {"finding_id": item["id"], "finding": item,
+                 "source_context": _anchor_excerpt(source, item["source_anchor"]),
+                 "translation_context": (_anchor_excerpt(translation_raw, item["translation_anchor"])
+                                         if item["translation_anchor"] else None)}
+                for item in unresolved
+            ], ensure_ascii=False)
+            if transactional_quality.enabled():
+                pairs = [transactional_quality.correction_context(source, translation_raw, item, _anchor_position)
+                         for item in unresolved]
+                source_display += "\nCOMPLETE ALIGNED SOURCE AND TARGET BLOCKS (when available):\n" + json.dumps(pairs, ensure_ascii=False)
         if any(item["translation_anchor"] is None for item in unresolved):
             source_display += ("\nCURRENT TRANSLATION FOR OMITTED-PASSAGE PLACEMENT:\n"
                                + mask_translation_links(source, translation_raw))
@@ -4685,8 +4710,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         answer = complete_for_job(status, "REVIEWER", system, user)
         try:
             if id_map is not None and user.startswith("ID-addressed independent review "):
-                normalized=addressed_review.compile_response(answer,source,translation,next_part,id_map,
-                    review_chunks.find_previous_for_chunk(previous,next_part,source))
+                try:
+                    normalized=addressed_review.compile_response(answer,source,translation,next_part,id_map,
+                        review_chunks.find_previous_for_chunk(previous,next_part,source))
+                except (ValueError,KeyError,TypeError) as exc:
+                    raise ModelError("reviewer evidence is invalid: addressed review "+str(exc)) from exc
             elif compact_review.enabled() and user.startswith("Independent paired review, "):
                 normalized = compact_review.compile_response(answer, source, translation, next_part,
                     review_chunks.find_previous_for_chunk(previous, next_part, source))
