@@ -39,7 +39,7 @@ class FullChapterContextTests(unittest.TestCase):
         self.assertEqual(evidence["context_source_range"],[0,len(source)])
         self.assertEqual(evidence["previously_translated_segments"],
                          [{"id":ordered[0]["id"],"translation":prior[ordered[0]["id"]]}])
-        self.assertIn("Translate ONLY the selected",prompt)
+        self.assertIn("Translate ONLY the source IDs assigned",prompt)
         self.assertIn('"selected_segment_ids"',prompt)
         self.assertEqual(audit["prior_segments"],1)
         self.assertEqual(audit["selected_segments"],len(selected))
@@ -53,7 +53,6 @@ class FullChapterContextTests(unittest.TestCase):
             self.assertEqual((prompt,audit),("request",{"mode":"disabled"}))
         with patch.dict(os.environ,{"BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT":"on"}),\
                 patch.object(chapter_context,"MAX_PROMPT_CHARS",100):
-            prompt,audit=chapter_context.append(helper,plan,source,before["segments"],ordered[1:],"s","request")
             with self.assertRaisesRegex(ValueError,"budget cannot hold"):
                 chapter_context.append(helper,plan,source,before["segments"],ordered[1:],"s","request")
         self.assertEqual(before,{"segments":{ordered[0]["id"]:"Сохранённый текст"}})
