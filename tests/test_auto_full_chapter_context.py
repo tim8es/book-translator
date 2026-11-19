@@ -98,6 +98,23 @@ class FullChapterContextTests(unittest.TestCase):
         self.assertLessEqual(audit["prompt_chars"],chapter_context.MAX_PROMPT_CHARS)
         self.assertIn("A great deal",prompt)
 
+    def test_full_context_enables_large_translation_batches_itself(self):
+        import coherent_batches
+        source=("A sentence with meaningful relationships. "*80+"\n\n")*18
+        plan=book_runner.bounded_source_plan(source,helper)
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_COHERENT_BATCHES":"off",
+                                    "BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT":"on"}):
+            baseline=coherent_batches.structural_selection(
+                helper,plan,{},24)
+            larger=coherent_batches.structural_selection(
+                helper,plan,{},24,full_chapter=chapter_context.enabled())
+        self.assertGreater(sum(len(item["source"]) for item in larger),
+                           sum(len(item["source"]) for item in baseline))
+        self.assertLessEqual(sum(len(item["source"]) for item in larger),12000)
+        self.assertGreater(sum(len(item["source"]) for item in larger),3500)
+        self.assertEqual([i["id"] for i in larger],
+                         [i["id"] for i in helper.spans(plan)[:len(larger)]])
+
     def test_budget_shrinks_context_not_selected_batch(self):
         paragraphs=[("Word dialogue with meaningful context. "*35)
                     for _ in range(65)]

@@ -14,10 +14,10 @@ def enabled():
         raise ValueError("BOOK_TRANSLATOR_COHERENT_BATCHES must be on or off")
     return value == "on"
 
-def structural_selection(helper, plan, completed, legacy_limit, pressure=0, fallback=False):
+def structural_selection(helper, plan, completed, legacy_limit, pressure=0, fallback=False, *, full_chapter=False):
     # The pinned helper validates both the immutable plan and the durable stage.
     baseline = helper.next_spans(plan, completed, limit=legacy_limit)
-    if not enabled() or pressure or fallback or not baseline:
+    if (not enabled() and not full_chapter) or pressure or fallback or not baseline:
         return baseline
     chosen = []
     chars = 0

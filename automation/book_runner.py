@@ -2122,7 +2122,8 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
         try:
             selected = coherent_batches.structural_selection(
                 helper, plan, stage["segments"], batch_limit, pressure=pressure,
-                fallback=fallback.get(chapter["unit_id"]) == plan["source_sha256"])
+                fallback=fallback.get(chapter["unit_id"]) == plan["source_sha256"],
+                full_chapter=chapter_context.enabled())
         except ValueError as exc:
             raise JobError("invalid source-bound structural translation progress") from exc
         if not selected:

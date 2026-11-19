@@ -16,6 +16,13 @@ WINDOW_SOURCE_CHARS = 56000
 PREVIOUS_TARGET_CHARS = 15000
 ENABLED = "BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT"
 
+def enabled():
+    value=os.environ.get(ENABLED,"off")
+    if value not in {"on","off"}:
+        raise ValueError("invalid chapter context feature flag")
+    return value=="on"
+
+
 GUIDANCE = (
     "\nCHAPTER LITERARY CONTEXT (read-only source evidence, not requested output): "
     "Use the original source below to understand scene continuity, who acts, "
@@ -37,6 +44,9 @@ def _spans_and_offsets(helper, plan, source):
     cursor = 0
     for part in plan["parts"]:
         if part["kind"] == "text":
+            exact=part["before"]+part["original"]+part["after"]
+            if source[cursor:cursor+len(exact)] != exact:
+                raise ValueError("source span bytes do not match exact chapter")
             cursor += len(part["before"])
             ident = part["id"]
             if source_by_id.get(ident) != part["original"]:
@@ -46,7 +56,10 @@ def _spans_and_offsets(helper, plan, source):
             offsets[ident] = (start,cursor)
             cursor += len(part["after"])
         else:
-            cursor += len(part["value"])
+            exact=part["value"]
+            if source[cursor:cursor+len(exact)] != exact:
+                raise ValueError("source protected bytes do not match exact chapter")
+            cursor += len(exact)
     if cursor != len(source) or len(offsets) != len(ordered):
         raise ValueError("chapter source/plan layout mismatch")
     return ordered,offsets
@@ -85,10 +98,7 @@ def _window(source, offsets, active_ids, length):
 
 def append(helper, plan, source, stage, selected, system, user):
     """Return a bounded prompt plus nonliterary audit; never mutate durable data."""
-    flag = os.environ.get(ENABLED, "off")
-    if flag not in {"on","off"}:
-        raise ValueError("invalid chapter context feature flag")
-    if flag == "off":
+    if not enabled():
         return user, {"mode":"disabled"}
     if (not isinstance(source,str) or not isinstance(plan,dict)
             or plan.get("source_sha256") != hashlib.sha256(source.encode("utf-8")).hexdigest()):
