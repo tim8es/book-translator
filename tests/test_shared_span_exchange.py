@@ -91,6 +91,55 @@ class SharedSpanExchangeTests(unittest.TestCase):
             split=span_map.make(s,t,[([0,cut],[0,cut]),([cut,len(s)],[cut,len(t)])])
             with self.assertRaises(ValueError):exchange.prepare(s,t,split)
 
+    def test_protected_canonical_fallback_requires_real_anchored_evidence(self):
+        marker="<!-- bt-block:000001 -->"
+        s=marker+"\nThe train stopped. [Station](#station) Here.\n"
+        t=marker+"\nПоезд остановился. [Вокзал](#station) Здесь.\n"
+        m=span_map.make(s,t,[([0,len(s)],[0,len(t)])])
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_ADDRESSED_EPUB":"on"}):
+            p=exchange.parts(s,t,m)[0]
+            finding={"id":"f1","category":"meaning","severity":"minor",
+                   "detail":"Check station label.","resolved":False,
+                   "source_anchor":{"quote":"[Station](#station)","occurrence":0},
+                   "translation_anchor":{"quote":"[Вокзал](#station)","occurrence":0},
+                   "resolves":None}
+            raw={"evidence_version":2,"outcome":"CORRECTIONS_REQUIRED","checks":CHECKS,
+                 "findings":[finding],"glossary":[],"style_guide":[]}
+            def compile_part(response,outcome):
+                return exchange.compile_review(s,t,m,None,[{"chunk_id":p["id"],"response":response}],outcome)
+            q=compile_part(raw,"CORRECTIONS_REQUIRED")
+            self.assertEqual(q["findings"][0]["source_anchor"],finding["source_anchor"])
+            cases=[
+                ({**raw,"outcome":"PASS"},"PASS"),
+                ({**raw,"outcome":"PASS","findings":[]},"PASS"),
+                ({**raw,"findings":[{**finding,"translation_anchor":{"quote":"invented","occurrence":0}}]},"CORRECTIONS_REQUIRED"),
+                ({**raw,"findings":[{**finding,"resolved":True}]},"CORRECTIONS_REQUIRED"),
+                ({**raw,"findings":[{**finding,"source_anchor":{"quote":"The train stopped.","occurrence":0},"translation_anchor":{"quote":"Поезд остановился.","occurrence":0}}]},"CORRECTIONS_REQUIRED"),
+            ]
+            for response,outcome in cases:
+                with self.subTest(response=response):
+                    with self.assertRaises(ValueError):compile_part(response,outcome)
+
+    def test_protected_interval_lookup_matches_full_reference_scan(self):
+        import addressed_review as ar
+        unit="<!-- bt-block:000001 -->\nSentence. [Station](#station) Next.\n"
+        text=unit*100
+        ranges=ar.protected_ranges(text)
+        def reference(lo,hi):
+            cursor=lo;out=[]
+            for a,b in ranges:
+                if a>=hi:break
+                if b<=lo:continue
+                out.extend((x,y,False) for x,y in ar.intervals(text,cursor,a))
+                out.append((a,b,True));cursor=b
+            out.extend((x,y,False) for x,y in ar.intervals(text,cursor,hi))
+            return out
+        for i in (0,1,50,99):
+            lo=i*len(unit);hi=lo+len(unit)
+            self.assertEqual(list(ar.protected_intervals(text,lo,hi,ranges)),reference(lo,hi))
+        with self.assertRaises(ValueError):
+            list(ar.protected_intervals(text,1,len(unit),ranges))
+
     def test_bridge_optional_schema_does_not_allow_both_review_formats(self):
         s,t,m=fixture()
         common={"schema_version":1,"request_id":RID,"book_slug":"test-book",

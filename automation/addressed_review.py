@@ -46,7 +46,11 @@ def overlaps_protected(ranges,a,b):
 
 def protected_intervals(text,lo,hi,ranges):
     cursor=lo
-    for a,b in ranges:
+    # The spans are ordered and disjoint. Jump to the first possible
+    # overlap rather than rescanning all previous markup for every span.
+    start=max(0,bisect_right(ranges,(lo,float("inf")))-1)
+    for k in range(start,len(ranges)):
+        a,b=ranges[k]
         if a>=hi:break
         if b<=lo:continue
         if a<lo or b>hi:raise ValueError("protected token crosses mapped boundary")
@@ -195,6 +199,7 @@ def compile_response(answer,s,t,c,m,prior):
                     or not isinstance(raw["glossary"],list) or not isinstance(raw["style_guide"],list)):
                 raise ValueError("invalid protected canonical evidence")
             old={f["id"]:f for f in prior};seen=set();ids=set();needs_fallback=False
+            source_locked=protected_ranges(s);target_locked=protected_ranges(t)
             def locate(text,q,bounds):
                 if (not isinstance(q,dict) or set(q)!={"quote","occurrence"}
                         or not isinstance(q["quote"],str) or not 1<=len(q["quote"])<=300
@@ -218,12 +223,12 @@ def compile_response(answer,s,t,c,m,prior):
                     raise ValueError("invalid protected canonical finding")
                 ids.add(f["id"])
                 x,y=locate(s,f["source_anchor"],c["source_core"])
-                needs_fallback|=overlaps_protected(protected_ranges(s),x,y)
+                needs_fallback|=overlaps_protected(source_locked,x,y)
                 if f["translation_anchor"] is None:
                     if f["category"]!="omission" or f["resolved"]:raise ValueError("invalid missing target anchor")
                 else:
                     u,v=locate(t,f["translation_anchor"],c["translation_window"])
-                    needs_fallback|=overlaps_protected(protected_ranges(t),u,v)
+                    needs_fallback|=overlaps_protected(target_locked,u,v)
                 lin=f["resolves"]
                 if lin is None:
                     if f["resolved"]:raise ValueError("new protected finding cannot resolve itself")
@@ -235,7 +240,7 @@ def compile_response(answer,s,t,c,m,prior):
                         raise ValueError("wrong protected lineage")
                     u,v=locate(s,old[fid]["source_anchor"],[0,len(s)])
                     if not (x<v and u<y):raise ValueError("protected recheck changed source passage")
-                    needs_fallback|=overlaps_protected(protected_ranges(s),u,v)
+                    needs_fallback|=overlaps_protected(source_locked,u,v)
                     seen.add(fid)
             if not needs_fallback or seen!=set(old) or (raw["outcome"]=="PASS")==any(not f["resolved"] for f in raw["findings"]):
                 raise ValueError("protected canonical fallback not justified or incomplete")
