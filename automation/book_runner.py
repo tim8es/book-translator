@@ -46,6 +46,7 @@ import single_review_gate
 import resilient_recovery
 import span_map
 import addressed_review
+import mapped_followup
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -4824,6 +4825,55 @@ def archive_incremental_reviewer_stage(slug: str, chapter: dict,
         return False
 
 
+def mapped_followup_context(engine,slug,chapter,previous,source,target):
+    """Read canonical delta and both immutable maps; never infer scope."""
+    if (not span_map.enabled() or not isinstance(previous,dict)
+            or previous.get("outcome")!="CORRECTIONS_REQUIRED"
+            or EPUB_MARKER_RE.search(source) or MARKDOWN_LINK_RE.search(source)):
+        return None
+    book=ROOT/"books"/slug
+    old_sha=previous.get("translation_sha256","")
+    if not isinstance(old_sha,str) or not HEX64.fullmatch(old_sha):
+        return None
+    baseline=book/".workflow"/"review-baselines"/(old_sha+".md")
+    if not baseline.is_file():return None
+    before=baseline.read_bytes().decode("utf-8")
+    if span_map.sha(before)!=old_sha:raise JobError("corrupt mapped review baseline")
+    old_map=read_span_map(slug,chapter["unit_id"],source,before)
+    new_map=read_span_map(slug,chapter["unit_id"],source,target)
+    if old_map is None or new_map is None:return None
+    delta=json.loads(cli("review-delta",slug,str(chapter["number"]),"--json"))
+    if delta.get("advisory_only") is not True or delta.get("unit_id")!=chapter["unit_id"]:
+        raise JobError("mapped review delta identity mismatch")
+    try:
+        scoped=mapped_followup.scope(source,before,target,old_map,new_map,previous,
+            {"glossary":fingerprint(book/"glossary.md"),"style_guide":fingerprint(book/"style-guide.md")},
+            delta,_anchor_position)
+    except (ValueError,KeyError,TypeError):
+        return None
+    if scoped is None:return None
+    data,sr,tr,prior=scoped
+    glossary,style=full_shared_context(book);meta=read_json(book/"metadata.json")
+    bibliographic={k:meta[k] for k in ("title","author","source_language","target_language")
+                   if isinstance(meta.get(k),str)}
+    system,_=role_contracts(engine,"reviewer")
+    system+="\n\n"+GLOSSARY_POLICY
+    user=addressed_review.build_user(data,{"id":"mapped-followup"},1,bibliographic,
+        model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
+                               target_language=bibliographic.get("target_language","unspecified")),
+        style,prior,source,sr)
+    user+=("\nBOUNDED FOLLOW-UP: the immediately preceding independent full review covered every source and target "
+           "passage. Actual bytes outside the supplied source-owned span scope are unchanged, as are the "
+           "glossary and style revisions. Verify every current supplied span, every previous unresolved finding, "
+           "adjacent dependencies, and chapter-level continuity using the unchanged baseline and provided opening/closing context. "
+           "Use the before/after texts to catch regressions. If you need any other evidence, or an edit may affect "
+           "distant meaning, references, chronology, voice, structure or terminology, return only "
+           '{"outcome":"FULL_REQUIRED"} . This requests a fresh full independent review and is not PASS. '
+           "Never certify a check without adequate evidence.")
+    if len(user)>MAX_FOCUSED_CONTEXT_CHARS or len(system)+len(user)>120000:return None
+    return system,user,sr,tr,prior
+
+
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     active = status["active"]
     _, _, chapters = chapter_data(slug)
@@ -4845,6 +4895,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     structural_plan = None
     structural_helper = None
     candidate_span_map = None
+    addressed_followup = None
     review_context = "independent_session"
     reviewed_glossary: list[dict] = []
     # Fully validate the model response before changing canonical artifacts.
@@ -4983,6 +5034,17 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if focused_review_context(slug, chapter, previous_record, source,
                                       current_translation) is not None:
                 review_context = "bounded_context"
+        if (role=="reviewer" and span_map.enabled() and not force_full_review and not pressure
+                and not scoped_count and len(source)<=MAX_DIRECT_REVIEW_CHARS
+                and candidate_target is not None and previous_record):
+            stage_file=review_chunk_stage_path(slug,unit_id)
+            stage_current=(stage_file.is_file() and read_json(stage_file).get("plan",{}).get("translation_sha256")==review_chunks.sha(candidate_target))
+            if not stage_current:
+                addressed_followup=mapped_followup_context(engine,slug,chapter,previous_record,source,candidate_target)
+                if addressed_followup is not None:
+                    system,user=addressed_followup[:2]
+                    chunked_review=False
+                    review_context="bounded_context"
         # Record the exact pinned input revisions, not the revisions after a
         # successful memory update. Never persist source passages in logs.
         prompt_context = {
@@ -4996,6 +5058,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         }
         if role == "reviewer":
             prompt_context["review_context"] = review_context
+            if addressed_followup is not None:
+                prompt_context["execution_mode"]="mapped-id-followup"
         if patch_mode:
             prompt_context["correction_mode"] = "anchored-patches"
         preserve_links = (role in {"translator", "corrector"} and not patch_mode
@@ -5052,6 +5116,20 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if role == "reviewer":
                 translation_bytes = (ROOT / "books" / slug / chapter["translation_path"]
                                      ).read_bytes()
+                if addressed_followup is not None:
+                    try:
+                        response=json.loads(answer)
+                        if response=={"outcome":"FULL_REQUIRED"}:
+                            cli("release",slug,str(chapter["number"]),"--session-id",active["session_id"])
+                            status["active"]=None
+                            status["force_full_review_unit"]=unit_id
+                            status["phase"]="mapped-followup-full-requested"
+                            checkpoint(job_id,status,slug)
+                            return
+                        _,_,sr,tr,prior=addressed_followup
+                        answer=addressed_review.compile_tables(answer,source,translation_bytes.decode("utf-8"),sr,tr,prior)
+                    except (ValueError,KeyError,TypeError) as exc:
+                        raise ModelError("reviewer evidence is invalid: mapped follow-up "+str(exc)) from exc
                 try:
                     outcome, report, reviewed_style = checked_reviewer_response(
                         answer, review_context=review_context, source=source,
@@ -5059,6 +5137,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         claim=owned)
                     reviewed_glossary = reviewer_glossary_proposals(answer)
                 except ModelError as exc:
+                    if addressed_followup is not None:
+                        raise
                     # Provider/transport failures happen outside this parse/verify
                     # block and never trigger an extra paid call. Repair only a
                     # rejected report, not an infrastructure failure.
