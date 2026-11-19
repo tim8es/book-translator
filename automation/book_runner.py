@@ -43,6 +43,7 @@ import compact_review
 import block_recovery
 import correction_feedback
 import single_review_gate
+import resilient_recovery
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -206,7 +207,7 @@ def schedule_provider_retry(status: dict, chapter: dict, role: str,
         return
     # Never retry earlier than the policy or a bounded provider Retry-After.
     delay = min(MAX_BACKOFF_SECONDS, max(
-        AUTO_RETRY_DELAYS_SECONDS[attempts - 1],
+        resilient_recovery.retry_delay(status,chapter,role,failure,attempts,AUTO_RETRY_DELAYS_SECONDS[attempts - 1]),
         failure.retry_after_seconds or 0))
     status["provider_retry"] = {
         "chapter": chapter["number"], "unit_id": chapter["unit_id"],
@@ -1971,7 +1972,7 @@ def incomplete_structural_batch(selected: list[dict], translated: dict) -> list[
         if result is None:
             continue
         original = item["source"]
-        if (single_review_gate.paragraph_preserving()
+        if (single_review_gate.paragraph_preserving() and not resilient_recovery.enabled()
                 and single_review_gate.paragraph_count(original)!=single_review_gate.paragraph_count(result)):
             failures.append(item["id"])
             continue
@@ -2090,6 +2091,10 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             break
         system, user, _ = context(
             engine, slug, chapter, "translator", structural_segments=selected)
+        if resilient_recovery.enabled() and (stage["glossary"] or stage["style_guide"]):
+            user += ("\nPROVISIONAL EARLIER SPAN DECISIONS (not canonical, verify against source): "+json.dumps({
+                "glossary":stage["glossary"],"style_guide":stage["style_guide"]},ensure_ascii=False)+
+                "\nDo not propose them again. Keep supported recurring names consistent.")
         prompt_context = {
             "role": "translator",
             "workflow_revision": status["workflow_revision"],
@@ -2181,8 +2186,12 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             except ValueError as exc:
                 raise ModelError("structural translator repair rejected: " + str(exc)) from exc
             translated.update(corrected)
-            new_glossary = merge_unique_correction_decisions(new_glossary, extra_glossary)
-            new_style = merge_unique_correction_decisions(new_style, extra_style)
+            if resilient_recovery.enabled():
+                # Validate both optional memory batches independently before bounding the union.
+                for g,s in ((new_glossary,new_style),(extra_glossary,extra_style)):
+                    parse_translation(json.dumps({"translation":"validated placeholder","glossary":g,"style_guide":s},ensure_ascii=False))
+            new_glossary = merge_unique_correction_decisions(new_glossary, extra_glossary,status=status)
+            new_style = merge_unique_correction_decisions(new_style, extra_style,status=status)
             if incomplete_structural_batch(selected, translated):
                 raise ModelError("focused structural translator repair still omitted source text")
         _, new_glossary, new_style = parse_translation(json.dumps({
@@ -2195,9 +2204,9 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
         except ValueError as exc:
             raise ModelError("structural translation batch is not source-bound") from exc
         merged_glossary = merge_unique_correction_decisions(stage["glossary"],
-                                                             new_glossary)
+                                                             new_glossary,status=status)
         merged_style = merge_unique_correction_decisions(stage["style_guide"],
-                                                          new_style)
+                                                          new_style,status=status)
         stage.update({"segments": combined, "glossary": merged_glossary,
                       "style_guide": merged_style})
         store_json(stage_path, stage)
@@ -2291,7 +2300,12 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     return path, stage
 
 
-def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict]) -> list[dict]:
+def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict], *, status=None) -> list[dict]:
+    if resilient_recovery.enabled():
+        updated,deferred=resilient_recovery.bounded_memory(existing,proposed)
+        if deferred and status is not None:
+            status["optional_memory_proposals_deferred"]=status.get("optional_memory_proposals_deferred",0)+deferred
+        return updated
     updated = list(existing)
     for item in proposed:
         if item not in updated:
@@ -2883,9 +2897,9 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         # Do not persist literary proposals from a batch with no accepted patch.
         accepted_now = len(combined) > len(stage["patches"])
         updated_glossary = merge_unique_correction_decisions(
-            stage["glossary"], glossary if accepted_now else [])
+            stage["glossary"], glossary if accepted_now else [],status=status)
         updated_style = merge_unique_correction_decisions(
-            stage["style_guide"], style if accepted_now else [])
+            stage["style_guide"], style if accepted_now else [],status=status)
         # Stage only safe edits. Conflicted findings remain unresolved and are
         # independently rechecked after a partial translation improvement.
         stage.update({"patches": combined, "glossary": updated_glossary,
@@ -4016,6 +4030,9 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         user += ("\nScope reminder: the source unit above is the complete input for this call. "
                  "Do not report the absence of other chapters or of the full EPUB as a reason "
                  "the supplied unit cannot be handled.")
+    if structural_segments is not None and resilient_recovery.enabled():
+        user += ("\nReturn at most eight genuinely important new glossary proposals and three stable style observations "
+                 "per request. Optional proposals are not a translation requirement. Do not repeat known memory or invent entries.")
     if structural_segments is not None and single_review_gate.paragraph_preserving():
         user += ("\nEach supplied source span must preserve its exact number and order of blank-line-separated paragraphs. "
                  "Translate EACH paragraph in place, do not merge or divide paragraphs; retain dialogue turns and all content. "
@@ -4391,7 +4408,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                       if isinstance(prior_plan, dict) else None)
     # Keep an in-flight stage on its original planner, even if opt-in settings
     # change. Neither setting changes a book's canonical literary revision.
-    if prior_revision not in ({None, review_chunks.HELPER_REVISION} | review_chunks.ALIGNED_REVISIONS):
+    if prior_revision is not None and prior_revision not in review_chunks.PLAN_REVISIONS:
         raise JobError("unsupported durable reviewer helper revision")
     alignment_mode = os.environ.get("BOOK_TRANSLATOR_MARKER_ALIGNMENT", "off")
     incremental_mode = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW", "off")
@@ -4399,7 +4416,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         raise JobError("review alignment/incremental flags must be on or off")
     pressure = adaptive_budget.provider_pressure(status, chapter["unit_id"], "reviewer")
     marker_plan = (prior_revision in review_chunks.ALIGNED_REVISIONS
-                   or (prior_revision is None and
+                   or (prior_revision in {None,review_chunks.REFINED_REVISION} and
                        (alignment_mode == "on" or incremental_mode == "on" or pressure)))
     stable = (prior_revision in {review_chunks.STABLE_ALIGNMENT_REVISION,review_chunks.PARAGRAPH_STABLE_REVISION}
               or (prior_revision is None and incremental_mode == "on"))
@@ -4408,11 +4425,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     target = min(remembered, adaptive_budget.review_target_chars(pressure))
     def planner(original, translated, *, target_chars, keep_count=False):
         if (single_review_gate.paragraph_preserving() and
-                prior_revision in {None,review_chunks.PARAGRAPH_STABLE_REVISION}):
+                prior_revision in {None,review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION}):
             count=(len(prior_plan["chunks"]) if keep_count and prior_revision==review_chunks.PARAGRAPH_STABLE_REVISION
                    and prior_plan.get("source_sha256")==review_chunks.sha(original) else None)
             proposed=review_chunks.plan_paragraphs(original,translated,target_chars=target_chars,count=count,
-                                                  wider=not pressure and remembered==review_chunks.TARGET_CHARS)
+                                                  wider=not resilient_recovery.enabled() and not pressure and remembered==review_chunks.TARGET_CHARS)
             if proposed is not None:
                 return proposed
         if marker_plan:
@@ -4433,7 +4450,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         if current_hashes:
             review_chunks.validate_plan(prior_plan, source, translation)
             plan = prior_plan
-            if pressure and not stage.get("completed"):
+            if pressure and not stage.get("completed") and not resilient_recovery.enabled():
                 smaller = planner(source, translation,
                                   target_chars=target)
                 if len(smaller["chunks"]) > len(plan["chunks"]):
@@ -4446,14 +4463,14 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     if pressure or remembered < review_chunks.TARGET_CHARS:
         execution_scheduler.record_review_target(
             status, chapter["unit_id"], review_chunks.sha(source), target)
-    if (prior_revision==review_chunks.PARAGRAPH_STABLE_REVISION
+    if (prior_revision in {review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION}
             and plan["helper_revision"]!=prior_revision):
         stage=None
     binding = None
     if ((stage is not None and isinstance(stage, dict)
          and stage.get("schema_version") == incremental_review.STAGE_VERSION)
             or (stage is None and incremental_mode == "on"
-                and plan["helper_revision"] in review_chunks.ALIGNED_REVISIONS)):
+                and (plan["helper_revision"] in review_chunks.ALIGNED_REVISIONS or resilient_recovery.enabled()))):
         try:
             reviewer_contract, _ = role_contracts(engine, "reviewer")
             binding = incremental_review.binding(
@@ -4533,6 +4550,20 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 stage, plan, chapter["unit_id"], status["workflow_revision"])
         except ValueError as exc:
             raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
+    if (resilient_recovery.enabled() and pressure and stage["schema_version"]==incremental_review.STAGE_VERSION
+            and status.get("provider_retry",{}).get("code") in adaptive_budget.SIZE_RETRY_CODES):
+        # Existing stage and current memory/contract binding have already been validated.
+        pending=next((part for part in plan["chunks"] if part["id"] not in stage["completed"]),None)
+        if pending and max(pending["source_core"][1]-pending["source_core"][0],
+                           pending["translation_core"][1]-pending["translation_core"][0])>6000:
+            refined=review_chunks.refine_pending(plan,pending["id"],source,translation)
+            if refined is not None:
+                stage=incremental_review.refine_current(stage,refined,source,translation,binding,chapter["unit_id"],status["workflow_revision"])
+                status["review_refinement_summary"]={"unit_id":chapter["unit_id"],"preserved_parts":len(stage["completed"]),
+                    "old_parts":len(plan["chunks"]),"new_parts":len(refined["chunks"]),"reason":status["provider_retry"]["code"]}
+                plan=refined
+                store_json(stage_path,stage)
+                checkpoint(job_id,status,slug)
     from workflow.review_anchors import verify_evidence_anchors
     # Re-validate persisted evidence on every continuation, not just when first
     # received. A malicious or stale checkpoint cannot authorize a review.
@@ -4663,7 +4694,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             and len(stage["reused"]) >= len(stage["completed"])):
         raise JobError("incremental reviewer has no independently rechecked changed part")
     try:
-        combined = review_chunks.combine(stage)
+        combined = review_chunks.combine(stage,status=status)
     except (ValueError, KeyError, TypeError) as exc:
         raise JobError("review chunk aggregation rejected: " + str(exc)) from exc
     # The pinned workflow's full-unit validator has the FINAL word on source
@@ -5159,7 +5190,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # worker claim. A glossary write invalidates a second style CAS.
             # Preserve style evidence for the next eligible reviewer claim.
             reviewed_style = merge_unique_correction_decisions(
-                status.get("pending_style", []), reviewed_style)
+                status.get("pending_style", []), reviewed_style,status=status)
             if saved_glossary:
                 status["pending_style"] = reviewed_style
             else:
@@ -5182,7 +5213,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             "glossary", proposed_glossary)
         status["memory_glossary_saved"] = status.get("memory_glossary_saved", 0) + saved
         status["pending_style"] = merge_unique_correction_decisions(
-            status.get("pending_style", []), proposed_style)
+            status.get("pending_style", []), proposed_style,status=status)
         if structural_plan is not None:
             structural_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("structural_segment_progress", None)

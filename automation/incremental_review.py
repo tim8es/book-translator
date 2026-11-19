@@ -47,7 +47,7 @@ def _validate_binding(value: dict) -> None:
 
 
 def new_stage(plan: dict, unit_id: str, workflow_revision: str, current_binding: dict) -> dict:
-    if plan.get("helper_revision") not in review_chunks.ALIGNED_REVISIONS:
+    if plan.get("helper_revision") not in review_chunks.PLAN_REVISIONS:
         raise ValueError("incremental reviewer requires protected marker alignment")
     _validate_binding(current_binding)
     return {
@@ -77,10 +77,9 @@ def validate_shape(stage: dict, unit_id: str, revision: str) -> None:
     _validate_binding(stage["binding"])
     plan = stage["plan"]
     if (not isinstance(plan, dict)
-            or set(plan) != {"schema_version", "helper_revision", "source_sha256",
-                            "translation_sha256", "chunks"}
+            or set(plan) != review_chunks.plan_fields(plan)
             or plan["schema_version"] != review_chunks.SCHEMA_VERSION
-            or plan["helper_revision"] not in review_chunks.ALIGNED_REVISIONS
+            or plan["helper_revision"] not in review_chunks.PLAN_REVISIONS
             or not all(isinstance(plan[key], str) and HEX64.fullmatch(plan[key])
                        for key in ("source_sha256", "translation_sha256"))
             or not isinstance(plan["chunks"], list)
@@ -231,3 +230,34 @@ def rebase(stage: dict, new_plan: dict, source: str, translation: str,
             "from_record_id": archive_record,
         }
     return fresh, len(fresh["completed"])
+
+
+def refine_current(stage,new_plan,source,translation,current_binding,unit_id,revision):
+    """Same accepted bytes and context only. Preserve exact already-reviewed
+    windows, including their real findings and prior lineage. New split parts
+    never inherit evidence. No reuse across changed artifacts here.
+    """
+    validate_current(stage,stage["plan"],source,translation,current_binding,unit_id,revision)
+    review_chunks.validate_plan(new_plan,source,translation)
+    if stage["accepted_review_record_id"] is not None:
+        raise ValueError("cannot refine recorded review")
+    if new_plan["helper_revision"]!=review_chunks.REFINED_REVISION:
+        raise ValueError("expected deterministic refined review plan")
+    fresh=new_stage(new_plan,unit_id,revision,current_binding)
+    def identity(part):
+        return tuple(tuple(part[k]) for k in ("source_core","translation_core","source_window","translation_window"))
+    by_window={identity(p):p for p in new_plan["chunks"]}
+    for old in stage["plan"]["chunks"]:
+        key=old["id"]
+        if key not in stage["completed"]:
+            continue
+        match=by_window.get(identity(old))
+        if match is None:
+            raise ValueError("refinement would discard completed reviewer evidence")
+        dest=match["id"]
+        fresh["completed"][dest]=stage["completed"][key]
+        fresh["windows"][dest]=stage["windows"][key]
+        if key in stage["reused"]:
+            fresh["reused"][dest]=stage["reused"][key]
+    validate_current(fresh,new_plan,source,translation,current_binding,unit_id,revision)
+    return fresh

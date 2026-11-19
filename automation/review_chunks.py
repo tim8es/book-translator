@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import resilient_recovery
 
 SCHEMA_VERSION = 1
 HELPER_REVISION = "review-chunks-v1"
@@ -16,6 +17,12 @@ ALIGNMENT_REVISION = "review-chunks-markers-v1"
 STABLE_ALIGNMENT_REVISION = "review-chunks-source-stable-v1"
 PARAGRAPH_STABLE_REVISION = "review-chunks-paragraph-stable-v1"
 ALIGNED_REVISIONS = {ALIGNMENT_REVISION, STABLE_ALIGNMENT_REVISION, PARAGRAPH_STABLE_REVISION}
+REFINED_REVISION="review-chunks-refined-v1"
+PLAN_REVISIONS={HELPER_REVISION,REFINED_REVISION}|ALIGNED_REVISIONS
+BASE_FIELDS={"schema_version","helper_revision","source_sha256","translation_sha256","chunks"}
+
+def plan_fields(plan):
+    return BASE_FIELDS|({"base_plan","split_steps"} if plan.get("helper_revision")==REFINED_REVISION else set())
 BLOCK_MARKER = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 TARGET_CHARS = 12_000
 OVERLAP_CHARS = 1_800
@@ -224,12 +231,80 @@ def plan_paragraphs(source,translation,*,target_chars=TARGET_CHARS,count=None,wi
     return None
 
 
+def _split_part(part,source,translation,base_revision):
+    sc,tc=part["source_core"],part["translation_core"]
+    def interior(text,interval,markers=False):
+        lo,hi=interval
+        if markers:
+            return [(m.group(1),m.start()) for m in BLOCK_MARKER.finditer(text,lo,hi) if lo<m.start()<hi]
+        return [(i,m.end()) for i,m in enumerate(re.finditer(r"\n[ \t]*\n",text[lo:hi])) if 0<m.end()<hi-lo]
+    marked=base_revision in {ALIGNMENT_REVISION,STABLE_ALIGNMENT_REVISION}
+    if marked:
+        sa,ta=interior(source,sc,True),interior(translation,tc,True)
+        if [k for k,_ in sa]!=[k for k,_ in ta] or not sa:
+            return None
+        i=min(range(len(sa)),key=lambda i:abs(sa[i][1]-sum(sc)/2))
+        s,t=sa[i][1],ta[i][1]
+    else:
+        sa=[sc[0]+x for _,x in interior(source,sc)]
+        ta=[tc[0]+x for _,x in interior(translation,tc)]
+        # interior() enumerates local paragraph separators. Stable ordinal
+        # boundaries require equal counts; legacy planning stays approximate.
+        if not sa or not ta:
+            return None
+        if base_revision==PARAGRAPH_STABLE_REVISION:
+            if len(sa)!=len(ta):
+                return None
+            i=min(range(len(sa)),key=lambda i:abs(sa[i]-sum(sc)/2))
+            s,t=sa[i],ta[i]
+        else:
+            s=min(sa,key=lambda x:abs(x-sum(sc)/2))
+            t=min(ta,key=lambda x:abs(x-sum(tc)/2))
+    if min(s-sc[0],sc[1]-s,t-tc[0],tc[1]-t)<500:
+        return None
+    result=[]
+    for a,b,c,d in ((sc[0],s,tc[0],t),(s,sc[1],t,tc[1])):
+        sw,tw=_window(source,a,b),_window(translation,c,d)
+        if sw[1]-sw[0]+tw[1]-tw[0]>42000:
+            return None
+        result.append({"source_core":[a,b],"translation_core":[c,d],"source_window":sw,"translation_window":tw})
+    return result
+
+def _refined_chunks(base,steps,source,translation):
+    parts=[dict(p) for p in base["chunks"]]
+    if not isinstance(steps,list) or not 1<=len(steps)<=MAX_CHUNKS-len(parts):
+        raise ValueError("invalid review refinement count")
+    for i in steps:
+        if type(i) is not int or not 0<=i<len(parts):
+            raise ValueError("invalid review refinement index")
+        pair=_split_part(parts[i],source,translation,base["helper_revision"])
+        if pair is None:
+            raise ValueError("review refinement cannot safely split part")
+        parts[i:i+1]=pair
+    return [{**part,"id":"chunk-%03d"%(i+1)} for i,part in enumerate(parts)]
+
+def refine_pending(plan,part_id,source,translation):
+    validate_plan(plan,source,translation)
+    i=next((i for i,p in enumerate(plan["chunks"]) if p["id"]==part_id),None)
+    if i is None or len(plan["chunks"])>=MAX_CHUNKS:
+        return None
+    base=plan["base_plan"] if plan["helper_revision"]==REFINED_REVISION else plan
+    steps=plan["split_steps"]+[i] if plan["helper_revision"]==REFINED_REVISION else [i]
+    try:
+        parts=_refined_chunks(base,steps,source,translation)
+    except ValueError:
+        return None
+    result={"schema_version":SCHEMA_VERSION,"helper_revision":REFINED_REVISION,
+            "source_sha256":sha(source),"translation_sha256":sha(translation),"chunks":parts,
+            "base_plan":base,"split_steps":steps}
+    validate_plan(result,source,translation)
+    return result
+
+
 def validate_plan(value: dict, source: str, translation: str) -> None:
-    if (not isinstance(value, dict) or set(value) != {
-            "schema_version", "helper_revision", "source_sha256",
-            "translation_sha256", "chunks"}
+    if (not isinstance(value, dict) or set(value) != plan_fields(value)
             or value["schema_version"] != SCHEMA_VERSION
-            or value["helper_revision"] not in ({HELPER_REVISION} | ALIGNED_REVISIONS)
+            or value["helper_revision"] not in PLAN_REVISIONS
             or value["source_sha256"] != sha(source)
             or value["translation_sha256"] != sha(translation)
             or not isinstance(value["chunks"], list)
@@ -256,6 +331,14 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
         if offset != len(text):
             raise ValueError("review final chunk leaves unreviewed text")
     # Persisted plans must be deterministic, not user/model supplied.
+    if value["helper_revision"]==REFINED_REVISION:
+        base=value["base_plan"]
+        if not isinstance(base,dict) or base.get("helper_revision") not in PLAN_REVISIONS-{REFINED_REVISION}:
+            raise ValueError("invalid refined review base plan")
+        validate_plan(base,source,translation)
+        if value["chunks"]!=_refined_chunks(base,value["split_steps"],source,translation):
+            raise ValueError("refined review partition was modified")
+        return
     if value["helper_revision"]==PARAGRAPH_STABLE_REVISION:
         aligned=_paragraph_cuts(source,translation,len(value["chunks"]))
         if aligned is None:
@@ -363,7 +446,7 @@ def validate_chunk_report(chunk: dict, report: dict, source: str,
             raise ValueError("review chunk IDs must be local and unprefixed")
 
 
-def combine(stage: dict) -> dict:
+def combine(stage: dict, *, status=None) -> dict:
     """Return raw JSON schema for one canonical, still-unaccepted review."""
     chunks = stage["plan"]["chunks"]
     if set(stage["completed"]) != {p["id"] for p in chunks}:
@@ -397,7 +480,12 @@ def combine(stage: dict) -> dict:
         for item in stored.get("glossary", []):
             if item not in all_glossary:
                 all_glossary.append(item)
-    if len(all_glossary) > 40:
+    if resilient_recovery.enabled():
+        all_glossary,g=resilient_recovery.bounded_memory([],all_glossary)
+        all_style,s=resilient_recovery.bounded_memory([],all_style)
+        if status is not None and g+s:
+            status["optional_memory_proposals_deferred"]=status.get("optional_memory_proposals_deferred",0)+g+s
+    elif len(all_glossary) > 40:
         raise ValueError("aggregated glossary exceeds bounded reviewer memory")
     if len(all_findings) > 100:
         raise ValueError("aggregated review exceeds canonical findings limit")

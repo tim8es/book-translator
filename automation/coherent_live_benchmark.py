@@ -130,7 +130,9 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "batch_size":prompt.get("batch_finding_count"),
                           "semantic_preflight_summary":status.get("last_semantic_preflight"),
                           "single_review_gate":status.get("single_review_gate_summary"),
-                          "incremental_reused":prompt.get("reused_clean_chunks")},ensure_ascii=False),flush=True)
+                          "incremental_reused":prompt.get("reused_clean_chunks"),
+                          "review_refinement":status.get("review_refinement_summary"),
+                          "memory_proposals_deferred":status.get("optional_memory_proposals_deferred",0)},ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
