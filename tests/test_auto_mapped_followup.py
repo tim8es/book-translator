@@ -35,6 +35,9 @@ class MappedFollowupTests(unittest.TestCase):
         self.assertEqual([p["span"] for p in data["pairs"]],["s00010","s00011","s00012"])
         self.assertEqual(data["changed_spans"],["s00011"])
         self.assertEqual(len(prior),1)
+        self.assertNotIn("previous_target",data["pairs"][0])
+        self.assertIn("previous_target",data["pairs"][1])
+        self.assertNotIn("previous_target",data["pairs"][2])
         r={"outcome":"PASS","checks":dict.fromkeys(mf.CHECKS,True),"glossary":[],"style_guide":[],
            "findings":[{"source_ids":["s00011.s1"],"target_ids":["s00011.t1"],"category":"modality",
                         "severity":"major","detail":"Possibility restored.","prior":"old","resolved":True}]}

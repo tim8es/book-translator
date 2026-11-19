@@ -71,7 +71,8 @@ def main():
             "BOOK_TRANSLATOR_PARAGRAPH_REVIEW":"on","BOOK_TRANSLATOR_RESILIENT_RECOVERY":"on",
             "BOOK_TRANSLATOR_SPAN_MAP":"on",
             "BOOK_TRANSLATOR_OPTIONAL_MEMORY_ISOLATION":"on",
-            "BOOK_TRANSLATOR_REUSE_CLOSED_REVIEW":"on"},wall_budget_seconds=3600)
+            "BOOK_TRANSLATOR_REUSE_CLOSED_REVIEW":"on",
+            "BOOK_TRANSLATOR_ADDRESSED_EPUB":"on"},wall_budget_seconds=3600)
     passed=(row["sections"]==2 and row["reviewed"]==2 and row["epub_verified"]
             and row["wall_seconds"]<=3600)
     payload={"schema_version":1,"fixture":lengths,"upstream_revision":REV,

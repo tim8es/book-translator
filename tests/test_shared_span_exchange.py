@@ -1,6 +1,6 @@
 import copy
 import importlib.util
-import json,sys,tempfile,unittest
+import json,os,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
@@ -62,6 +62,34 @@ class SharedSpanExchangeTests(unittest.TestCase):
                 "prior":"f1","resolved":True}]
         q=exchange.compile_review(s,t,m,prev,rows,"PASS")
         self.assertEqual(q["findings"][0]["resolves"],{"record_id":"b"*32,"finding_id":"f1"})
+
+    def test_protected_cells_are_visible_but_not_edit_addresses(self):
+        import addressed_review as ar
+        marker="<!-- bt-block:000001 -->"
+        s=marker+"\nThe train stopped. [Station](#station) Here.\n"
+        t=marker+"\nПоезд остановился. [Станция](#station) Здесь.\n"
+        m=span_map.make(s,t,[([0,len(s)],[0,len(t)])])
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_ADDRESSED_EPUB":"off"}):
+            with self.assertRaises(ValueError):exchange.prepare(s,t,m)
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_ADDRESSED_EPUB":"on"}):
+            p=exchange.parts(s,t,m)[0]
+            data,sr,tr=ar.packet(s,t,p,m)
+            self.assertEqual("".join(s[a:b] for a,b in sr.values()),s)
+            self.assertEqual("".join(t[a:b] for a,b in tr.values()),t)
+            self.assertEqual(len(data["protected_ids"]),4)
+            locked=next(k for k in data["protected_ids"] if k in tr)
+            with self.assertRaises(ValueError):ar.select(t,[locked],tr)
+            sid=next(k for k,(a,b) in sr.items() if "The train" in s[a:b])
+            self.assertEqual(ar.select(s,[sid],sr)[0]["quote"],"The train stopped.")
+            q=exchange.compile_review(s,t,m,None,pass_parts(s,t,m),"PASS")
+            self.assertEqual(q["findings"],[])
+            bad=t.replace("#station","#other")
+            bm=span_map.make(s,bad,[([0,len(s)],[0,len(bad)])])
+            with self.assertRaises(RuntimeError):exchange.prepare(s,bad,bm)
+            # A map splitting the marker cannot authorize addressed review.
+            cut=8
+            split=span_map.make(s,t,[([0,cut],[0,cut]),([cut,len(s)],[cut,len(t)])])
+            with self.assertRaises(ValueError):exchange.prepare(s,t,split)
 
     def test_bridge_optional_schema_does_not_allow_both_review_formats(self):
         s,t,m=fixture()

@@ -135,6 +135,7 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "memory_proposals_deferred":status.get("optional_memory_proposals_deferred",0),
                           "memory_proposals_rejected":status.get("optional_memory_proposals_rejected",0),
                           "last_reuse_audit":(status.get("review_incremental_rebases") or [{}])[-1],
+                          "mapped_followup_audit":status.get("mapped_followup_audit"),
                           "span_map":status.get("span_map_summary"),
                           "span_map_unavailable":status.get("span_map_unavailable_count",0),
                           "correction_mode":prompt.get("correction_mode")},ensure_ascii=False),flush=True)

@@ -4389,13 +4389,15 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "a concrete unresolved source-grounded concern. "
         "Do not change accepted text or fabricate checks.")
     system += "\n\n" + GLOSSARY_POLICY
-    if mapping is not None:
+    if mapping is not None and addressed_review.supports_mapped(source,translation,mapping):
+        if addressed_review.has_protected(source,translation):
+            check_markers(source,translation)
         data,sr,_=addressed_review.packet(source,translation,chunk,mapping)
         user=addressed_review.build_user(data,chunk,total,bibliographic,
             model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
                                    target_language=bibliographic.get("target_language","unspecified")),
             style,old_findings,source,sr)
-        addressed_system=system+addressed_review.response_contract()
+        addressed_system=system+addressed_review.response_contract(protected=bool(data.get("protected_ids")))
         if len(addressed_system)+len(user)<=120_000:
             return addressed_system,user
     paired = compact_review.packet(source, translation, chunk) if compact_review.enabled() else None
@@ -4504,7 +4506,9 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                                                    review_chunks.sha(source))
     target = min(remembered, adaptive_budget.review_target_chars(pressure))
     def planner(original, translated, *, target_chars, keep_count=False):
-        if current_map is not None and not EPUB_MARKER_RE.search(original) and not MARKDOWN_LINK_RE.search(original):
+        if current_map is not None and addressed_review.supports_mapped(original,translated,current_map):
+            if addressed_review.has_protected(original,translated):
+                check_markers(original,translated)
             mapped=review_chunks.recreate_mapped_plan(prior_plan if keep_count else None,
                 original,translated,current_map,target_chars)
             if mapped is not None:return mapped
@@ -4870,32 +4874,35 @@ def archive_incremental_reviewer_stage(slug: str, chapter: dict,
         return False
 
 
-def mapped_followup_context(engine,slug,chapter,previous,source,target):
+def mapped_followup_context(engine,slug,chapter,previous,source,target,*,audit=None):
     """Read canonical delta and both immutable maps; never infer scope."""
+    def fail(reason):
+        if audit is not None:audit["reason"]=reason
+        return None
     if (not span_map.enabled() or not isinstance(previous,dict)
             or previous.get("outcome")!="CORRECTIONS_REQUIRED"
             or EPUB_MARKER_RE.search(source) or MARKDOWN_LINK_RE.search(source)):
-        return None
+        return fail("unsupported_scope")
     book=ROOT/"books"/slug
     old_sha=previous.get("translation_sha256","")
     if not isinstance(old_sha,str) or not HEX64.fullmatch(old_sha):
-        return None
+        return fail("invalid_baseline_identity")
     baseline=book/".workflow"/"review-baselines"/(old_sha+".md")
-    if not baseline.is_file():return None
+    if not baseline.is_file():return fail("baseline_missing")
     before=baseline.read_bytes().decode("utf-8")
     if span_map.sha(before)!=old_sha:raise JobError("corrupt mapped review baseline")
     old_map=read_span_map(slug,chapter["unit_id"],source,before)
     new_map=read_span_map(slug,chapter["unit_id"],source,target)
-    if old_map is None or new_map is None:return None
+    if old_map is None or new_map is None:return fail("map_missing")
     delta=json.loads(cli("review-delta",slug,str(chapter["number"]),"--json"))
     if delta.get("advisory_only") is not True or delta.get("unit_id")!=chapter["unit_id"]:
         raise JobError("mapped review delta identity mismatch")
     try:
         scoped=mapped_followup.scope(source,before,target,old_map,new_map,previous,
             {"glossary":fingerprint(book/"glossary.md"),"style_guide":fingerprint(book/"style-guide.md")},
-            delta,_anchor_position)
+            delta,_anchor_position,audit=audit)
     except (ValueError,KeyError,TypeError):
-        return None
+        return fail("scope_validation_failed")
     if scoped is None:return None
     data,sr,tr,prior=scoped
     glossary,style=full_shared_context(book);meta=read_json(book/"metadata.json")
@@ -4911,11 +4918,13 @@ def mapped_followup_context(engine,slug,chapter,previous,source,target):
            "passage. Actual bytes outside the supplied source-owned span scope are unchanged, as are the "
            "glossary and style revisions. Verify every current supplied span, every previous unresolved finding, "
            "adjacent dependencies, and chapter-level continuity using the unchanged baseline and provided opening/closing context. "
-           "Use the before/after texts to catch regressions. If you need any other evidence, or an edit may affect "
+           "Use the before/after texts to catch regressions. Rows marked changed:false have identical previous "
+           "and current target bytes; their earlier text is not duplicated. If you need any other evidence, or an edit may affect "
            "distant meaning, references, chronology, voice, structure or terminology, return only "
            '{"outcome":"FULL_REQUIRED"} . This requests a fresh full independent review and is not PASS. '
            "Never certify a check without adequate evidence.")
-    if len(user)>MAX_FOCUSED_CONTEXT_CHARS or len(system)+len(user)>120000:return None
+    if audit is not None:audit["prompt_chars"]=len(user)
+    if len(user)>MAX_FOCUSED_CONTEXT_CHARS or len(system)+len(user)>120000:return fail("prompt_budget")
     return system,user,sr,tr,prior
 
 
@@ -5085,7 +5094,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             stage_file=review_chunk_stage_path(slug,unit_id)
             stage_current=(stage_file.is_file() and read_json(stage_file).get("plan",{}).get("translation_sha256")==review_chunks.sha(candidate_target))
             if not stage_current:
-                addressed_followup=mapped_followup_context(engine,slug,chapter,previous_record,source,candidate_target)
+                scope_audit={}
+                addressed_followup=mapped_followup_context(engine,slug,chapter,previous_record,source,candidate_target,audit=scope_audit)
+                status["mapped_followup_audit"]={"unit_id":unit_id,**scope_audit}
                 if addressed_followup is not None:
                     system,user=addressed_followup[:2]
                     chunked_review=False

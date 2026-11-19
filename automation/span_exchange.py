@@ -76,9 +76,10 @@ def parts(source,target,mapping):
     # Match the Auto mapped review planner. Single-part human-led review is
     # valid for small units; it still covers all original and accepted text.
     import book_runner
-    if (book_runner.EPUB_MARKER_RE.search(source) or book_runner.MARKDOWN_LINK_RE.search(source)
-            or book_runner.EPUB_MARKER_RE.search(target) or book_runner.MARKDOWN_LINK_RE.search(target)):
-        raise ValueError("addressed exchange currently supports plain prose only")
+    if not addressed_review.supports_mapped(source,target,mapping):
+        raise ValueError("addressed exchange cannot safely own protected token boundaries")
+    if addressed_review.has_protected(source,target):
+        book_runner.check_markers(source,target)
     groups=span_map.groups(mapping,source,target,review_chunks.TARGET_CHARS,review_chunks._window)
     if groups is None or not 1<=len(groups)<=MAX_PARTS:
         raise ValueError("cannot safely partition addressed review")
@@ -141,7 +142,16 @@ def compile_review(source,target,mapping,previous,responses,outcome):
                        source,target,chunk,mapping,prior))
         report={"evidence_version":2,"context":"independent_session",
                 "checks":raw["checks"],"findings":raw["findings"]}
+        # Ordinary canonical fallback is not an escape from local evidence
+        # or lineage; the bridge still delegates final canonical validation.
+        if raw["outcome"] not in {"PASS","CORRECTIONS_REQUIRED"}:
+            raise ValueError("invalid addressed part outcome")
         review_chunks.validate_chunk_report(chunk,report,source,target)
+        expected={(f["previous_record_id"],f["id"]) for f in prior}
+        actual={(f["resolves"]["record_id"],f["resolves"]["finding_id"])
+                for f in report["findings"] if f.get("resolves") is not None}
+        if actual!=expected:
+            raise ValueError("addressed part lacks exact prior rechecks")
         stage["completed"][chunk["id"]]={"outcome":raw["outcome"],"report":report,
                                           "glossary":[],"style":[]}
     combined=review_chunks.combine(stage)

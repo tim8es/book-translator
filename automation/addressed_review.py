@@ -1,11 +1,59 @@
 """Deterministic passage IDs compiled into pinned v2 exact anchors."""
 import json
+import os
 import re
+from bisect import bisect_left, bisect_right
 import compact_review
 import span_map
 
 PROTECTED=re.compile(r"<!--|\]\(|\n[ \t]*\n")
 SENTENCE=re.compile(r'(?<=[.!?…])["»”’\)]*[ \t]+|\n+')
+
+# Complete markup is visible to the reviewer but is not a patchable text cell.
+MARKER=re.compile(r"<!--\s*bt-(?:anchor|block|inline|media):[^>]*-->")
+LINK=re.compile(r'!?\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\s]+)(?:\s+[^)\n]*)?\)')
+
+def protected_ranges(text):
+    found=sorted([m.span() for rx in (MARKER,LINK) for m in rx.finditer(text)])
+    merged=[]
+    for a,b in found:
+        if merged and a<merged[-1][1]:
+            merged[-1]=(merged[-1][0],max(b,merged[-1][1]))
+        else:
+            merged.append((a,b))
+    return merged
+
+def has_protected(s,t):
+    return any(rx.search(text) for text in (s,t) for rx in (MARKER,LINK))
+
+def supports_mapped(s,t,m):
+    if not has_protected(s,t):
+        return True
+    if os.environ.get("BOOK_TRANSLATOR_ADDRESSED_EPUB")!="on":
+        return False
+    span_map.validate(m,s,t)
+    for text,side in ((s,"source"),(t,"target")):
+        # Do not invent ownership when a protected token crosses a map boundary.
+        cuts=[row[side][1] for row in m["spans"]]
+        if any(bisect_right(cuts,a)!=bisect_left(cuts,b) for a,b in protected_ranges(text)):
+            return False
+    return True
+
+def overlaps_protected(ranges,a,b):
+    i=bisect_right(ranges,(a,float("inf")))-1
+    return ((i>=0 and ranges[i][1]>a) or
+            (i+1<len(ranges) and ranges[i+1][0]<b))
+
+def protected_intervals(text,lo,hi,ranges):
+    cursor=lo
+    for a,b in ranges:
+        if a>=hi:break
+        if b<=lo:continue
+        if a<lo or b>hi:raise ValueError("protected token crosses mapped boundary")
+        yield from ((x,y,False) for x,y in intervals(text,cursor,a))
+        yield a,b,True
+        cursor=b
+    yield from ((x,y,False) for x,y in intervals(text,cursor,hi))
 
 def intervals(text,lo,hi):
     cuts=[lo]+[lo+m.end() for m in SENTENCE.finditer(text[lo:hi]) if m.end()<hi-lo]+[hi]
@@ -22,11 +70,14 @@ def intervals(text,lo,hi):
 def packet(s,t,c,m):
     span_map.validate(m,s,t)
     sc,tc=c["source_core"],c["translation_core"];sw,tw=c["source_window"],c["translation_window"]
-    sr={};tr={};pairs=[]
+    sr={};tr={};pairs=[];protected=[]
+    positions={"source":protected_ranges(s),"target":protected_ranges(t)}
     def cells(text,row,side,prefix,table):
         result=[]
-        for i,(a,b) in enumerate(intervals(text,*row[side]),1):
+        for i,(a,b,locked) in enumerate(
+                protected_intervals(text,*row[side],positions[side]),1):
             key=row["id"]+"."+prefix+str(i);table[key]=(a,b);result.append([key,text[a:b]])
+            if locked:protected.append(key)
         return result
     for row in m["spans"]:
         a,b=row["source"];x,y=row["target"]
@@ -36,8 +87,10 @@ def packet(s,t,c,m):
     if (not pairs or "".join(s[a:b] for a,b in sr.values())!=s[slice(*sc)]
             or "".join(t[a:b] for a,b in tr.values())!=t[slice(*tc)]):
         raise ValueError("mapped packet incomplete")
-    return {"pairs":pairs,"before":{"source":s[sw[0]:sc[0]],"target":t[tw[0]:tc[0]]},
-            "after":{"source":s[sc[1]:sw[1]],"target":t[tc[1]:tw[1]]}},sr,tr
+    data={"pairs":pairs,"before":{"source":s[sw[0]:sc[0]],"target":t[tw[0]:tc[0]]},
+          "after":{"source":s[sc[1]:sw[1]],"target":t[tc[1]:tw[1]]}}
+    if protected:data["protected_ids"]=protected
+    return data,sr,tr
 
 def select(text,ids,table):
     if (not isinstance(ids,list) or not 1<=len(ids)<=8 or any(not isinstance(k,str) or k not in table for k in ids)
@@ -50,7 +103,9 @@ def select(text,ids,table):
     while lo<hi and text[lo].isspace():lo+=1
     while hi>lo and text[hi-1].isspace():hi-=1
     quote=text[lo:hi]
-    if not quote or len(quote)>300 or PROTECTED.search(quote):raise ValueError("invalid selected anchor")
+    locked=protected_ranges(text)
+    if not quote or len(quote)>300 or PROTECTED.search(quote) or overlaps_protected(locked,lo,hi):
+        raise ValueError("invalid selected anchor")
     hits=compact_review.occurrences(text,quote)
     if lo not in hits:raise ValueError("unrepresentable passage address")
     n=hits.index(lo)
@@ -65,10 +120,11 @@ def select(text,ids,table):
             a,b=lo-l,hi+n-l
             if a<left or b>right:continue
             q=text[a:b]
-            if not PROTECTED.search(q) and text.count(q)==1:return {"quote":q,"occurrence":0},(lo,hi)
+            if not PROTECTED.search(q) and not overlaps_protected(locked,a,b) and text.count(q)==1:
+                return {"quote":q,"occurrence":0},(lo,hi)
     raise ValueError("first repeated address cannot be represented uniquely")
 
-def response_contract(*, followup=False):
+def response_contract(*, followup=False, protected=False):
     """Wire format only; pinned literary requirements and validators still apply."""
     return (
         "\n\nID-ADDRESSED REVIEW RESPONSE PROTOCOL (runtime adapter): "
@@ -88,6 +144,10 @@ def response_contract(*, followup=False):
         "Return JSON only, without commentary."
         + (' For this bounded follow-up, {"outcome":"FULL_REQUIRED"} is the sole alternative '
            "when the supplied evidence is insufficient; it is not approval." if followup else "")
+        + (" Protected IDs are visible structural evidence, never select them in an edit anchor. "
+           "If a real finding or prior recheck cannot be expressed with prose IDs, return the "
+           "ordinary canonical v2 full chunk report with exact quotes instead. "
+           "Never silently omit a structure or link-label issue to obtain PASS." if protected else "")
     )
 
 
@@ -117,7 +177,13 @@ def build_user(data,chunk,total,metadata,glossary,style,prior,s,sr):
         "\nExact source-owned cells:\n"+json.dumps(data,ensure_ascii=False,separators=(",",":")))
 
 def compile_response(answer,s,t,c,m,prior):
-    _,sr,tr=packet(s,t,c,m)
+    data,sr,tr=packet(s,t,c,m)
+    if data.get("protected_ids") and os.environ.get("BOOK_TRANSLATOR_ADDRESSED_EPUB")=="on":
+        # The normal canonical validator still checks all fields, exact anchors,
+        # core boundaries and recheck lineage. Only the transport is different.
+        raw=json.loads(answer)
+        if isinstance(raw,dict) and raw.get("evidence_version")==2:
+            return json.dumps(raw,ensure_ascii=False)
     return compile_tables(answer,s,t,sr,tr,prior)
 
 def compile_tables(answer,s,t,sr,tr,prior):
