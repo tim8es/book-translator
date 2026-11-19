@@ -37,6 +37,7 @@ import candidate_review
 import incremental_review
 import adaptive_budget
 import coherent_batches
+import chapter_context
 import transactional_quality
 import block_delta_review
 import compact_review
@@ -2128,6 +2129,8 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             break
         system, user, _ = context(
             engine, slug, chapter, "translator", structural_segments=selected)
+        user, chapter_audit = chapter_context.append(
+            helper, plan, source, stage["segments"], selected, system, user)
         if resilient_recovery.enabled() and (stage["glossary"] or stage["style_guide"]):
             user += ("\nPROVISIONAL EARLIER SPAN DECISIONS (not canonical, verify against source): "+json.dumps({
                 "glossary":stage["glossary"],"style_guide":stage["style_guide"]},ensure_ascii=False)+
@@ -2140,6 +2143,7 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
             "execution_mode": "shared-structural-segments",
+            "chapter_context": chapter_audit,
             "helper_revision": PUBLIC_STRUCTURAL_HELPER_REVISION,
             "batch_segment_count": len(selected),
         }
@@ -2178,10 +2182,13 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             focused = selected[:1]
             repair_system, repair_user, _ = context(
                 engine, slug, chapter, "translator", structural_segments=focused)
+            repair_user, repair_audit = chapter_context.append(
+                helper, plan, source, stage["segments"], focused, repair_system, repair_user)
             status["model_calls_started"] = count + 1
             status["phase"] = "structural-json-repair-reserved"
             status["prompt_context"] = {
                 **prompt_context, "repair_code": code,
+                "chapter_context": repair_audit,
                 "batch_segment_count": len(focused),
                 "execution_mode": "shared-structural-json-repair",
             }
@@ -2211,6 +2218,10 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             rejected = [item for item in selected if item["id"] in incomplete]
             repair_system, repair_user, _ = context(
                 engine, slug, chapter, "translator", structural_segments=rejected)
+            repair_user, repair_audit = chapter_context.append(
+                helper, plan, source, stage["segments"], rejected, repair_system, repair_user)
+            status["prompt_context"] = {**prompt_context,
+                "chapter_context":repair_audit, "execution_mode":"shared-structural-short-output-repair"}
             repaired = complete_for_job(
                 status, "TRANSLATOR", repair_system,
                 repair_user + "\nREJECTED SHORT TRANSLATION: Translate EVERY "
