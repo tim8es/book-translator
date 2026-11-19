@@ -1,5 +1,6 @@
 """Exact chapter provenance, resume, complete context and strict fallback."""
 from __future__ import annotations
+import json
 import os
 import sys
 import unittest
@@ -33,8 +34,10 @@ class FullChapterContextTests(unittest.TestCase):
         with patch.dict(os.environ,{"BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT":"on"}):
             prompt,audit=chapter_context.append(helper,plan,source,prior,selected,"system","requested")
         self.assertEqual(audit["mode"],"full")
-        self.assertIn(source,prompt)
-        self.assertIn(prior[ordered[0]["id"]],prompt)
+        evidence=json.loads(prompt.rsplit("\n",1)[-1])
+        self.assertEqual(evidence["full_original_chapter"],source)
+        self.assertEqual(evidence["previously_translated_segments"],
+                         [{"id":ordered[0]["id"],"translation":prior[ordered[0]["id"]]}])
         self.assertIn("Translate ONLY the selected",prompt)
         self.assertIn('"selected_segment_ids"',prompt)
         self.assertEqual(audit["prior_segments"],1)
