@@ -1,4 +1,5 @@
-import copy,json,sys,unittest
+import copy,json,os,sys,tempfile,unittest
+from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"automation"))
 import span_map
@@ -54,5 +55,36 @@ class MappedFollowupTests(unittest.TestCase):
         self.assertIsNone(mf.scope(*args,book_runner._anchor_position))
         args=list(fixture());args[7]={**args[7],"mode":"full"}
         self.assertIsNone(mf.scope(*args,book_runner._anchor_position))
+
+    def test_complete_mapped_review_keeps_all_passages_and_prior_findings(self):
+        s,t,current,old,new,previous,shared,delta=fixture()
+        chapter={"unit_id":"chapter-000001"}
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ,{
+                "BOOK_TRANSLATOR_SPAN_MAP":"on","BOOK_TRANSLATOR_MAPPED_FULL_REVIEW":"on"}):
+            stage=Path(d)/"stage.json"
+            def prompt(engine,slug,chapter,source,target,part,total,prior,*,mapping):
+                data,sr,tr=addressed_review.packet(source,target,part,mapping)
+                self.assertEqual("".join(source[a:b] for a,b in sr.values()),source)
+                self.assertEqual("".join(target[a:b] for a,b in tr.values()),target)
+                self.assertEqual(total,1)
+                return "system","ID-addressed independent review "+json.dumps(data,ensure_ascii=False)
+            with patch.object(book_runner,"review_chunk_stage_path",return_value=stage), \
+                    patch.object(book_runner,"read_span_map",return_value=new), \
+                    patch.object(book_runner,"review_chunk_prompt",side_effect=prompt):
+                packet=book_runner.mapped_full_review_context(Path(d),"test",chapter,previous,s,current,{})
+                self.assertIsNotNone(packet)
+                system,user,part,mapping,prior=packet
+                self.assertEqual(part["source_core"],[0,len(s)])
+                self.assertEqual(part["translation_core"],[0,len(current)])
+                self.assertEqual(len(prior),1)
+                self.assertIn("ENTIRE chapter",user)
+                response={"outcome":"PASS","checks":dict.fromkeys(mf.CHECKS,True),"findings":[],
+                          "glossary":[],"style_guide":[]}
+                with self.assertRaises(ValueError):
+                    addressed_review.compile_response(json.dumps(response),s,current,part,mapping,prior)
+                self.assertIsNone(book_runner.mapped_full_review_context(Path(d),"test",chapter,previous,s,current,
+                                  {"review_chunk_fallback_unit":chapter["unit_id"]}))
+                stage.write_text("{}")
+                self.assertIsNone(book_runner.mapped_full_review_context(Path(d),"test",chapter,previous,s,current,{}))
 
 if __name__=="__main__":unittest.main()

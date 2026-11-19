@@ -4877,6 +4877,39 @@ def archive_incremental_reviewer_stage(slug: str, chapter: dict,
         return False
 
 
+def mapped_full_review_context(engine,slug,chapter,previous,source,target,status):
+    """Try a single complete independent source-owned review before partitioning.
+
+    No cached approval or omitted coverage. A failed/abandoned paid attempt
+    reserves the normal chunk fallback; never discard a durable staged part.
+    """
+    unit=chapter["unit_id"]
+    if (os.environ.get("BOOK_TRANSLATOR_MAPPED_FULL_REVIEW")!="on"
+            or not span_map.enabled() or len(source)>MAX_DIRECT_REVIEW_CHARS
+            or status.get("review_chunk_fallback_unit")==unit
+            or review_chunk_stage_path(slug,unit).is_file()):
+        return None
+    mapping=read_span_map(slug,unit,source,target)
+    if mapping is None or not addressed_review.supports_mapped(source,target,mapping):
+        return None
+    part={"id":"chunk-001","source_core":[0,len(source)],"source_window":[0,len(source)],
+          "translation_core":[0,len(target)],"translation_window":[0,len(target)]}
+    system,user=review_chunk_prompt(engine,slug,chapter,source,target,part,1,previous,mapping=mapping)
+    if not user.startswith("ID-addressed independent review "):
+        return None
+    guidance=("\nThis is the ENTIRE chapter, not a partial core. Compare every source-owned "
+              "span and its translation in order. Check chapter-wide continuity, voice, "
+              "references, structure and terminology across all spans, not only near prior "
+              "findings. Complete an exhaustive comparison of all five dimensions before "
+              "returning a report. Report all concrete discrepancies together, including "
+              "remaining prior issues and newly identified defects; no stylistic preference "
+              "findings, no fabricated PASS and no unverified prior closure.")
+    if len(system)+len(user)+len(guidance)>120_000:
+        return None
+    prior=review_chunks.find_previous_for_chunk(previous,part,source)
+    return system,user+guidance,part,mapping,prior
+
+
 def mapped_followup_context(engine,slug,chapter,previous,source,target,*,audit=None):
     """Read canonical delta and both immutable maps; never infer scope."""
     def fail(reason):
@@ -4953,6 +4986,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     structural_helper = None
     candidate_span_map = None
     addressed_followup = None
+    mapped_full = None
     review_context = "independent_session"
     reviewed_glossary: list[dict] = []
     # Fully validate the model response before changing canonical artifacts.
@@ -5104,6 +5138,14 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                     system,user=addressed_followup[:2]
                     chunked_review=False
                     review_context="bounded_context"
+        if (role=="reviewer" and addressed_followup is None and not pressure and not scoped_count
+                and candidate_target is not None):
+            mapped_full=mapped_full_review_context(engine,slug,chapter,previous_record,
+                                                   source,candidate_target,status)
+            if mapped_full is not None:
+                system,user=mapped_full[:2]
+                chunked_review=False
+                review_context="independent_session"
         # Record the exact pinned input revisions, not the revisions after a
         # successful memory update. Never persist source passages in logs.
         prompt_context = {
@@ -5119,6 +5161,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             prompt_context["review_context"] = review_context
             if addressed_followup is not None:
                 prompt_context["execution_mode"]="mapped-id-followup"
+            elif mapped_full is not None:
+                prompt_context["execution_mode"]="mapped-id-full-review"
         if patch_mode:
             prompt_context["correction_mode"] = "anchored-patches"
         preserve_links = (role in {"translator", "corrector"} and not patch_mode
@@ -5168,6 +5212,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             status["model_calls_started"] = count + 1
             status["phase"] = "model-call-reserved"
             status["prompt_context"] = prompt_context
+            if mapped_full is not None:
+                # A restart, timeout or malformed response falls back to
+                # smaller independent parts; success clears both flags.
+                status["review_chunk_fallback_unit"]=unit_id
+                status["force_full_review_unit"]=unit_id
             checkpoint(job_id, status, slug)
             answer = complete_for_job(status, "REVIEWER" if role == "reviewer" else
                               "CORRECTOR" if role == "corrector" else "TRANSLATOR",
@@ -5175,6 +5224,13 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if role == "reviewer":
                 translation_bytes = (ROOT / "books" / slug / chapter["translation_path"]
                                      ).read_bytes()
+                if mapped_full is not None:
+                    try:
+                        _,_,part,mapping,prior=mapped_full
+                        answer=addressed_review.compile_response(answer,source,
+                            translation_bytes.decode("utf-8"),part,mapping,prior)
+                    except (ValueError,KeyError,TypeError) as exc:
+                        raise ModelError("reviewer evidence is invalid: addressed review "+str(exc)) from exc
                 if addressed_followup is not None:
                     try:
                         response=json.loads(answer)
@@ -5196,7 +5252,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         claim=owned)
                     reviewed_glossary = reviewer_glossary_proposals(answer)
                 except ModelError as exc:
-                    if addressed_followup is not None:
+                    if addressed_followup is not None or mapped_full is not None:
                         raise
                     # Provider/transport failures happen outside this parse/verify
                     # block and never trigger an extra paid call. Repair only a
