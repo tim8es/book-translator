@@ -277,7 +277,13 @@ class RequestTests(unittest.TestCase):
 
 
     def test_real_engine_claim_accept_review_cycle_with_remote_receipts(self):
-        """A disposable Git remote exercises the actual pinned CLI, not mocks."""
+        self._real_engine_cycle(mapped=False)
+
+    def test_real_engine_mapped_correction_and_review_cycle(self):
+        self._real_engine_cycle(mapped=True)
+
+    def _real_engine_cycle(self,*,mapped):
+        """Disposable remote and real pinned CLI; literary responses are synthetic fixtures."""
         import shutil
         import sys
 
@@ -368,23 +374,111 @@ class RequestTests(unittest.TestCase):
                 "chapters"][0]["status"], "extracted")
 
             translated = "# Первая глава\n\nНебольшой полный перевод.\n"
-            accepted = issue("accept-translation", "writer-1",
+            extra={}
+            if mapped:
+                runner,maps,exchange=bridge.span_helpers()
+                def load_module(name,file):
+                    spec=importlib.util.spec_from_file_location(name,file)
+                    module=importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    return module
+                # CI may have a shallow checkout without compatibility-helper
+                # commit objects. Use the real checked-out pure helpers here;
+                # all claim/accept/review operations below are the actual CLI.
+                helper=load_module("bridge_test_structural",public/"scripts/workflow/structural_translation.py")
+                correction=load_module("bridge_test_correction",public/"scripts/workflow/correction_protocol.py")
+                source=(book/chapter["source_path"]).read_bytes().decode("utf-8")
+                translated="# Первая глава\n\nНекоторый исходный французский текст.\n"
+                plan=runner.bounded_source_plan(source,helper)
+                self.assertEqual(len(helper.spans(plan)),1)
+                segments={helper.spans(plan)[0]["id"]:translated.strip()}
+                self.assertEqual(helper.render(plan,segments),translated)
+                extra={"structural_segments":segments}
+            with patch.object(runner,"load_public_structural_helper",return_value=helper) if mapped else __import__("contextlib").nullcontext():
+                accepted = issue("accept-translation", "writer-1",
                              translation=translated,
                              translation_sha256=hashlib.sha256(translated.encode()).hexdigest(),
-                             source_sha256=source_hash, claim_sha256=claim_hash)
+                             source_sha256=source_hash, claim_sha256=claim_hash, **extra)
             self.assertEqual(accepted["status"], "ok", accepted["error"])
             self.assertEqual(json.loads((book / "progress.json").read_text())[
                 "chapters"][0]["status"], "translated")
             self.assertEqual(issue("release", "writer-1")["status"], "ok")
             self.assertEqual(issue("claim", "reviewer-1", role="reviewer")["status"], "ok")
             claim_hash = hashlib.sha256(claim_file.read_bytes()).hexdigest()
-            recorded = issue("review-record", "reviewer-1", outcome="PASS",
-                             quality_report={"context": "bounded_context",
-                                             "checks": {"coverage": True, "meaning": True,
-                                                        "terminology": True, "style": True,
-                                                        "structure": True}, "findings": []},
-                             source_sha256=source_hash, claim_sha256=claim_hash,
-                             translation_sha256=hashlib.sha256(translated.encode()).hexdigest())
+            if mapped:
+                # The accepted map must be visible in the remote receipt commit,
+                # and readable by the same Auto helper without any reconstruction.
+                mapping=maps.read_artifact(book,chapter["unit_id"],source,translated)
+                self.assertIsNotNone(mapping)
+                map_path=maps.artifact_path(book,chapter["unit_id"],source,translated)
+                self.assertEqual(json.loads(run("-C",str(work),"show","origin/main:"+str(map_path.relative_to(work))).stdout),mapping)
+                checks=dict.fromkeys(("coverage","meaning","terminology","style","structure"),True)
+                def response_for(target,current_map,previous=None,*,resolved):
+                    packet=exchange.prepare(source,target,current_map,previous)
+                    rows=[]
+                    found=False
+                    for part in packet["parts"]:
+                        findings=[]
+                        for pair in part["packet"]["pairs"]:
+                            si=next((k for k,v in pair["source"] if "Some original English prose." in v),None)
+                            ti=next((k for k,v in pair["target"] if ("английский" if resolved else "французский") in v),None)
+                            if si and ti:
+                                prior=None if previous is None else next(f["id"] for f in previous["quality_report"]["findings"] if not f["resolved"])
+                                findings.append({"source_ids":[si],"target_ids":[ti],"category":"meaning","severity":"major",
+                                                 "detail":"Source language restored." if resolved else "English was changed to French.",
+                                                 "prior":prior,"resolved":resolved})
+                                found=True
+                        rows.append({"chunk_id":part["chunk_id"],"response":{"outcome":"CORRECTIONS_REQUIRED" if findings and not resolved else "PASS",
+                                     "checks":checks,"findings":findings,"glossary":[],"style_guide":[]}})
+                    self.assertTrue(found,"fixture needs an addressed finding")
+                    return rows
+                rejected=issue("review-record","reviewer-1",outcome="CORRECTIONS_REQUIRED",
+                               addressed_parts=response_for(translated,mapping,resolved=False),
+                               source_sha256=source_hash,claim_sha256=claim_hash,translation_sha256=maps.sha(translated))
+                self.assertEqual(rejected["status"],"ok",rejected["error"])
+                self.assertEqual(issue("accept-review","orchestrator-1")["status"],"failed")
+                self.assertEqual(issue("release","reviewer-1")["status"],"ok")
+                chapter=json.loads((book/"progress.json").read_text())["chapters"][0]
+                previous=runner.latest_record(json.loads((book/"review-ledger.json").read_text()),chapter)
+                finding=previous["quality_report"]["findings"][0]
+                self.assertIn("французский",finding["translation_anchor"]["quote"])
+                replacement=finding["translation_anchor"]["quote"].replace("французский","английский")
+                edit={"finding_id":finding["id"],"operation":"replace","replacement":replacement}
+                corrected=runner.apply_correction_patches(translated,[{**edit,"target_anchor":finding["translation_anchor"]}])
+                claimed=issue("claim","corrector-1",role="translator")
+                self.assertEqual(claimed["status"],"ok",claimed["error"])
+                claim_hash=maps.sha(claim_file.read_text("utf-8"))
+                with patch.object(runner,"load_public_correction_helper",return_value=correction):
+                    stale=issue("accept-translation","corrector-1",translation=corrected,
+                        translation_sha256=maps.sha(corrected),source_sha256=source_hash,claim_sha256=claim_hash,
+                        previous_review_record_id="0"*32,correction_patches=[edit])
+                    self.assertEqual(stale["status"],"failed")
+                    self.assertEqual((book/chapter["translation_path"]).read_text("utf-8"),translated)
+                    repaired=issue("accept-translation","corrector-1",translation=corrected,
+                        translation_sha256=maps.sha(corrected),source_sha256=source_hash,claim_sha256=claim_hash,
+                        previous_review_record_id=previous["record_id"],correction_patches=[edit])
+                self.assertEqual(repaired["status"],"ok",repaired["error"])
+                self.assertEqual(json.loads((book/"progress.json").read_text())["chapters"][0]["status"],"translated")
+                self.assertEqual(issue("accept-review","orchestrator-1")["status"],"failed")
+                current_map=maps.read_artifact(book,chapter["unit_id"],source,corrected)
+                self.assertIsNotNone(current_map)
+                self.assertNotEqual(current_map["translation_sha256"],mapping["translation_sha256"])
+                self.assertEqual(current_map["spans"][0]["source_sha256"],mapping["spans"][0]["source_sha256"])
+                self.assertEqual(issue("release","corrector-1")["status"],"ok")
+                self.assertEqual(issue("claim","reviewer-2",role="reviewer")["status"],"ok")
+                claim_hash=hashlib.sha256(claim_file.read_bytes()).hexdigest()
+                recorded=issue("review-record","reviewer-2",outcome="PASS",
+                    addressed_parts=response_for(corrected,current_map,previous,resolved=True),
+                    source_sha256=source_hash,claim_sha256=claim_hash,translation_sha256=maps.sha(corrected))
+                self.assertEqual(recorded["status"],"ok",recorded["error"])
+            else:
+                recorded = issue("review-record", "reviewer-1", outcome="PASS",
+                                 quality_report={"context": "bounded_context",
+                                                 "checks": {"coverage": True, "meaning": True,
+                                                            "terminology": True, "style": True,
+                                                            "structure": True}, "findings": []},
+                                 source_sha256=source_hash, claim_sha256=claim_hash,
+                                 translation_sha256=hashlib.sha256(translated.encode()).hexdigest())
             self.assertEqual(recorded["status"], "ok", recorded["error"])
             self.assertEqual(issue("accept-review", "orchestrator-1")["status"], "ok")
             self.assertEqual(json.loads((book / "progress.json").read_text())[
