@@ -1,6 +1,9 @@
 """Exact source-owned translation coordinates, not literary approval."""
 import hashlib
+import json
 import os
+import re
+from pathlib import Path
 
 def enabled():
     mode=os.environ.get("BOOK_TRANSLATOR_SPAN_MAP","off")
@@ -102,3 +105,36 @@ def groups(m,s,t,budget,window):
         out.append({"id":"chunk-%03d"%(len(out)+1),"source_core":sc,"translation_core":tc,"source_window":sw,"translation_window":tw})
         start=end
     return out
+
+
+def artifact_path(book,unit_id,source,target):
+    """One shared durable path for both Auto and ChatOps, including old maps."""
+    if not isinstance(unit_id,str) or not re.fullmatch(r"chapter-[0-9]{6}",unit_id):
+        raise ValueError("invalid map unit identity")
+    book=Path(book).resolve(strict=True)
+    relative=Path(".workflow")/"auto-span-maps"/unit_id/sha(source)/(sha(target)+".json")
+    path=book
+    for part in relative.parts:
+        path=path/part
+        if path.is_symlink():raise ValueError("unsafe span map path")
+    return path
+
+
+def read_artifact(book,unit_id,source,target):
+    path=artifact_path(book,unit_id,source,target)
+    if not path.is_file():return None
+    value=json.loads(path.read_bytes().decode("utf-8"))
+    validate(value,source,target)
+    return value
+
+
+def persist_artifact(book,unit_id,value,source,target):
+    validate(value,source,target)
+    path=artifact_path(book,unit_id,source,target)
+    if path.exists():
+        if read_artifact(book,unit_id,source,target)!=value:
+            raise ValueError("conflicting immutable span map")
+    else:
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+    return path

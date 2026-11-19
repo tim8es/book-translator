@@ -2068,32 +2068,30 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
 
 
 def span_map_path(slug,unit_id,source,target):
-    if not safe_book_slug(slug) or not re.fullmatch(r"chapter-[0-9]{6}",unit_id):
-        raise JobError("invalid span map identity")
-    return ROOT/"books"/slug/".workflow"/"auto-span-maps"/unit_id/span_map.sha(source)/(span_map.sha(target)+".json")
+    if not safe_book_slug(slug):
+        raise JobError("invalid span map book identity")
+    try:
+        return span_map.artifact_path(ROOT/"books"/slug,unit_id,source,target)
+    except (ValueError,OSError) as exc:
+        raise JobError("invalid span map identity") from exc
 
 
 def read_span_map(slug,unit_id,source,target):
-    path=span_map_path(slug,unit_id,source,target)
-    if not path.is_file():
-        return None
-    value=read_json(path)
+    if not safe_book_slug(slug):
+        raise JobError("invalid span map book identity")
     try:
-        span_map.validate(value,source,target)
-    except ValueError as exc:
+        return span_map.read_artifact(ROOT/"books"/slug,unit_id,source,target)
+    except (ValueError,OSError) as exc:
         raise JobError("invalid current artifact span map") from exc
-    return value
 
 
 def persist_span_map(slug,unit_id,value,source,target):
-    span_map.validate(value,source,target)
-    path=span_map_path(slug,unit_id,source,target)
-    if path.exists():
-        if read_json(path)!=value:
-            raise JobError("conflicting immutable span map")
-    else:
-        path.parent.mkdir(parents=True,exist_ok=True)
-        store_json(path,value)
+    if not safe_book_slug(slug):
+        raise JobError("invalid span map book identity")
+    try:
+        span_map.persist_artifact(ROOT/"books"/slug,unit_id,value,source,target)
+    except (ValueError,OSError) as exc:
+        raise JobError("invalid or conflicting immutable span map") from exc
 
 
 def process_structural_translation(job_id: str, slug: str, status: dict,

@@ -10,3 +10,15 @@ Phase 3: mapped correction groups pack full source-owned context once per passag
 
 
 Phase 4: provider-size recovery can now split an unfinished mapped review core at a real paired span boundary. Complete independently reviewed windows are preserved under exact artifact and memory binding. Rebuild stable refined partitions after a local edit; if exact geometry changes, only byte-identical clean windows with identical source scope and target-core geometry may be reused. A changed glossary/style revision still forces fresh evidence. No old report is synthesized or promoted by recovery.
+
+
+Phase 5: the existing ChatOps bridge now accepts an optional `structural_segments` object on `accept-translation`, using the same immutable public structural helper and exact-render check as Auto. It writes the same book-local hash-addressed map in the same canonical acceptance/receipt commit. An optional `addressed_parts` array on `review-record` replaces (not supplements) `quality_report`. The bridge reconstructs every current packet from the accepted source/target bytes and map, compiles every independently supplied response using the common ID compiler, verifies coverage/lineage/outcome, then delegates to the existing pinned `review-record` CLI. Live claim, artifact hashes and distinct reviewer sessions remain mandatory. Shared memory proposals use the existing separate canonical CAS path (addressed ChatOps responses must provide empty glossary/style arrays). Legacy request envelopes remain supported. No new queue or parallel lifecycle.
+
+Read-only packet utility, from the locked public runtime checkout:
+
+```sh
+python automation/span_exchange.py translation-plan --source extracted.md --engine /path/to/public-engine
+python automation/span_exchange.py review-plan --source extracted.md --translation accepted.md --map exact-map.json --previous previous-record.json
+```
+
+Omit `--previous` for the initial independent review. Translation output uses the returned source segment IDs; submit `structural_segments` as ID-to-translation object, along with the exact rendered `translation`. The bridge rebuilds the plan rather than trusting arbitrary map coordinates. For review, submit each `{"chunk_id":"chunk-001","response":{...}}` exactly once in `addressed_parts`, with checks/findings/output schema of the shared ID reviewer. The canonical CLI still owns quality and acceptance; the utility neither creates evidence nor calls a model. Existing workspace files are never silently changed. Plain prose only for addressed review until protected-marker support is verified; other units retain canonical existing evidence format.
