@@ -14,7 +14,8 @@ SCHEMA_VERSION = 1
 HELPER_REVISION = "review-chunks-v1"
 ALIGNMENT_REVISION = "review-chunks-markers-v1"
 STABLE_ALIGNMENT_REVISION = "review-chunks-source-stable-v1"
-ALIGNED_REVISIONS = {ALIGNMENT_REVISION, STABLE_ALIGNMENT_REVISION}
+PARAGRAPH_STABLE_REVISION = "review-chunks-paragraph-stable-v1"
+ALIGNED_REVISIONS = {ALIGNMENT_REVISION, STABLE_ALIGNMENT_REVISION, PARAGRAPH_STABLE_REVISION}
 BLOCK_MARKER = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 TARGET_CHARS = 12_000
 OVERLAP_CHARS = 1_800
@@ -176,6 +177,53 @@ def plan_aligned(source: str, translation: str, *,
     return result
 
 
+def _paragraph_cuts(source,translation,count):
+    """Ordinal correspondence is a planning hypothesis, not semantic evidence."""
+    if BLOCK_MARKER.search(source) or BLOCK_MARKER.search(translation):
+        return None
+    src=[0]+[m.end() for m in re.finditer(r"\n[ \t]*\n",source) if m.end()<len(source)]+[len(source)]
+    dst=[0]+[m.end() for m in re.finditer(r"\n[ \t]*\n",translation) if m.end()<len(translation)]+[len(translation)]
+    if len(src)!=len(dst) or len(src)<count+1 or not 2<=count<=MAX_CHUNKS:
+        return None
+    indices=[0]
+    for i in range(1,count):
+        choices=range(indices[-1]+1,len(src)-(count-i))
+        if not choices:
+            return None
+        indices.append(min(choices,key=lambda j:(abs(src[j]-len(source)*i/count),j)))
+    indices.append(len(src)-1)
+    return [src[j] for j in indices],[dst[j] for j in indices]
+
+
+def plan_paragraphs(source,translation,*,target_chars=TARGET_CHARS,count=None,wider=False):
+    if not source.strip() or not translation.strip():
+        return None
+    if type(target_chars) is not int or not 3000<=target_chars<=TARGET_CHARS:
+        raise ValueError("invalid adaptive paragraph target")
+    # Try 16k-character cores, but never exceed the existing combined window
+    # ceiling. On provider pressure use the ordinary smaller target.
+    desired=count if count is not None else max(2,math.ceil(max(len(source),len(translation))/(16000 if wider else target_chars)))
+    for n in ([desired] if count is not None else range(desired,min(MAX_CHUNKS,desired+3)+1)):
+        pair=_paragraph_cuts(source,translation,n)
+        if pair is None:
+            return None
+        sb,tb=pair
+        pieces=[]
+        for i in range(n):
+            sc,tc=[sb[i],sb[i+1]],[tb[i],tb[i+1]]
+            sw,tw=_window(source,*sc),_window(translation,*tc)
+            if sw[1]-sw[0]+tw[1]-tw[0]>42000:
+                break
+            pieces.append({"id":"chunk-%03d"%(i+1),"source_core":sc,"translation_core":tc,
+                           "source_window":sw,"translation_window":tw})
+        if len(pieces)==n:
+            result={"schema_version":SCHEMA_VERSION,"helper_revision":PARAGRAPH_STABLE_REVISION,
+                    "source_sha256":sha(source),"translation_sha256":sha(translation),"chunks":pieces}
+            validate_plan(result,source,translation)
+            return result
+    return None
+
+
 def validate_plan(value: dict, source: str, translation: str) -> None:
     if (not isinstance(value, dict) or set(value) != {
             "schema_version", "helper_revision", "source_sha256",
@@ -208,7 +256,12 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
         if offset != len(text):
             raise ValueError("review final chunk leaves unreviewed text")
     # Persisted plans must be deterministic, not user/model supplied.
-    if value["helper_revision"] in ALIGNED_REVISIONS:
+    if value["helper_revision"]==PARAGRAPH_STABLE_REVISION:
+        aligned=_paragraph_cuts(source,translation,len(value["chunks"]))
+        if aligned is None:
+            raise ValueError("paragraph review plan has lost boundaries")
+        source_cuts,target_cuts=aligned
+    elif value["helper_revision"] in ALIGNED_REVISIONS:
         aligned = _marker_cuts(source, translation, count=len(value["chunks"]),
                                stable=value["helper_revision"] == STABLE_ALIGNMENT_REVISION)
         if aligned is None or len(aligned[0]) != len(value["chunks"]) + 1:

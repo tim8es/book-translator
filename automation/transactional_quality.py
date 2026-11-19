@@ -58,6 +58,9 @@ def require_safe(source,before,after,patches,findings,position):
             alarm("empty-non-addition")
         if correction_feedback.enabled() and replace and replacement==p["target_anchor"]["quote"]:
             alarm("unchanged-correction")
+        if __import__("single_review_gate").enabled() and f["category"] not in {"omission","addition","structure"}:
+            if __import__("single_review_gate").paragraph_count(p["target_anchor"]["quote"])!=__import__("single_review_gate").paragraph_count(replacement):
+                alarm("unexpected-paragraph-boundary-change")
         st,en=position(before,p["target_anchor"])
         if replace and f["category"]!="addition":
             a,b=visible_size(before[st:en]),visible_size(replacement)

@@ -42,6 +42,7 @@ import block_delta_review
 import compact_review
 import block_recovery
 import correction_feedback
+import single_review_gate
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -1967,9 +1968,15 @@ def incomplete_structural_batch(selected: list[dict], translated: dict) -> list[
     failures = []
     for item in selected:
         result = translated.get(item["id"])
-        if result is None or len(item["source"]) < 400:
+        if result is None:
             continue
         original = item["source"]
+        if (single_review_gate.paragraph_preserving()
+                and single_review_gate.paragraph_count(original)!=single_review_gate.paragraph_count(result)):
+            failures.append(item["id"])
+            continue
+        if len(original)<400:
+            continue
         src_paras = len(re.split(r"\n[ \t]*\n", original))
         dst_paras = len(re.split(r"\n[ \t]*\n", result))
         if (len(result) * 100 < len(original) * 55
@@ -2304,6 +2311,15 @@ def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine:
     try:
         transactional_quality.require_safe(source,translation,candidate,patches,findings,_anchor_position)
         cases=transactional_quality.transaction_cases(source,translation,candidate,patches,findings,_anchor_position)
+        complete_case_count=len(cases)
+        cases=single_review_gate.select_cases(cases,patches,findings)
+        if single_review_gate.enabled():
+            status["single_review_gate_summary"]={"unit_id":chapter["unit_id"],"total_cases":complete_case_count,
+                "high_risk_preflight_cases":len(cases),"canonical_review_required":True,
+                "candidate_sha256":transactional_quality.digest(candidate)}
+        if not cases and complete_case_count and single_review_gate.enabled():
+            # Machine acceptance only; next canonical independent review is mandatory.
+            return True
         instructions,paths=role_contracts(engine,"reviewer")
         # Supply the same literary memory to the veto as to the ordinary review.
         root=ROOT/"books"/slug
@@ -2671,7 +2687,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 pressure=pressure, isolated=bool(isolated))
             if coherent_batches.enabled():
                 status["adaptive_correction_budget"]["current_selection_size"] = len(selected)
-        if continue_batches and isolated and len(pending) > 1:
+        if continue_batches and isolated and len(pending) > 1 and not single_review_gate.enabled():
             strategy = correction_orchestrator_strategy(
                 job_id, slug, status, engine, chapter, record, pending, isolated)
             if strategy == "isolate_remaining":
@@ -4000,6 +4016,10 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         user += ("\nScope reminder: the source unit above is the complete input for this call. "
                  "Do not report the absence of other chapters or of the full EPUB as a reason "
                  "the supplied unit cannot be handled.")
+    if structural_segments is not None and single_review_gate.paragraph_preserving():
+        user += ("\nEach supplied source span must preserve its exact number and order of blank-line-separated paragraphs. "
+                 "Translate EACH paragraph in place, do not merge or divide paragraphs; retain dialogue turns and all content. "
+                 "Read adjacent spans for context but never duplicate their text in another span.")
     if structural_segments is not None:
         user += ("\nThese are source-ID-bounded text fragments, not the complete "
                  "chapter. Original protected links and EPUB markers are withheld "
@@ -4381,12 +4401,20 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     marker_plan = (prior_revision in review_chunks.ALIGNED_REVISIONS
                    or (prior_revision is None and
                        (alignment_mode == "on" or incremental_mode == "on" or pressure)))
-    stable = (prior_revision == review_chunks.STABLE_ALIGNMENT_REVISION
+    stable = (prior_revision in {review_chunks.STABLE_ALIGNMENT_REVISION,review_chunks.PARAGRAPH_STABLE_REVISION}
               or (prior_revision is None and incremental_mode == "on"))
     remembered = execution_scheduler.review_target(status, chapter["unit_id"],
                                                    review_chunks.sha(source))
     target = min(remembered, adaptive_budget.review_target_chars(pressure))
     def planner(original, translated, *, target_chars, keep_count=False):
+        if (single_review_gate.paragraph_preserving() and
+                prior_revision in {None,review_chunks.PARAGRAPH_STABLE_REVISION}):
+            count=(len(prior_plan["chunks"]) if keep_count and prior_revision==review_chunks.PARAGRAPH_STABLE_REVISION
+                   and prior_plan.get("source_sha256")==review_chunks.sha(original) else None)
+            proposed=review_chunks.plan_paragraphs(original,translated,target_chars=target_chars,count=count,
+                                                  wider=not pressure and remembered==review_chunks.TARGET_CHARS)
+            if proposed is not None:
+                return proposed
         if marker_plan:
             count = (len(prior_plan["chunks"]) if keep_count and stable
                      and prior_revision == review_chunks.STABLE_ALIGNMENT_REVISION
@@ -4418,6 +4446,9 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     if pressure or remembered < review_chunks.TARGET_CHARS:
         execution_scheduler.record_review_target(
             status, chapter["unit_id"], review_chunks.sha(source), target)
+    if (prior_revision==review_chunks.PARAGRAPH_STABLE_REVISION
+            and plan["helper_revision"]!=prior_revision):
+        stage=None
     binding = None
     if ((stage is not None and isinstance(stage, dict)
          and stage.get("schema_version") == incremental_review.STAGE_VERSION)

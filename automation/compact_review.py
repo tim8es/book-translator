@@ -49,8 +49,12 @@ def packet_ranges(source,target,chunk):
     if aligned(source,target):
         return (ranges(source,chunk["source_core"]),ranges(target,chunk["translation_core"]),True)
     if plain_review_scope.plain(source,target):
-        return (plain_review_scope.addressed(source,chunk["source_core"],"s"),
-                plain_review_scope.addressed(target,chunk["translation_core"],"t"),False)
+        targets=plain_review_scope.addressed(target,chunk["translation_core"],"t")
+        if __import__("single_review_gate").paragraph_preserving():
+            lo,hi=chunk["translation_core"];a,b=chunk["translation_window"]
+            targets.update(plain_review_scope.addressed(target,[a,lo],"before"))
+            targets.update(plain_review_scope.addressed(target,[hi,b],"after"))
+        return (plain_review_scope.addressed(source,chunk["source_core"],"s"),targets,False)
     return {},{},False
 
 def packet(source,target,chunk):
@@ -67,7 +71,8 @@ def packet(source,target,chunk):
     else:
         result.update({"alignment":"approximate separate source/target cores; verify correspondence",
             "source_paragraphs":[{"block_id":k,"text":source[slice(*v)]} for k,v in sr.items()],
-            "target_paragraphs":[{"block_id":k,"text":target[slice(*v)]} for k,v in tr.items()]})
+            "target_paragraphs":[{"block_id":k,"text":target[slice(*v)]} for k,v in tr.items() if k.startswith("t")],
+            "addressed_target_overlap":[{"block_id":k,"text":target[slice(*v)]} for k,v in tr.items() if not k.startswith("t")]})
     return result
 
 def build_user(data,chunk,total,metadata,glossary,style,prior):
@@ -99,8 +104,14 @@ def build_user(data,chunk,total,metadata,glossary,style,prior):
         "The example is schema only. Return real values, never example findings. "
         "Source and target IDs must exist in their presented core lists; quote each exact visible passage "
         "once within its named block, no changed punctuation, no markers, no guessing. "
-        "Prefer the smallest sufficient unique quote; the compiler can add exact adjacent context to disambiguate "
-        "a repeated first occurrence. A target_quote AND target_block may both be null only for a genuine omission. "
+        "For a proposed replacement use a complete self-contained clause or sentence (up to 300 characters), "
+        "not one word if the fix also needs its surrounding grammar, punctuation or dialogue attribution. "
+        "Give a concrete correction goal, not stylistic preference. Use addressed target overlap when the corresponding "
+        "target is just outside its core; do not call a boundary shift missing content. "
+        "Both target fields must be real exact values for EVERY non-omission category and EVERY resolved recheck. "
+        "Both may be null ONLY if category is omission AND resolved is false, and no surrounding target sentence "
+        "can provide a suitable exact repair anchor. Never use null for meaning, style or addition. "
+        "The compiler can add exact adjacent context to disambiguate a repeated first occurrence. "
         "Use omission|addition|meaning|modality|referent|terminology|register|voice|style|structure, "
         "minor|major|critical. For each prior finding output exactly one recheck with prior set to its supplied id. "
         "New findings have prior:null and resolved:false. Set resolved:true only after verifying the actual repair. "

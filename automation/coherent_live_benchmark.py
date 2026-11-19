@@ -128,7 +128,9 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "patch_progress":status.get("correction_batch_progress"),
                           "review_progress":status.get("review_chunk_progress"),
                           "batch_size":prompt.get("batch_finding_count"),
-                          "semantic_preflight_summary":status.get("last_semantic_preflight")},ensure_ascii=False),flush=True)
+                          "semantic_preflight_summary":status.get("last_semantic_preflight"),
+                          "single_review_gate":status.get("single_review_gate_summary"),
+                          "incremental_reused":prompt.get("reused_clean_chunks")},ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
