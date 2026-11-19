@@ -10,18 +10,21 @@ import json
 import math
 import re
 import resilient_recovery
+import span_map
 
 SCHEMA_VERSION = 1
 HELPER_REVISION = "review-chunks-v1"
 ALIGNMENT_REVISION = "review-chunks-markers-v1"
 STABLE_ALIGNMENT_REVISION = "review-chunks-source-stable-v1"
 PARAGRAPH_STABLE_REVISION = "review-chunks-paragraph-stable-v1"
-ALIGNED_REVISIONS = {ALIGNMENT_REVISION, STABLE_ALIGNMENT_REVISION, PARAGRAPH_STABLE_REVISION}
+MAPPED_REVISION="review-chunks-source-owned-v1"
+ALIGNED_REVISIONS = {ALIGNMENT_REVISION, STABLE_ALIGNMENT_REVISION, PARAGRAPH_STABLE_REVISION, MAPPED_REVISION}
 REFINED_REVISION="review-chunks-refined-v1"
 PLAN_REVISIONS={HELPER_REVISION,REFINED_REVISION}|ALIGNED_REVISIONS
 BASE_FIELDS={"schema_version","helper_revision","source_sha256","translation_sha256","chunks"}
 
 def plan_fields(plan):
+    if plan.get("helper_revision")==MAPPED_REVISION:return BASE_FIELDS|{"mapping","map_budget"}
     return BASE_FIELDS|({"base_plan","split_steps"} if plan.get("helper_revision")==REFINED_REVISION else set())
 BLOCK_MARKER = re.compile(r"<!--\s*bt-block:(\d+)\s*-->")
 TARGET_CHARS = 12_000
@@ -301,6 +304,15 @@ def refine_pending(plan,part_id,source,translation):
     return result
 
 
+def plan_mapped(source,translation,mapping,budget=TARGET_CHARS):
+    groups=span_map.groups(mapping,source,translation,budget,_window)
+    if groups is None or not 2<=len(groups)<=MAX_CHUNKS:return None
+    value={"schema_version":SCHEMA_VERSION,"helper_revision":MAPPED_REVISION,"source_sha256":sha(source),
+           "translation_sha256":sha(translation),"chunks":groups,"mapping":mapping,"map_budget":budget}
+    validate_plan(value,source,translation)
+    return value
+
+
 def validate_plan(value: dict, source: str, translation: str) -> None:
     if (not isinstance(value, dict) or set(value) != plan_fields(value)
             or value["schema_version"] != SCHEMA_VERSION
@@ -331,6 +343,10 @@ def validate_plan(value: dict, source: str, translation: str) -> None:
         if offset != len(text):
             raise ValueError("review final chunk leaves unreviewed text")
     # Persisted plans must be deterministic, not user/model supplied.
+    if value["helper_revision"]==MAPPED_REVISION:
+        expected=span_map.groups(value["mapping"],source,translation,value["map_budget"],_window)
+        if expected!=value["chunks"]:raise ValueError("mapped review partition modified")
+        return
     if value["helper_revision"]==REFINED_REVISION:
         base=value["base_plan"]
         if not isinstance(base,dict) or base.get("helper_revision") not in PLAN_REVISIONS-{REFINED_REVISION}:

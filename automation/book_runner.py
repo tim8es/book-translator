@@ -44,6 +44,8 @@ import block_recovery
 import correction_feedback
 import single_review_gate
 import resilient_recovery
+import span_map
+import addressed_review
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -2060,6 +2062,35 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
             "persisted_segments": len(stage["segments"]),
         })
     return path, stage
+
+
+def span_map_path(slug,unit_id,source,target):
+    if not safe_book_slug(slug) or not re.fullmatch(r"chapter-[0-9]{6}",unit_id):
+        raise JobError("invalid span map identity")
+    return ROOT/"books"/slug/".workflow"/"auto-span-maps"/unit_id/span_map.sha(source)/(span_map.sha(target)+".json")
+
+
+def read_span_map(slug,unit_id,source,target):
+    path=span_map_path(slug,unit_id,source,target)
+    if not path.is_file():
+        return None
+    value=read_json(path)
+    try:
+        span_map.validate(value,source,target)
+    except ValueError as exc:
+        raise JobError("invalid current artifact span map") from exc
+    return value
+
+
+def persist_span_map(slug,unit_id,value,source,target):
+    span_map.validate(value,source,target)
+    path=span_map_path(slug,unit_id,source,target)
+    if path.exists():
+        if read_json(path)!=value:
+            raise JobError("conflicting immutable span map")
+    else:
+        path.parent.mkdir(parents=True,exist_ok=True)
+        store_json(path,value)
 
 
 def process_structural_translation(job_id: str, slug: str, status: dict,
@@ -4289,7 +4320,7 @@ def review_chunk_stage_path(slug: str, unit_id: str) -> Path:
 
 def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
                         translation: str, chunk: dict, total: int,
-                        previous: dict | None) -> tuple[str, str]:
+                        previous: dict | None, *, mapping=None) -> tuple[str, str]:
     """New independent reviewer invocation, with exact paired source evidence."""
     book = ROOT / "books" / slug
     instructions, _ = role_contracts(engine, "reviewer")
@@ -4319,6 +4350,14 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "a concrete unresolved source-grounded concern. "
         "Do not change accepted text or fabricate checks.")
     system += "\n\n" + GLOSSARY_POLICY
+    if mapping is not None:
+        data,sr,_=addressed_review.packet(source,translation,chunk,mapping)
+        user=addressed_review.build_user(data,chunk,total,bibliographic,
+            model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
+                                   target_language=bibliographic.get("target_language","unspecified")),
+            style,old_findings,source,sr)
+        if len(system)+len(user)<=120_000:
+            return system,user
     paired = compact_review.packet(source, translation, chunk) if compact_review.enabled() else None
     if paired is not None:
         compact_user = compact_review.build_user(paired, chunk, total, bibliographic,
@@ -4403,6 +4442,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     translation = (book / chapter["translation_path"]).read_bytes().decode("utf-8")
     stage_path = review_chunk_stage_path(slug, chapter["unit_id"])
     stage = read_json(stage_path) if stage_path.is_file() else None
+    current_map=read_span_map(slug,chapter["unit_id"],source,translation) if span_map.enabled() else None
     prior_plan = stage.get("plan") if isinstance(stage, dict) else None
     prior_revision = (prior_plan.get("helper_revision")
                       if isinstance(prior_plan, dict) else None)
@@ -4424,6 +4464,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                                                    review_chunks.sha(source))
     target = min(remembered, adaptive_budget.review_target_chars(pressure))
     def planner(original, translated, *, target_chars, keep_count=False):
+        if current_map is not None and not EPUB_MARKER_RE.search(original) and not MARKDOWN_LINK_RE.search(original):
+            budget=(prior_plan["map_budget"] if keep_count and prior_revision==review_chunks.MAPPED_REVISION
+                    else target_chars)
+            mapped=review_chunks.plan_mapped(original,translated,current_map,budget)
+            if mapped is not None:return mapped
         if (single_review_gate.paragraph_preserving() and
                 prior_revision in {None,review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION}):
             count=(len(prior_plan["chunks"]) if keep_count and prior_revision==review_chunks.PARAGRAPH_STABLE_REVISION
@@ -4449,6 +4494,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                           and prior_plan.get("translation_sha256") == review_chunks.sha(translation))
         if current_hashes:
             review_chunks.validate_plan(prior_plan, source, translation)
+            if prior_revision==review_chunks.MAPPED_REVISION and prior_plan["mapping"]!=read_span_map(slug,chapter["unit_id"],source,translation):
+                raise JobError("review plan lacks matching artifact span map")
             plan = prior_plan
             if pressure and not stage.get("completed") and not resilient_recovery.enabled():
                 smaller = planner(source, translation,
@@ -4463,7 +4510,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     if pressure or remembered < review_chunks.TARGET_CHARS:
         execution_scheduler.record_review_target(
             status, chapter["unit_id"], review_chunks.sha(source), target)
-    if (prior_revision in {review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION}
+    if (prior_revision in {review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION,review_chunks.MAPPED_REVISION}
             and plan["helper_revision"]!=prior_revision):
         stage=None
     binding = None
@@ -4550,7 +4597,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 stage, plan, chapter["unit_id"], status["workflow_revision"])
         except ValueError as exc:
             raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
-    if (resilient_recovery.enabled() and pressure and stage["schema_version"]==incremental_review.STAGE_VERSION
+    if (resilient_recovery.enabled() and pressure and plan["helper_revision"]!=review_chunks.MAPPED_REVISION
+            and stage["schema_version"]==incremental_review.STAGE_VERSION
             and status.get("provider_retry",{}).get("code") in adaptive_budget.SIZE_RETRY_CODES):
         # Existing stage and current memory/contract binding have already been validated.
         pending=next((part for part in plan["chunks"] if part["id"] not in stage["completed"]),None)
@@ -4598,9 +4646,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     next_part = next((p for p in plan["chunks"]
                       if p["id"] not in stage["completed"]), None)
     if next_part is not None:
-        system, user = review_chunk_prompt(
-            engine, slug, chapter, source, translation, next_part,
-            len(plan["chunks"]), previous)
+        id_map=plan["mapping"] if plan["helper_revision"]==review_chunks.MAPPED_REVISION else None
+        if id_map is None:
+            system,user=review_chunk_prompt(engine,slug,chapter,source,translation,next_part,len(plan["chunks"]),previous)
+        else:
+            system,user=review_chunk_prompt(engine,slug,chapter,source,translation,next_part,len(plan["chunks"]),previous,mapping=id_map)
         count = status.get("model_calls_started", 0)
         if type(count) is not int or count < 0:
             raise JobError("invalid durable model call counter")
@@ -4620,7 +4670,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
             "review_context": "independent_session",
-            "execution_mode": ("compact-paired-review" if user.startswith("Independent paired review, ") else "bounded-review-chunks"),
+            "execution_mode": ("id-addressed-review" if user.startswith("ID-addressed independent review ") else
+                               "compact-paired-review" if user.startswith("Independent paired review, ") else "bounded-review-chunks"),
             "review_helper_revision": plan["helper_revision"],
             "incremental_stage_version": stage["schema_version"],
             "reused_clean_chunks": len(stage.get("reused", {})),
@@ -4632,7 +4683,10 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         try:
-            if compact_review.enabled() and user.startswith("Independent paired review, "):
+            if id_map is not None and user.startswith("ID-addressed independent review "):
+                normalized=addressed_review.compile_response(answer,source,translation,next_part,id_map,
+                    review_chunks.find_previous_for_chunk(previous,next_part,source))
+            elif compact_review.enabled() and user.startswith("Independent paired review, "):
                 normalized = compact_review.compile_response(answer, source, translation, next_part,
                     review_chunks.find_previous_for_chunk(previous, next_part, source))
                 normalized = coherent_batches.normalize_block_addresses(normalized, source, translation)
@@ -4790,6 +4844,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     patch_mode = False
     structural_plan = None
     structural_helper = None
+    candidate_span_map = None
     review_context = "independent_session"
     reviewed_glossary: list[dict] = []
     # Fully validate the model response before changing canonical artifacts.
@@ -5045,6 +5100,22 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 status["glossary_conflicts_rejected"] = (
                     status.get("glossary_conflicts_rejected", 0) + rejected)
             path = ROOT / "books" / slug / chapter["translation_path"]
+            if span_map.enabled():
+                try:
+                    if structural_plan is not None:
+                        saved_stage=read_json(structural_stage_path(slug,unit_id))
+                        candidate_span_map=span_map.from_render(structural_plan,saved_stage["segments"],source,translated)
+                    elif patch_mode and correction_stage_path(slug,unit_id).is_file():
+                        old_text=path.read_bytes().decode("utf-8")
+                        old_map=read_span_map(slug,unit_id,source,old_text)
+                        if old_map is not None:
+                            candidate_span_map=span_map.after_patches(old_map,source,old_text,translated,
+                                read_json(correction_stage_path(slug,unit_id))["patches"],_anchor_position)
+                except (ValueError,KeyError,TypeError):
+                    # No inference from a failed mapping. Canonical content and
+                    # ordinary independent review remain authoritative.
+                    status["span_map_unavailable_count"]=status.get("span_map_unavailable_count",0)+1
+                    candidate_span_map=None
             existing_translation = None
             if role == "corrector":
                 existing_translation = (path.read_bytes().decode("utf-8") if patch_mode
@@ -5208,6 +5279,12 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             path.write_text(translated, encoding="utf-8")
         cli("accept-translation", slug, str(chapter["number"]),
             "--session-id", active["session_id"])
+        if candidate_span_map is not None:
+            persist_span_map(slug,unit_id,candidate_span_map,source,path.read_bytes().decode("utf-8"))
+            status["span_map_summary"]={"unit_id":unit_id,"spans":len(candidate_span_map["spans"]),
+                "translation_sha256":candidate_span_map["translation_sha256"]}
+        else:
+            status.pop("span_map_summary",None)
         saved = save_claim_bound_decisions(
             ROOT / "books" / slug, unit_id, active["session_id"],
             "glossary", proposed_glossary)
@@ -5240,6 +5317,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 status["memory_recheck_unit"] = unit_id
         status.pop("_memory_only_change", None)
     if role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS
+                              or (span_map.enabled() and chunked_review)
                               or status.get("review_chunk_fallback_unit") == unit_id
                               or (transactional_quality.enabled() and review_context == "bounded_context"
                                   and review_chunk_stage_path(slug, unit_id).is_file())):

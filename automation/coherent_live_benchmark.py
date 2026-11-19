@@ -132,7 +132,9 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "single_review_gate":status.get("single_review_gate_summary"),
                           "incremental_reused":prompt.get("reused_clean_chunks"),
                           "review_refinement":status.get("review_refinement_summary"),
-                          "memory_proposals_deferred":status.get("optional_memory_proposals_deferred",0)},ensure_ascii=False),flush=True)
+                          "memory_proposals_deferred":status.get("optional_memory_proposals_deferred",0),
+                          "span_map":status.get("span_map_summary"),
+                          "span_map_unavailable":status.get("span_map_unavailable_count",0)},ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
