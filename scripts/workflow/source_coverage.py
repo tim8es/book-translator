@@ -33,6 +33,15 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # and EPUB renderer. Relative EPUB targets require source-to-output remapping.
 LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\(((?:https?://|mailto:)[^\s()\[\]]+|#[A-Za-z_][A-Za-z0-9_.:-]*)\)")
 SAFE_HREF_RE = re.compile(r"(?:https?://|mailto:)[^\s()\[\]]+\Z")
+# A bare *subdomain* is unambiguously an external website; two-label names
+# like chapter.xhtml can instead be relative EPUB resources. Never guess a
+# scheme for relative paths, fragments, ports, or arbitrary pseudo-TLDs.
+BARE_PUBLIC_SUBDOMAIN_RE = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.){2,}"
+    r"(?:com|net|org|edu|gov|io|dev|app|co|uk|ru|me|info|biz)\\Z",
+    re.IGNORECASE,
+)
+
 LOCAL_HREF_RE = re.compile(
     r"(?:(?P<file>[A-Za-z0-9_.-]+\.(?:xhtml|html|htm)))?#"
     r"(?P<fragment>[A-Za-z_][A-Za-z0-9_.:-]*)\Z"
@@ -40,12 +49,16 @@ LOCAL_HREF_RE = re.compile(
 
 
 def canonical_external_href(href: str) -> str | None:
-    """Keep external URLs Markdown-safe without changing their destination.
+    """Keep explicit URLs Markdown-safe and resolve unambiguous bare websites.
 
-    Percent-encode only literal parentheses, which terminate bare Markdown
-    link destinations. Preserve existing percent escapes and reject all other
-    unsupported URL syntax rather than silently normalizing the source.
+    A bare public subdomain becomes HTTPS. Otherwise percent-encode literal
+    parentheses in explicit URLs and reject unsupported relative EPUB links
+    or ambiguous destinations.
     """
+    if BARE_PUBLIC_SUBDOMAIN_RE.fullmatch(href):
+        # Some EPUB author-credit links omit a URL scheme. Treat only bare
+        # public subdomains as external HTTPS; the source bytes stay intact.
+        return "https://" + href
     candidate = href.replace("(", "%28").replace(")", "%29")
     return candidate if SAFE_HREF_RE.fullmatch(candidate) else None
 
