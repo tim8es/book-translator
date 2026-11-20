@@ -488,7 +488,7 @@ pin, duplicate unit, or malformed bridge fails closed. A newer review supersedes
 historical evidence in the normal way.
 
 
-## Explicit editorial reopening after a workflow upgrade
+## Explicit editorial reopening after a revision migration
 
 For user-approved changes to a previously reviewed translation, the Orchestrator
 must not edit a reviewed artifact and relabel its old evidence as current. If the
