@@ -25,7 +25,7 @@ class OperatorEditorialCandidateTests(unittest.TestCase):
         (self.book / "translated").mkdir()
         self.source = b"An original sentence.\n"
         self.translation = "Исправленное предложение.\n".encode("utf-8")
-        self.old = hashlib.sha256(b"Старый перевод.\n").hexdigest()
+        self.old = hashlib.sha256("Старый перевод.\n".encode("utf-8")).hexdigest()
         self.revision = "a" * 40
         self.oldrevision = "b" * 40
         self.unit = "chapter-000001"
