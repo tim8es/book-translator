@@ -1001,9 +1001,9 @@ def known_epub_preflight_blocker(status: dict) -> bool:
             or not isinstance(error, str)
             or re.fullmatch(
                 r"JobError: canonical CLI rejected operation: ERROR: "
-                r"Cannot extract EPUB spine document [A-Za-z0-9_./-]+\\.xhtml: "
+                r"Cannot extract EPUB spine document [A-Za-z0-9_./-]+\.xhtml: "
                 r"Unsupported anchor destination; only same-document EPUB "
-                r"fragments or safe external links are supported\\n?", error
+                r"fragments or safe external links are supported\n?", error
             ) is None):
         return False
     try:
