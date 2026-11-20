@@ -17,7 +17,11 @@ from quality_capacity_benchmark import CHAPTERS, REV, chapter_bytes, chapter_tex
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--max-source-chars",type=int,default=9000)
+    parser.add_argument("--wall-seconds",type=int,default=900)
     args=parser.parse_args()
+    if not 2000 <= args.max_source_chars <= 40000 or not 60 <= args.wall_seconds <= 1800:
+        raise ValueError("probe duration or source excerpt size outside safe range")
     from omniroute import config
     for role in ("TRANSLATOR","REVIEWER","CORRECTOR"):
         config(role)
@@ -25,9 +29,18 @@ def main():
         home=Path(temporary)
         chapter, blob=CHAPTERS[0]
         epub=home/"one-chapter.epub"
-        fixtures=make_epub(epub,[(chapter,chapter_text(chapter_bytes(chapter,blob)))])
-        print(json.dumps({"fixture":fixtures,"upstream_revision":REV}),flush=True)
-        result=run_arm(home,epub.read_bytes(),"on",35,environment={
+        paragraphs=chapter_text(chapter_bytes(chapter,blob))
+        excerpt=[]
+        chars=0
+        for paragraph in paragraphs:
+            if excerpt and chars+len(paragraph) > args.max_source_chars:
+                break
+            excerpt.append(paragraph)
+            chars+=len(paragraph)
+        fixtures=make_epub(epub,[(chapter,excerpt)])
+        print(json.dumps({"fixture":fixtures,"upstream_revision":REV,
+                          "fixture_scope":"opening_source_excerpt_not_complete_chapter"}),flush=True)
+        result=run_arm(home,epub.read_bytes(),"on",24,environment={
             "BOOK_TRANSLATOR_TRANSACTIONAL_QUALITY":"on",
             "BOOK_TRANSLATOR_COMPACT_REVIEW":"on",
             "BOOK_TRANSLATOR_CORRECTION_FEEDBACK":"on",
@@ -41,14 +54,17 @@ def main():
             "BOOK_TRANSLATOR_CORRECTION_LINEAGE_FEEDBACK":"on",
             "BOOK_TRANSLATOR_MAPPED_FULL_REVIEW":"on",
             "BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT":"on",
-        },wall_budget_seconds=1800,stop_after_phase="reviewer-completed")
+        },wall_budget_seconds=args.wall_seconds,
+           stop_after_phase="reviewer-completed",max_provider_failures=2)
 
     converged=result.get("review_convergence",[])
     reached=(result["stop_reason"]=="benchmark-reviewer-completed" and
              result["accepted_operations"].get("translated",0)==1 and
              len(converged)==1)
-    payload={"schema_version":1,"fixture":fixtures,"upstream_revision":REV,
-             "purpose":"first-pass-protocol-and-first-independent-review",
+    payload={"schema_version":2,"fixture":fixtures,"upstream_revision":REV,
+             "fixture_scope":"opening_source_excerpt_not_complete_chapter",
+             "wall_budget_seconds":args.wall_seconds,
+             "purpose":"bounded-provider-throughput-and-first-independent-review",
              "first_review_measured":reached,
              "first_review":converged[0] if converged else None,
              "literary_pass_claimed":False,"result":result}

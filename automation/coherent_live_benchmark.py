@@ -63,7 +63,8 @@ def make_epub(path):
 def git(path, *args):
     subprocess.run(["git","-C",str(path),*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
-def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=None, stop_after_phase=None):
+def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=None,
+            stop_after_phase=None, max_provider_failures=None):
     if stop_after_phase not in (None,"translator-completed","reviewer-completed"):
         raise ValueError("unsupported benchmark stop phase")
     root = home / mode
@@ -97,6 +98,8 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
     status_path = root/"automation"/"status"/(JOB+".json")
     started = time.monotonic()
     status = {}
+    metrics = {}
+    provider_failures = 0
     reason = "checkpoint-limit"
     for _ in range(120):
         remaining = None if wall_budget_seconds is None else wall_budget_seconds - (time.monotonic()-started)
@@ -151,6 +154,10 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             reason = status.get("phase")
             break
         if status.get("phase") == "provider-backoff":
+            provider_failures += 1
+            if max_provider_failures is not None and provider_failures >= max_provider_failures:
+                reason = "benchmark-provider-failure-budget"
+                break
             if wall_budget_seconds is None:
                 reason = "provider-backoff"; break
             from datetime import datetime, timezone
@@ -160,6 +167,9 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             if delay >= remaining:
                 reason = "provider-backoff-exceeds-budget"; break
             time.sleep(delay+0.1)
+    # A wall timeout can interrupt the first subprocess before it returned.
+    # Always calculate returned aggregate metrics from the latest checkpoint.
+    metrics = status.get("execution_metrics", {})
     book = root/"books"/str(status.get("book_slug",""))
     chapters = []
     if (book/"progress.json").is_file():
@@ -185,6 +195,8 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             "accepted_operations":metrics.get("accepted_operations",{}),
             "structural_protocol_failure_counts":status.get("structural_protocol_failure_counts",{}),
             "context_batch_profile":status.get("structural_full_context_batch_profiles",{}),
+            "last_staged_source_spans":status.get("structural_segment_progress",{}),
+            "provider_backoffs_seen":provider_failures,
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}
 
