@@ -37,7 +37,7 @@ class AutomatedBookTests(unittest.TestCase):
                       "last_error": "JobError: canonical CLI rejected operation: ERROR: "
                           "Cannot extract EPUB spine document Example_split_002.xhtml: "
                           "Unsupported anchor destination; only same-document EPUB "
-                          "fragments or safe external links are supported\\n",
+                          "fragments or safe external links are supported\n",
                       "updated_at": "2026-11-18T18:04:00+00:00"}
             override = {"schema_version": 1, "job_id": job_id,
                         "source_sha256": sha, "mode": "chatops"}
@@ -71,11 +71,11 @@ class AutomatedBookTests(unittest.TestCase):
             worker.store_json(book / "metadata.json", {
                 "workflow": {"resolved_revision": revision}})
             success = type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            with patch.object(worker, "ROOT", root), \\
-                 patch.object(worker, "cli"), \\
-                 patch.object(worker, "canonical_command", return_value=["synthetic"]), \\
-                 patch.object(worker.subprocess, "run", return_value=success), \\
-                 patch.object(worker, "verify"), \\
+            with patch.object(worker, "ROOT", root), \
+                 patch.object(worker, "cli"), \
+                 patch.object(worker, "canonical_command", return_value=["synthetic"]), \
+                 patch.object(worker.subprocess, "run", return_value=success), \
+                 patch.object(worker, "verify"), \
                  patch.object(worker, "complete", side_effect=AssertionError("model invoked")) as model:
                 status = worker.init(job_id, request, slug, revision)
                 self.assertEqual(status["state"], "paused")
@@ -1271,7 +1271,7 @@ sys.path.insert(0, str(repo / "scripts"))
 import book_runner
 chapter = {"unit_id": "chapter-000002", "number": 2, "status": "extracted"}
 with patch.object(book_runner, "chapter_data",
-                  return_value=({}, {"records": []}, [chapter])), \\
+                  return_value=({}, {"records": []}, [chapter])), \
      patch.object(book_runner, "approved_unit_ids", return_value=set()):
     operation, selected = book_runner.next_operation("synthetic", {"correction_rounds": {}})
     assert operation == "translator" and selected == chapter, (operation, selected)
