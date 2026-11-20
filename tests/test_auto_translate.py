@@ -59,7 +59,7 @@ class AutomatedBookTests(unittest.TestCase):
                 self.assertFalse(worker.known_epub_preflight_blocker(status))
                 worker.store_json(incoming / "chatops-control.json", override)
                 status["last_error"] = status["last_error"].replace(
-                    "Unsupported anchor destination", "malformed content")
+                    "unsupported semantic element <details>", "malformed content")
                 self.assertFalse(worker.known_epub_preflight_blocker(status))
 
     def test_initial_chatops_admission_pauses_before_any_model_call(self):
