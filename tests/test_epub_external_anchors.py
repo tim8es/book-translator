@@ -149,6 +149,30 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
         self.assertEqual([a.attrib["href"] for a in anchors], [expected])
         self.assertEqual("".join(anchors[0].itertext()), "this tag")
 
+    def test_bare_public_subdomain_is_normalized_without_mutating_source(self):
+        fixture(self.path, '<html><body><h1>Credits</h1><p>Visit '
+                '<a href="writer.tumblr.com"><em>the author</em></a>.</p></body></html>')
+        original = self.path.read_bytes()
+        chapters, _ = book.read_epub(self.path)
+        self.assertEqual(self.audit(chapters)["state"], "verified")
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertIn("[*the author*](https://writer.tumblr.com)", chapters[0].content)
+        output = render_markdown_xhtml("Credits", chapters[0].content, language="ru")
+        root = ET.fromstring(output)
+        link = root.find(".//{http://www.w3.org/1999/xhtml}a")
+        self.assertIsNotNone(link)
+        self.assertEqual(link.attrib["href"], "https://writer.tumblr.com")
+        self.assertEqual("".join(link.itertext()), "the author")
+
+    def test_ambiguous_or_relative_bare_links_stay_blocked(self):
+        for href in ("chapter.xhtml", "chapter2.xhtml#part", "chapter.xyz",
+                     "../other.xhtml#id", "www.example.com/path", "//www.example.com",
+                     "a..example.com", "localhost"):
+            with self.subTest(href=href):
+                fixture(self.path, f'<html><body><p><a href="{href}">link</a></p></body></html>')
+                with self.assertRaises(book.BookError):
+                    book.read_epub(self.path)
+
     def test_relative_unsafe_and_complex_links_fail_closed(self):
         for href in ("chapter2.xhtml#part", "javascript:alert(1)", "https://example.org/a[b]"):
             with self.subTest(href=href):
