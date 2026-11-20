@@ -986,7 +986,7 @@ def _legacy_known_epub_preflight_blocker(status: dict) -> bool:
 def known_epub_preflight_blocker(status: dict) -> bool:
     if _legacy_known_epub_preflight_blocker(status):
         return True
-    # The old extractor cannot read a bare author-credit website. Only an
+    # Repaired EPUB intake can encounter a bare author-credit website or a\n    # collapsible author-note detail. Only an
     # explicit exact-source ChatOps admission permits this bounded retry;
     # unrelated malformed hyperlinks and arbitrary blocked jobs stay blocked.
     error = status.get("last_error")
@@ -1000,10 +1000,12 @@ def known_epub_preflight_blocker(status: dict) -> bool:
             or not isinstance(job_id, str) or ID.fullmatch(job_id) is None
             or not isinstance(error, str)
             or re.fullmatch(
-                r"JobError: canonical CLI rejected operation: ERROR: "
+                r"JobError: canonical CLI rejected operation: ERROR: (?:"
                 r"Cannot extract EPUB spine document [A-Za-z0-9_./-]+\.xhtml: "
                 r"Unsupported anchor destination; only same-document EPUB "
-                r"fragments or safe external links are supported\n?", error
+                r"fragments or safe external links are supported|"
+                r"EPUB source coverage blocked: [A-Za-z0-9_./-]+\.xhtml: "
+                r"unsupported semantic element <details>)\n?", error
             ) is None):
         return False
     try:
