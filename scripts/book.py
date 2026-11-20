@@ -34,6 +34,7 @@ from workflow import (
     WorkflowStateRepository,
 )
 from workflow.claim_cli import ClaimCliError, register_claim_commands
+from workflow.editorial_reopen import EditorialReopenError, register_editorial_reopen_command
 from workflow.patch_cli import PatchCliError, register_patch_command
 from workflow.review_cli import ReviewCliError, register_review_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
@@ -943,6 +944,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_patch_command(subparsers, repo_root())
     register_claim_commands(subparsers, repo_root())
     register_review_commands(subparsers, repo_root())
+    register_editorial_reopen_command(subparsers, repo_root())
     return parser
 
 
@@ -962,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
             if mutating:
                 require_compatible_workflow_revision(args.slug)
         return args.func(args)
-    except (BookError, ClaimCliError, PatchCliError, ReviewCliError) as exc:
+    except (BookError, ClaimCliError, PatchCliError, ReviewCliError, EditorialReopenError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
