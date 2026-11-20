@@ -1185,6 +1185,39 @@ def book_key(job_id: str) -> str:
     return "intake-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
+def superseded_editorial_upgrade_job(job_id: str, status: dict) -> bool:
+    """An obsolete blocked job cannot starve an explicit source-identical revision migration.
+
+    Never clear/relabel the old blocked record or transfer its review evidence.
+    Require a separately authorized book-local operator plan and matching new
+    workflow pin; arbitrary duplicate intake jobs still cannot bypass blocking.
+    """
+    if (not isinstance(status, dict) or status.get("state") != "blocked"
+            or not safe_book_slug(status.get("book_slug"))):
+        return False
+    book = ROOT / "books" / status["book_slug"]
+    path = book / ".workflow" / "editorial-reopen.json"
+    if not path.is_file():
+        return False
+    plan = read_json(path)
+    metadata = read_json(book / "metadata.json")
+    request = request_for(job_id)
+    old = status.get("workflow_revision")
+    target = (metadata.get("workflow") or {}).get("resolved_revision")
+    source = (metadata.get("source") or {}).get("sha256")
+    return (
+        isinstance(old, str) and isinstance(target, str)
+        and old != target
+        and plan.get("schema_version") == 1
+        and plan.get("kind") == "reopen-edited-reviewed-units"
+        and plan.get("book_slug") == status["book_slug"]
+        and plan.get("source_workflow_revision") == old
+        and plan.get("target_workflow_revision") == target
+        and plan.get("source_book_sha256") == source
+        and source == status.get("source_sha256") == request["source_sha256"]
+    )
+
+
 def ready_jobs(limit: int = 6) -> list[dict]:
     """Admit at most six books per wake, fairly favoring least-recently served.
 
@@ -1204,6 +1237,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         try:
             state = read_json(state_file) if state_file.exists() else None
             if state and state.get("state") == "done":
+                continue
+            if state and superseded_editorial_upgrade_job(job_id, state):
                 continue
             key = book_key(job_id)
         except (OSError, ValueError, KeyError, JobError) as exc:
