@@ -54,6 +54,16 @@ def config(role: str) -> tuple[str, str, str]:
 
 def complete(role: str, system: str, user: str) -> str:
     base, key, model = config(role)
+    backend = os.environ.get("BOOK_TRANSLATOR_LLM_BACKEND", "omniroute")
+    if backend == "pi":
+        from pi_backend import PiTransportFailure, complete as pi_complete
+        try:
+            text, diagnostics = pi_complete(base, model, key, system, user, role=role)
+        except PiTransportFailure as exc:
+            raise ModelError("Pi backend: " + exc.code) from None
+        return CompletionText(text, diagnostics)
+    if backend != "omniroute":
+        raise ModelError("unsupported model backend")
     body = json.dumps({
         "model": model,
         "messages": [
