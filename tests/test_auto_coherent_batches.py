@@ -46,6 +46,43 @@ class CoherentTests(unittest.TestCase):
             self.assertEqual(len(coherent.structural_selection(Helper, plan, {}, 1, fallback=True)), 1)
             self.assertEqual(len(coherent.structural_selection(Helper, plan, {}, 12, pressure=1)), 12)
 
+    def test_full_context_output_budget_degrades_gradually_and_resumes(self):
+        plan = [{"id":str(i),"source":"Narrative dialogue. "*75} for i in range(24)]
+        stage={}
+        status={}
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_COHERENT_BATCHES":"off"}):
+            sizes=[]
+            for failure in range(4):
+                budget,spans=coherent.context_batch_caps(status,"chapter-000001","hash1")
+                chosen=coherent.structural_selection(Helper,plan,stage,24,
+                    full_chapter=True,source_char_limit=budget,span_limit=spans)
+                sizes.append((len(chosen),sum(len(x["source"]) for x in chosen)))
+                self.assertLessEqual(len(chosen),spans)
+                self.assertLessEqual(sizes[-1][1],budget)
+                if failure==0:
+                    self.assertGreater(len(chosen),1)
+                if failure<3:
+                    self.assertFalse(coherent.shrink_context_batch(status,"chapter-000001","hash1"))
+            self.assertTrue(all(sizes[i+1][1]<=sizes[i][1] for i in range(3)))
+            self.assertEqual(coherent.context_batch_caps(status,"chapter-000001","different-sha"),
+                             (coherent.CONTEXT_INITIAL_SOURCE_CHARS,coherent.CONTEXT_INITIAL_SPANS))
+            self.assertTrue(coherent.shrink_context_batch(status,"chapter-000001","hash1"))
+            self.assertEqual(coherent.context_batch_caps(status,"chapter-000001","hash1"),
+                             (coherent.CONTEXT_MIN_SOURCE_CHARS,coherent.CONTEXT_MIN_SPANS))
+            one=coherent.structural_selection(Helper,plan,stage,24,full_chapter=True,
+                 source_char_limit=coherent.CONTEXT_MIN_SOURCE_CHARS,span_limit=1)
+            self.assertEqual(len(one),1)
+        # A previously checkpointed valid output is never rescheduled.
+        stage[one[0]["id"]]="Переведено"
+        more=coherent.structural_selection(Helper,plan,stage,24,full_chapter=True)
+        self.assertNotEqual(one[0]["id"],more[0]["id"])
+
+    def test_full_context_progress_rejects_corrupt_caps(self):
+        status={coherent.CONTEXT_PROGRESS_KEY:{"u":{
+            "source_sha256":"hash","max_source_chars":900000,"max_spans":8}}}
+        with self.assertRaises(ValueError):
+            coherent.context_batch_caps(status,"u","hash")
+
     def test_correction_ab_and_risk(self):
         findings = [{"id": str(i), "category": "meaning", "severity": "minor",
                      "translation_anchor": {"quote": f"word-{i:02d}.", "occurrence": 0}}

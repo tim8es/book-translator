@@ -8,26 +8,78 @@ MAX_SPANS = 96
 MAX_SOURCE_CHARS = 12_000
 MAX_CORRECTIONS = 8
 
+# An output with many separate IDs is fragile even when the source fits a
+# model's input context. Start at a moderate output budget, and halve the
+# number of IDs after each protocol error; never drop to one ID immediately.
+CONTEXT_INITIAL_SOURCE_CHARS = 5000
+CONTEXT_INITIAL_SPANS = 8
+CONTEXT_MIN_SOURCE_CHARS = 1600
+CONTEXT_MIN_SPANS = 1
+CONTEXT_PROGRESS_KEY = "structural_full_context_batch_profiles"
+
+
+def context_batch_caps(status, unit_id, source_sha256):
+    """Durable chapter-local output size, bound to the exact source identity."""
+    table = status.get(CONTEXT_PROGRESS_KEY, {})
+    if not isinstance(table, dict):
+        raise ValueError("invalid chapter context batch checkpoint")
+    row = table.get(unit_id)
+    if row is None or (isinstance(row, dict) and row.get("source_sha256") != source_sha256):
+        return CONTEXT_INITIAL_SOURCE_CHARS, CONTEXT_INITIAL_SPANS
+    if (not isinstance(row, dict) or
+            type(row.get("max_source_chars")) is not int or
+            not CONTEXT_MIN_SOURCE_CHARS <= row["max_source_chars"] <= CONTEXT_INITIAL_SOURCE_CHARS or
+            type(row.get("max_spans")) is not int or
+            not CONTEXT_MIN_SPANS <= row["max_spans"] <= CONTEXT_INITIAL_SPANS):
+        raise ValueError("invalid durable chapter context output budget")
+    return row["max_source_chars"], row["max_spans"]
+
+
+def shrink_context_batch(status, unit_id, source_sha256):
+    """Record a protocol failure; return True only after reaching single-span minimum."""
+    chars, spans = context_batch_caps(status, unit_id, source_sha256)
+    if chars == CONTEXT_MIN_SOURCE_CHARS and spans == CONTEXT_MIN_SPANS:
+        return True
+    smaller_chars = max(CONTEXT_MIN_SOURCE_CHARS, chars * 3 // 5)
+    smaller_spans = max(CONTEXT_MIN_SPANS, spans // 2)
+    status.setdefault(CONTEXT_PROGRESS_KEY, {})[unit_id] = {
+        "source_sha256": source_sha256,
+        "max_source_chars": smaller_chars,
+        "max_spans": smaller_spans,
+    }
+    return False
+
 def enabled():
     value = os.environ.get("BOOK_TRANSLATOR_COHERENT_BATCHES", "off")
     if value not in {"on", "off"}:
         raise ValueError("BOOK_TRANSLATOR_COHERENT_BATCHES must be on or off")
     return value == "on"
 
-def structural_selection(helper, plan, completed, legacy_limit, pressure=0, fallback=False, *, full_chapter=False):
+def structural_selection(helper, plan, completed, legacy_limit, pressure=0, fallback=False, *,
+                         full_chapter=False, source_char_limit=None, span_limit=None):
     # The pinned helper validates both the immutable plan and the durable stage.
     baseline = helper.next_spans(plan, completed, limit=legacy_limit)
     if (not enabled() and not full_chapter) or pressure or fallback or not baseline:
         return baseline
+    if full_chapter:
+        char_budget = CONTEXT_INITIAL_SOURCE_CHARS if source_char_limit is None else source_char_limit
+        span_budget = CONTEXT_INITIAL_SPANS if span_limit is None else span_limit
+        if (type(char_budget) is not int or
+                not CONTEXT_MIN_SOURCE_CHARS <= char_budget <= CONTEXT_INITIAL_SOURCE_CHARS or
+                type(span_budget) is not int or
+                not CONTEXT_MIN_SPANS <= span_budget <= CONTEXT_INITIAL_SPANS):
+            raise ValueError("invalid full-context translator output budget")
+    else:
+        char_budget,span_budget=MAX_SOURCE_CHARS,MAX_SPANS
     chosen = []
     chars = 0
     for item in helper.spans(plan):
         if item["id"] in completed:
             continue
         size = len(item["source"])
-        if size > MAX_SOURCE_CHARS:
+        if size > char_budget:
             return baseline
-        if chosen and (len(chosen) >= MAX_SPANS or chars + size > MAX_SOURCE_CHARS):
+        if chosen and (len(chosen) >= span_budget or chars + size > char_budget):
             break
         chosen.append(item)
         chars += size

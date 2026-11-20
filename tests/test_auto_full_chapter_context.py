@@ -110,7 +110,7 @@ class FullChapterContextTests(unittest.TestCase):
                 helper,plan,{},24,full_chapter=chapter_context.enabled())
         self.assertGreater(sum(len(item["source"]) for item in larger),
                            sum(len(item["source"]) for item in baseline))
-        self.assertLessEqual(sum(len(item["source"]) for item in larger),12000)
+        self.assertLessEqual(sum(len(item["source"]) for item in larger),5000)
         self.assertGreater(sum(len(item["source"]) for item in larger),3500)
         self.assertEqual([i["id"] for i in larger],
                          [i["id"] for i in helper.spans(plan)[:len(larger)]])

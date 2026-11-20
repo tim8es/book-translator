@@ -2120,10 +2120,15 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                        else adaptive_budget.translation_batch_limit(
                            STRUCTURAL_MODEL_SEGMENTS_PER_CALL, pressure))
         try:
+            full_context = chapter_context.enabled()
+            output_chars, output_spans = (coherent_batches.context_batch_caps(
+                status, chapter["unit_id"], plan["source_sha256"])
+                if full_context else (None, None))
             selected = coherent_batches.structural_selection(
                 helper, plan, stage["segments"], batch_limit, pressure=pressure,
                 fallback=fallback.get(chapter["unit_id"]) == plan["source_sha256"],
-                full_chapter=chapter_context.enabled())
+                full_chapter=full_context,
+                source_char_limit=output_chars, span_limit=output_spans)
         except ValueError as exc:
             raise JobError("invalid source-bound structural translation progress") from exc
         if not selected:
@@ -2172,10 +2177,16 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             if code is None:
                 raise ModelError("structural translator rejected model output: "
                                  + str(exc)) from exc
-            # Bad generated output cannot authorize a write. Keep every
-            # previously staged span and use single-span batches from now on.
-            status.setdefault("structural_protocol_fallback_units", {})[
-                chapter["unit_id"]] = plan["source_sha256"]
+            # Rejected output never enters durable translations. In the
+            # experimental chapter-context mode reduce the number of IDs and
+            # expected response size gradually; retain the legacy single-span
+            # fallback for regular Auto and repeated minimum-size failures.
+            permanent_fallback = (not full_context or
+                coherent_batches.shrink_context_batch(
+                    status, chapter["unit_id"], plan["source_sha256"]))
+            if permanent_fallback:
+                status.setdefault("structural_protocol_fallback_units", {})[
+                    chapter["unit_id"]] = plan["source_sha256"]
             status["last_error_code"] = code
             count = status.get("model_calls_started", 0)
             if type(count) is not int or count >= model_call_limit():
@@ -5507,6 +5518,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             structural_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("structural_segment_progress", None)
             status.get("structural_protocol_fallback_units", {}).pop(unit_id, None)
+            status.get(coherent_batches.CONTEXT_PROGRESS_KEY, {}).pop(unit_id, None)
         if role == "corrector" and patch_mode:
             # Remove staging ONLY after canonical translation acceptance and
             # claim-bound glossary reconciliation have succeeded.
