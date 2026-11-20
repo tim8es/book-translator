@@ -13,3 +13,5 @@
 **Verification:** deterministic tests exercise complete chapter, sliding windows, final-window resume, exact source identity, moderate output batching, resumption and gradual failure downgrades. A real-model comparison must measure first-review quality, accepted chapters/hour, model calls, tokens and verified EPUB. Current existing test #11 tests only chapters of about 27k and 30k characters; it does not exercise this large-chapter mode.
 
 **Release:** draft PR only; do not merge or modify existing pinned book revisions without separate authorization.
+
+**Next measured probe:** `automation/chapter_first_review_benchmark.py` uses the same public-domain Dickens chapter 18 as #10/#12 and stops immediately after its **first independent review** (or at a strict 1,800-second wall budget). It logs aggregate model calls and tokens, protocol rejection counts, adaptive batch caps and first-review findings. A successful probe exit means the first review ran; it is not literary approval and does not build an EPUB. This does not start a 60-minute correction loop.

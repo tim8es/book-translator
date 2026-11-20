@@ -2188,6 +2188,13 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                 status.setdefault("structural_protocol_fallback_units", {})[
                     chapter["unit_id"]] = plan["source_sha256"]
             status["last_error_code"] = code
+            counts = status.setdefault("structural_protocol_failure_counts", {})
+            if not isinstance(counts, dict):
+                raise JobError("invalid structural protocol error counters")
+            prior_count = counts.get(chapter["unit_id"], 0)
+            if type(prior_count) is not int or not 0 <= prior_count < 10000:
+                raise JobError("invalid structural protocol error count")
+            counts[chapter["unit_id"]] = prior_count + 1
             count = status.get("model_calls_started", 0)
             if type(count) is not int or count >= model_call_limit():
                 raise ModelError("structural protocol repair exhausted paid model budget") from exc

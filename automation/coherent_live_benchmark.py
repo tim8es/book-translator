@@ -63,7 +63,9 @@ def make_epub(path):
 def git(path, *args):
     subprocess.run(["git","-C",str(path),*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
-def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=None):
+def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=None, stop_after_phase=None):
+    if stop_after_phase not in (None,"translator-completed","reviewer-completed"):
+        raise ValueError("unsupported benchmark stop phase")
     root = home / mode
     root.mkdir()
     remote = home / (mode + "-bare")
@@ -142,6 +144,9 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
+        if stop_after_phase is not None and status.get("phase") == stop_after_phase:
+            reason = "benchmark-" + stop_after_phase
+            break
         if status.get("state") in {"done","blocked","paused"}:
             reason = status.get("phase")
             break
@@ -178,6 +183,8 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             "review_rebases":status.get("review_incremental_rebases",[]),
             "review_convergence":status.get("review_convergence_history",[]),
             "accepted_operations":metrics.get("accepted_operations",{}),
+            "structural_protocol_failure_counts":status.get("structural_protocol_failure_counts",{}),
+            "context_batch_profile":status.get("structural_full_context_batch_profiles",{}),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}
 
