@@ -46,6 +46,14 @@ class AutomatedBookTests(unittest.TestCase):
                 worker.store_json(incoming / "chatops-control.json", override)
                 self.assertTrue(worker.known_epub_preflight_blocker(status))
                 self.assertTrue(worker.recoverable_epub_preflight(status))
+                status["last_error"] = (
+                    "JobError: canonical CLI rejected operation: ERROR: "
+                    "EPUB source coverage blocked: Example_split_009.xhtml: "
+                    "unsupported semantic element <details>\n"
+                )
+                status["preflight_retries"] = 1
+                self.assertTrue(worker.known_epub_preflight_blocker(status))
+                self.assertTrue(worker.recoverable_epub_preflight(status))
                 worker.store_json(incoming / "chatops-control.json",
                                   {**override, "source_sha256": "b" * 64})
                 self.assertFalse(worker.known_epub_preflight_blocker(status))
