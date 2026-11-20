@@ -23,6 +23,7 @@ COVERAGE_PATH = "source-coverage.json"
 VALIDATOR = "epub-xhtml-text-v1"
 TEXT_MEDIA = {"application/xhtml+xml", "text/html"}
 BLOCKS = {"body", "section", "article", "div", "dl", "dt", "dd", "p", "li", "blockquote",
+          "details", "summary",
           "pre", "h1", "h2", "h3", "h4", "h5", "h6", "header", "footer"}
 UNSUPPORTED = {"img", "table", "figure", "figcaption", "aside", "sup",
                "sub", "math", "ruby", "audio", "video", "svg", "script",
@@ -104,9 +105,26 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
         raise SourceCoverageError(f"{path}: XHTML must have exactly one body")
     parts: list[str] = []
     count = 0
+    # Collapsible author notes are flattened into visible text in generated
+    # Markdown. Permit only one direct, first-child summary in each details.
+    parents = {child: parent for parent in root.iter() for child in parent}
     def visit(node: ET.Element) -> None:
         nonlocal count
         tag = _name(node.tag)
+        if tag == "details":
+            children = list(node)
+            if (not children or _name(children[0].tag) != "summary"
+                    or sum(_name(child.tag) == "summary" for child in children) != 1
+                    or (node.text or "").strip()):
+                raise SourceCoverageError(f"{path}: unsupported details/summary structure")
+            if any(_name(child.tag) == "details" for child in node.iter() if child is not node):
+                raise SourceCoverageError(f"{path}: nested details are unsupported")
+            if set(node.attrib) - {"open", "class", "id"}:
+                raise SourceCoverageError(f"{path}: unsupported details attributes")
+        if tag == "summary":
+            parent = parents.get(node)
+            if parent is None or _name(parent.tag) != "details" or list(parent)[0] is not node:
+                raise SourceCoverageError(f"{path}: summary outside details")
         if (tag == "nav" and allow_toc) or (tag == "svg" and allow_svg):
             # Subtrees have already passed independent structural/target checks.
             # Their content is not prose: the output builder regenerates the TOC
@@ -155,7 +173,7 @@ def _reference(raw: bytes, path: str, *, allow_toc: bool = False, allow_svg: boo
                 raise SourceCoverageError(f"{path}: unsupported aria-hidden value")
         if tag in BLOCKS or tag == "br":
             parts.append(" ")
-        if tag in {"p", "li", "dt", "dd", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}:
+        if tag in {"p", "li", "dt", "dd", "blockquote", "pre", "summary", "h1", "h2", "h3", "h4", "h5", "h6"}:
             count += 1
         if node.text:
             parts.append(node.text)
