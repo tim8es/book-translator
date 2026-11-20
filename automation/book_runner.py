@@ -947,7 +947,20 @@ def auto_mode(slug: str) -> str:
     return data["mode"]
 
 
-def known_epub_preflight_blocker(status: dict) -> bool:
+def chatops_admission_requested(job_id: str, request: dict) -> bool:
+    """Operator-controlled, SHA-bound intake handoff; never calls the model."""
+    control_path = job_path(job_id) / "chatops-control.json"
+    if not control_path.exists():
+        return False
+    control = read_json(control_path)
+    expected = {"schema_version": 1, "job_id": job_id,
+                "source_sha256": request["source_sha256"], "mode": "chatops"}
+    if control != expected:
+        raise JobError("invalid or stale ChatOps intake control")
+    return True
+
+
+def _legacy_known_epub_preflight_blocker(status: dict) -> bool:
     """Only explicitly repaired pre-initialization errors are retryable."""
     error = status.get("last_error")
     prefix = ("JobError: canonical CLI rejected operation: "
@@ -968,6 +981,35 @@ def known_epub_preflight_blocker(status: dict) -> bool:
                 # Local missing images and arbitrary schemes stay quarantined.
                 r"Undeclared or unsupported raster asset: https:/[A-Za-z0-9.-]+/[^\s<>]+)\n?"
             ), error) is not None)
+
+
+def known_epub_preflight_blocker(status: dict) -> bool:
+    if _legacy_known_epub_preflight_blocker(status):
+        return True
+    # The old extractor cannot read a bare author-credit website. Only an
+    # explicit exact-source ChatOps admission permits this bounded retry;
+    # unrelated malformed hyperlinks and arbitrary blocked jobs stay blocked.
+    error = status.get("last_error")
+    job_id = status.get("job_id")
+    if (status.get("state") != "blocked"
+            or status.get("phase") != "operator-intervention-required"
+            or status.get("book_slug") is not None
+            or status.get("active") is not None
+            or status.get("workflow_revision") is not None
+            or status.get("source_sha256") is not None
+            or not isinstance(job_id, str) or ID.fullmatch(job_id) is None
+            or not isinstance(error, str)
+            or re.fullmatch(
+                r"JobError: canonical CLI rejected operation: ERROR: "
+                r"Cannot extract EPUB spine document [A-Za-z0-9_./-]+\\.xhtml: "
+                r"Unsupported anchor destination; only same-document EPUB "
+                r"fragments or safe external links are supported\\n?", error
+            ) is None):
+        return False
+    try:
+        return chatops_admission_requested(job_id, request_for(job_id))
+    except (JobError, OSError, ValueError, KeyError):
+        return False
 
 
 def epub_preflight_retry_at(status: dict) -> str | None:
@@ -1563,9 +1605,21 @@ def init(job_id: str, request: dict, slug: str, revision: str) -> dict:
     metadata = read_json(ROOT / "books" / slug / "metadata.json")
     if metadata["workflow"]["resolved_revision"] != revision:
         raise JobError("new book did not pin its installed workflow")
+    chatops = chatops_admission_requested(job_id, request)
+    if chatops:
+        # Persist the mode in the same checkpoint as the new book. The batch
+        # runner returns without a model request and future Auto scans skip it.
+        control = ROOT / "books" / slug / ".workflow" / "auto-control.json"
+        if control.exists():
+            raise JobError("unexpected pre-existing Auto mode for new book")
+        control.parent.mkdir(parents=True, exist_ok=True)
+        store_json(control, {"schema_version": 1, "mode": "chatops",
+                             "updated_at": clock(), "updated_by": "intake:" + job_id})
     return {"schema_version": 1, "job_id": job_id, "book_slug": slug,
-            "state": "running", "phase": "initialized", "failures": 0,
-            "correction_rounds": {}, "workflow_revision": revision}
+            "state": "paused" if chatops else "running",
+            "phase": "paused-for-chatops" if chatops else "initialized",
+            "failures": 0, "correction_rounds": {},
+            "workflow_revision": revision}
 
 
 def chapter_data(slug: str) -> tuple[dict, dict, list]:
