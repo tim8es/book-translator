@@ -20,6 +20,76 @@ from omniroute import ModelError, complete, config, parse_review
 
 
 class AutomatedBookTests(unittest.TestCase):
+    def test_blocked_bare_host_intake_only_retries_with_sha_bound_chatops_control(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            job_id = "a" * 32
+            incoming = root / "intake" / "auto" / job_id
+            incoming.mkdir(parents=True)
+            source = b"PK-source-fixture"
+            (incoming / "source.epub").write_bytes(source)
+            sha = hashlib.sha256(source).hexdigest()
+            request = {"schema_version": 1, "job_id": job_id,
+                       "source_sha256": sha, "target_language": "ru"}
+            worker.store_json(incoming / "request.json", request)
+            status = {"schema_version": 1, "job_id": job_id, "state": "blocked",
+                      "phase": "operator-intervention-required", "book_slug": None,
+                      "last_error": "JobError: canonical CLI rejected operation: ERROR: "
+                          "Cannot extract EPUB spine document Example_split_002.xhtml: "
+                          "Unsupported anchor destination; only same-document EPUB "
+                          "fragments or safe external links are supported\n",
+                      "updated_at": "2026-11-18T18:04:00+00:00"}
+            override = {"schema_version": 1, "job_id": job_id,
+                        "source_sha256": sha, "mode": "chatops"}
+            with patch.object(worker, "ROOT", root):
+                self.assertFalse(worker.known_epub_preflight_blocker(status))
+                worker.store_json(incoming / "chatops-control.json", override)
+                self.assertTrue(worker.known_epub_preflight_blocker(status))
+                self.assertTrue(worker.recoverable_epub_preflight(status))
+                worker.store_json(incoming / "chatops-control.json",
+                                  {**override, "source_sha256": "b" * 64})
+                self.assertFalse(worker.known_epub_preflight_blocker(status))
+                worker.store_json(incoming / "chatops-control.json", override)
+                status["last_error"] = status["last_error"].replace(
+                    "Unsupported anchor destination", "malformed content")
+                self.assertFalse(worker.known_epub_preflight_blocker(status))
+
+    def test_initial_chatops_admission_pauses_before_any_model_call(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            job_id, slug, revision = "c" * 32, "synthetic-novel", "d" * 40
+            incoming = root / "intake" / "auto" / job_id
+            incoming.mkdir(parents=True)
+            book = root / "books" / slug
+            book.mkdir(parents=True)
+            (book / "translated").mkdir()
+            (book / "output").mkdir()
+            source_sha = "e" * 64
+            request = {"schema_version": 1, "job_id": job_id,
+                       "source_sha256": source_sha, "target_language": "ru"}
+            worker.store_json(incoming / "chatops-control.json", {
+                "schema_version": 1, "job_id": job_id,
+                "source_sha256": source_sha, "mode": "chatops"})
+            worker.store_json(book / "metadata.json", {
+                "workflow": {"resolved_revision": revision}})
+            success = type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            with patch.object(worker, "ROOT", root), \
+                 patch.object(worker, "cli"), \
+                 patch.object(worker, "canonical_command", return_value=["synthetic"]), \
+                 patch.object(worker.subprocess, "run", return_value=success), \
+                 patch.object(worker, "verify"), \
+                 patch.object(worker, "complete", side_effect=AssertionError("model invoked")) as model:
+                status = worker.init(job_id, request, slug, revision)
+                self.assertEqual(status["state"], "paused")
+                self.assertEqual(status["phase"], "paused-for-chatops")
+                self.assertEqual(worker.auto_mode(slug), "chatops")
+                model.assert_not_called()
+                worker.store_json(root / "automation" / "status" / (job_id + ".json"),
+                                  status)
+                worker.store_json(incoming / "request.json", request)
+                (incoming / "source.epub").write_bytes(b"PK-synthetic")
+                self.assertEqual(worker.ready_jobs(), [])
+
     def test_book_key_and_selection_are_book_scoped(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1203,7 +1273,7 @@ sys.path.insert(0, str(repo / "scripts"))
 import book_runner
 chapter = {"unit_id": "chapter-000002", "number": 2, "status": "extracted"}
 with patch.object(book_runner, "chapter_data",
-                  return_value=({}, {"records": []}, [chapter])), \\
+                  return_value=({}, {"records": []}, [chapter])), \
      patch.object(book_runner, "approved_unit_ids", return_value=set()):
     operation, selected = book_runner.next_operation("synthetic", {"correction_rounds": {}})
     assert operation == "translator" and selected == chapter, (operation, selected)
