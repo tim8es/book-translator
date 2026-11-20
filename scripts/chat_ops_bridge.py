@@ -91,9 +91,15 @@ def validate(raw: dict, file_id: str) -> dict:
         "pause-auto": set(),
         "resume-auto": set(),
     }[op]
-    require(set(raw) == common | extras if op in {"accept-translation", "review-record"}
-            else set(raw).issuperset(common) and set(raw).issubset(common | extras),
-            "missing or unexpected request fields")
+    expected=common|extras
+    if op=="accept-translation":
+        require(set(raw) in (expected,expected|{"structural_segments"},
+                             expected|{"correction_patches","previous_review_record_id"}),
+                "missing or unexpected request fields")
+    elif op=="review-record":
+        require(set(raw) in (expected,(expected-{"quality_report"})|{"addressed_parts"}),"missing or unexpected request fields")
+    else:
+        require(set(raw).issuperset(common) and set(raw).issubset(expected),"missing or unexpected request fields")
     if op == "defer-review":
         require(raw.get("reason") in {
             "correction-limit", "review-round-limit", "model-anchor-retries",
@@ -117,11 +123,30 @@ def validate(raw: dict, file_id: str) -> dict:
                 raw["translation"].strip(), "invalid translation size")
         require(sha256(raw["translation"].encode("utf-8")) ==
                 raw["translation_sha256"], "translation SHA-256 mismatch")
+        if "structural_segments" in raw:
+            rows=raw["structural_segments"]
+            require(type(rows) is dict and 1<=len(rows)<=20000 and
+                    all(re.fullmatch(r"s[0-9]{5}",k) and isinstance(v,str) and v.strip() for k,v in rows.items())
+                    and len(json.dumps(rows,ensure_ascii=False).encode("utf-8"))<=600000,
+                    "invalid structural segment response")
+        if "correction_patches" in raw:
+            rows=raw["correction_patches"]
+            require(type(rows) is list and 1<=len(rows)<=100 and
+                    len(json.dumps(rows,ensure_ascii=False).encode("utf-8"))<=524288,
+                    "invalid correction response size")
+            require(isinstance(raw["previous_review_record_id"],str) and
+                    HEX32.fullmatch(raw["previous_review_record_id"]) is not None,
+                    "invalid previous review identity")
     if op == "review-record":
         require(raw["outcome"] in {"PASS", "CORRECTIONS_REQUIRED"}, "invalid outcome")
-        require(type(raw["quality_report"]) is dict, "quality report is required")
-        require(len(json.dumps(raw["quality_report"]).encode("utf-8")) <= 32768,
-                "quality report exceeds 32 KiB")
+        if "addressed_parts" in raw:
+            require(type(raw["addressed_parts"]) is list and 1<=len(raw["addressed_parts"])<=64 and
+                    len(json.dumps(raw["addressed_parts"],ensure_ascii=False).encode("utf-8"))<=524288,
+                    "invalid addressed review response size")
+        else:
+            require(type(raw["quality_report"]) is dict, "quality report is required")
+            require(len(json.dumps(raw["quality_report"]).encode("utf-8")) <= 32768,
+                    "quality report exceeds 32 KiB")
     if op in {"accept-translation", "review-record"}:
         for name in ("source_sha256", "claim_sha256"):
             require(isinstance(raw[name], str) and re.fullmatch(r"[0-9a-f]{64}", raw[name]),
@@ -251,6 +276,17 @@ def chapter_and_claim(book: Path, request: dict, *, role: str) -> dict:
     return chapter
 
 
+def span_helpers():
+    """Load the shared public runtime, not a second literary workflow."""
+    directory=str(Path(__file__).resolve().parents[1]/"automation")
+    if directory not in sys.path:
+        sys.path.insert(0,directory)
+    import book_runner
+    import span_map
+    import span_exchange
+    return book_runner,span_map,span_exchange
+
+
 def execute(root: Path, engine: Path, request: dict) -> dict:
     global _ACTIVE_PINNED_RUNTIME
     _ACTIVE_PINNED_RUNTIME = None  # never inherit a previous request's pin
@@ -266,7 +302,7 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return {"auto_mode": mode}
-    pinned_engine(root, engine, request["workflow_revision"])
+    pinned=pinned_engine(root, engine, request["workflow_revision"])
     slug = request["book_slug"]
     chapter = str(request["chapter"])
     session = request["session_id"]
@@ -301,20 +337,61 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
         path = book / unit["translation_path"]
         require(path.resolve().is_relative_to(book.resolve()) and
                 not path.is_symlink(), "unsafe translation target")
-        # Not durable until BOTH the canonical acceptance and receipt are pushed.
+        mapping=None
+        if "structural_segments" in request:
+            runner,maps,exchange=span_helpers()
+            original=(book/unit["source_path"]).read_bytes().decode("utf-8")
+            try:
+                helper=runner.load_public_structural_helper(pinned)
+                mapping=exchange.translation_map(original,request["translation"],request["structural_segments"],
+                                                helper,runner.bounded_source_plan)
+                runner.check_markers(original,request["translation"])
+            except (ValueError,KeyError,TypeError,RuntimeError) as exc:
+                raise RequestError("structural segment evidence rejected") from exc
+        elif "correction_patches" in request:
+            runner,maps,exchange=span_helpers()
+            original=(book/unit["source_path"]).read_bytes().decode("utf-8")
+            before=path.read_bytes().decode("utf-8")
+            try:
+                previous=runner.latest_record(strict_json(book/"review-ledger.json"),unit)
+                require(isinstance(previous,dict) and previous.get("record_id")==request["previous_review_record_id"],
+                        "review record changed")
+                old_map=maps.read_artifact(book,unit["unit_id"],original,before)
+                helper=runner.load_public_correction_helper(pinned)
+                mapping=exchange.correction_map(original,before,request["translation"],old_map,previous,
+                    unit.get("translation_acceptance"),request["correction_patches"],helper)
+            except (ValueError,KeyError,TypeError,RuntimeError) as exc:
+                raise RequestError("correction evidence rejected") from exc
+        # Not durable until canonical acceptance, shared map and receipt push together.
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(request["translation"].encode("utf-8"))
-        return cli(root, "book.py", "accept-translation", slug, chapter,
+        result=cli(root, "book.py", "accept-translation", slug, chapter,
                    "--session-id", session, "--json")
+        if mapping is not None:
+            maps.persist_artifact(book,unit["unit_id"],mapping,original,path.read_bytes().decode("utf-8"))
+        return result
     if op == "review-record":
         unit = chapter_and_claim(book, request, role="reviewer")
         translation = book / unit["translation_path"]
         require(translation.is_file() and sha256(translation.read_bytes()) ==
                 request["translation_sha256"], "translation artifact changed")
+        if "addressed_parts" in request:
+            runner,maps,exchange=span_helpers()
+            original=(book/unit["source_path"]).read_bytes().decode("utf-8")
+            current=translation.read_bytes().decode("utf-8")
+            try:
+                mapping=maps.read_artifact(book,unit["unit_id"],original,current)
+                require(mapping is not None,"current accepted artifact has no span map")
+                ledger=strict_json(book/"review-ledger.json")
+                previous=runner.latest_record(ledger,unit)
+                report=exchange.compile_review(original,current,mapping,previous,request["addressed_parts"],request["outcome"])
+            except (ValueError,KeyError,TypeError,RuntimeError) as exc:
+                raise RequestError("addressed reviewer evidence rejected") from exc
+        else:
+            report=request["quality_report"]
         with tempfile.TemporaryDirectory() as temp:
             evidence = Path(temp) / "quality-report.json"
-            evidence.write_text(json.dumps(request["quality_report"], ensure_ascii=False),
-                                encoding="utf-8")
+            evidence.write_text(json.dumps(report, ensure_ascii=False),encoding="utf-8")
             return cli(root, "book.py", "review-record", slug, chapter,
                        "--outcome", request["outcome"], "--session-id", session,
                        "--quality-report", str(evidence), "--json")

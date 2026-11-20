@@ -63,7 +63,10 @@ def make_epub(path):
 def git(path, *args):
     subprocess.run(["git","-C",str(path),*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
-def run_arm(home, source, mode, cap):
+def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=None,
+            stop_after_phase=None, max_provider_failures=None):
+    if stop_after_phase not in (None,"translator-completed","reviewer-completed"):
+        raise ValueError("unsupported benchmark stop phase")
     root = home / mode
     root.mkdir()
     remote = home / (mode + "-bare")
@@ -89,27 +92,87 @@ def run_arm(home, source, mode, cap):
            "BOOK_TRANSLATOR_CONTINUE_CORRECTIONS":"on","BOOK_TRANSLATOR_MARKER_ALIGNMENT":"on",
            "BOOK_TRANSLATOR_INCREMENTAL_REVIEW":"on","BOOK_TRANSLATOR_ADAPTIVE_BUDGET":"on",
            "BOOK_TRANSLATOR_QUEUE_BUDGET":"on"}
+    env.update(environment or {})
     for key in ("GITHUB_OUTPUT","BOOK_TRANSLATOR_PINNED_ENGINE","BOOK_TRANSLATOR_PINNED_REVISION"):
         env.pop(key,None)
     status_path = root/"automation"/"status"/(JOB+".json")
     started = time.monotonic()
     status = {}
+    metrics = {}
+    provider_failures = 0
     reason = "checkpoint-limit"
     for _ in range(120):
-        result = subprocess.run([sys.executable,str(ROOT/"automation/book_runner.py"),"--job-id",JOB],
-                                cwd=root,env=env,capture_output=True,text=True)
+        remaining = None if wall_budget_seconds is None else wall_budget_seconds - (time.monotonic()-started)
+        if remaining is not None and remaining <= 0:
+            reason = "wall-clock-budget"; break
+        try:
+            result = subprocess.run([sys.executable,str(ROOT/"automation/book_runner.py"),"--job-id",JOB],
+                                    cwd=root,env=env,capture_output=True,text=True, **({"timeout":remaining} if remaining is not None else {}))
+        except subprocess.TimeoutExpired:
+            if status_path.exists():
+                status = json.loads(status_path.read_text("utf-8"))
+            reason = "wall-clock-budget"; break
         if status_path.exists():
             status = json.loads(status_path.read_text("utf-8"))
-        print(json.dumps({"arm":mode,"phase":status.get("phase"),"calls":status.get("model_calls_started",0)},ensure_ascii=False),flush=True)
+        prompt = status.get("prompt_context") or {}
+        retry = status.get("provider_retry") or {}
+        metrics = status.get("execution_metrics", {})
+        # Only this benchmark runs on approved public-domain/original fixtures.
+        # Redact every provider setting even in diagnostic-only messages.
+        message=str(status.get("last_error",""))[:250]
+        for key,value in env.items():
+            if key.startswith("OMNIROUTE_") and value and len(value)>2:
+                message=message.replace(value,"[REDACTED]")
+        print(json.dumps({"arm":mode,"phase":status.get("phase"),"calls":status.get("model_calls_started",0),
+                          "unit_id":(status.get("active") or {}).get("unit_id"),
+                          "execution_mode":prompt.get("execution_mode"),"chunk":prompt.get("chunk_id"),
+                          "chunk_count":prompt.get("chunk_count"),"error_code":status.get("last_error_code"),
+                          "review_failure":(status.get("last_review_failure") or {}).get("kind"),
+                          "retry_code":retry.get("code"),"accepted":metrics.get("accepted_operations",{}),
+                          "last_error":message,"gate_failure":status.get("transactional_gate_failure"),
+                          "patch_progress":status.get("correction_batch_progress"),
+                          "review_progress":status.get("review_chunk_progress"),
+                          "batch_size":prompt.get("batch_finding_count"),
+                          "semantic_preflight_summary":status.get("last_semantic_preflight"),
+                          "single_review_gate":status.get("single_review_gate_summary"),
+                          "incremental_reused":prompt.get("reused_clean_chunks"),
+                          "review_refinement":status.get("review_refinement_summary"),
+                          "memory_proposals_deferred":status.get("optional_memory_proposals_deferred",0),
+                          "memory_proposals_rejected":status.get("optional_memory_proposals_rejected",0),
+                          "last_reuse_audit":(status.get("review_incremental_rebases") or [{}])[-1],
+                          "mapped_followup_audit":status.get("mapped_followup_audit"),
+                          "span_map":status.get("span_map_summary"),
+                          "span_map_unavailable":status.get("span_map_unavailable_count",0),
+                          "correction_mode":prompt.get("correction_mode"),
+                          "structural_stage":status.get("structural_segment_progress"),
+                          "structural_batch_yield":(status.get("structural_batch_yield") or [])[-1:],
+                          },ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
+            break
+        if stop_after_phase is not None and status.get("phase") == stop_after_phase:
+            reason = "benchmark-" + stop_after_phase
             break
         if status.get("state") in {"done","blocked","paused"}:
             reason = status.get("phase")
             break
         if status.get("phase") == "provider-backoff":
-            reason = "provider-backoff"
-            break
+            provider_failures += 1
+            if max_provider_failures is not None and provider_failures >= max_provider_failures:
+                reason = "benchmark-provider-failure-budget"
+                break
+            if wall_budget_seconds is None:
+                reason = "provider-backoff"; break
+            from datetime import datetime, timezone
+            due = datetime.fromisoformat(status["provider_retry"]["not_before"].replace("Z","+00:00"))
+            delay = max(0, (due-datetime.now(timezone.utc)).total_seconds())
+            remaining = wall_budget_seconds-(time.monotonic()-started)
+            if delay >= remaining:
+                reason = "provider-backoff-exceeds-budget"; break
+            time.sleep(delay+0.1)
+    # A wall timeout can interrupt the first subprocess before it returned.
+    # Always calculate returned aggregate metrics from the latest checkpoint.
+    metrics = status.get("execution_metrics", {})
     book = root/"books"/str(status.get("book_slug",""))
     chapters = []
     if (book/"progress.json").is_file():
@@ -128,7 +191,16 @@ def run_arm(home, source, mode, cap):
     return {"arm":mode,"source_sha256":hashlib.sha256(source).hexdigest(),"workflow_revision":PIN,
             "state":status.get("state"),"stop_reason":reason,"wall_seconds":round(time.monotonic()-started,2),
             "calls_reserved":status.get("model_calls_started",0),"api":metrics.get("api",{}),
+            "requested_api":metrics.get("requested_api",{}),
+            "memory_proposals_rejected":status.get("optional_memory_proposals_rejected",0),
+            "review_rebases":status.get("review_incremental_rebases",[]),
+            "review_convergence":status.get("review_convergence_history",[]),
             "accepted_operations":metrics.get("accepted_operations",{}),
+            "structural_protocol_failure_counts":status.get("structural_protocol_failure_counts",{}),
+            "context_batch_profile":status.get("structural_full_context_batch_profiles",{}),
+            "last_staged_source_spans":status.get("structural_segment_progress",{}),
+            "provider_backoffs_seen":provider_failures,
+            "structural_batch_yield":status.get("structural_batch_yield",[]),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}
 

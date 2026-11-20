@@ -37,6 +37,18 @@ import candidate_review
 import incremental_review
 import adaptive_budget
 import coherent_batches
+import chapter_context
+import transactional_quality
+import block_delta_review
+import compact_review
+import block_recovery
+import correction_feedback
+import single_review_gate
+import resilient_recovery
+import span_map
+import addressed_review
+import mapped_followup
+import mapped_correction
 import execution_scheduler
 import execution_metrics
 import agent_orchestrator
@@ -46,7 +58,7 @@ from review_diagnostics import (review_advisories, reviewer_failure_detail,
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
                               parse_correction_patches, parse_translation, PatchAnchorMismatch, role_contracts,
                               save_claim_bound_decisions, updated_glossary, model_glossary_context,
-                              reviewer_glossary_proposals)
+                              reviewer_glossary_proposals, normalize_optional_memory)
 
 # The shared runtime lives in the public repository but all mutable state
 # lives in the invoking book-state checkout (private or otherwise).
@@ -200,7 +212,7 @@ def schedule_provider_retry(status: dict, chapter: dict, role: str,
         return
     # Never retry earlier than the policy or a bounded provider Retry-After.
     delay = min(MAX_BACKOFF_SECONDS, max(
-        AUTO_RETRY_DELAYS_SECONDS[attempts - 1],
+        resilient_recovery.retry_delay(status,chapter,role,failure,attempts,AUTO_RETRY_DELAYS_SECONDS[attempts - 1]),
         failure.retry_after_seconds or 0))
     status["provider_retry"] = {
         "chapter": chapter["number"], "unit_id": chapter["unit_id"],
@@ -246,7 +258,7 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
     status["provider_model_route"] = "fallback" if route != role else "primary"
     status.pop("model_response_diagnostics", None)
     started = time.monotonic()
-    metric = {"unit_id": current_unit, "role": current_role,
+    metric = {"unit_id": current_unit, "role": current_role, "requested_role":role.lower(),
               "route": status["provider_model_route"],
               "request_chars": len(system) + len(user)}
     try:
@@ -280,6 +292,11 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
             "unit_id": active.get("unit_id") if isinstance(active, dict) else None,
         }
     execution_metrics.provider(status, metric)
+    if os.environ.get("BOOK_TRANSLATOR_OPTIONAL_MEMORY_ISOLATION") == "on":
+        answer, rejected = normalize_optional_memory(answer)
+        if rejected:
+            status["optional_memory_proposals_rejected"] = (
+                status.get("optional_memory_proposals_rejected", 0) + rejected)
     return answer
 
 
@@ -325,6 +342,9 @@ def reviewer_model_output_code(error: ModelError) -> str | None:
     if not isinstance(error, ModelError) or isinstance(error, TransientModelError):
         return None
     message = str(error)
+    if message.startswith(("compact reviewer evidence rejected: ","reviewer evidence is invalid: mapped follow-up ",
+                           "reviewer evidence is invalid: addressed review ")):
+        return "review_evidence_invalid"
     if message in {
         "reviewer must return JSON",
         "reviewer response has invalid literary memory schema",
@@ -1960,9 +1980,15 @@ def incomplete_structural_batch(selected: list[dict], translated: dict) -> list[
     failures = []
     for item in selected:
         result = translated.get(item["id"])
-        if result is None or len(item["source"]) < 400:
+        if result is None:
             continue
         original = item["source"]
+        if (single_review_gate.paragraph_preserving() and not resilient_recovery.enabled()
+                and single_review_gate.paragraph_count(original)!=single_review_gate.paragraph_count(result)):
+            failures.append(item["id"])
+            continue
+        if len(original)<400:
+            continue
         src_paras = len(re.split(r"\n[ \t]*\n", original))
         dst_paras = len(re.split(r"\n[ \t]*\n", result))
         if (len(result) * 100 < len(original) * 55
@@ -2047,6 +2073,33 @@ def load_structural_stage(slug: str, chapter: dict, status: dict,
     return path, stage
 
 
+def span_map_path(slug,unit_id,source,target):
+    if not safe_book_slug(slug):
+        raise JobError("invalid span map book identity")
+    try:
+        return span_map.artifact_path(ROOT/"books"/slug,unit_id,source,target)
+    except (ValueError,OSError) as exc:
+        raise JobError("invalid span map identity") from exc
+
+
+def read_span_map(slug,unit_id,source,target):
+    if not safe_book_slug(slug):
+        raise JobError("invalid span map book identity")
+    try:
+        return span_map.read_artifact(ROOT/"books"/slug,unit_id,source,target)
+    except (ValueError,OSError) as exc:
+        raise JobError("invalid current artifact span map") from exc
+
+
+def persist_span_map(slug,unit_id,value,source,target):
+    if not safe_book_slug(slug):
+        raise JobError("invalid span map book identity")
+    try:
+        span_map.persist_artifact(ROOT/"books"/slug,unit_id,value,source,target)
+    except (ValueError,OSError) as exc:
+        raise JobError("invalid or conflicting immutable span map") from exc
+
+
 def process_structural_translation(job_id: str, slug: str, status: dict,
                                    engine: Path, chapter: dict, helper,
                                    plan: dict) -> tuple[str, list, list] | None:
@@ -2067,15 +2120,27 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                        else adaptive_budget.translation_batch_limit(
                            STRUCTURAL_MODEL_SEGMENTS_PER_CALL, pressure))
         try:
+            full_context = chapter_context.enabled()
+            output_chars, output_spans = (coherent_batches.context_batch_caps(
+                status, chapter["unit_id"], plan["source_sha256"])
+                if full_context else (None, None))
             selected = coherent_batches.structural_selection(
                 helper, plan, stage["segments"], batch_limit, pressure=pressure,
-                fallback=fallback.get(chapter["unit_id"]) == plan["source_sha256"])
+                fallback=fallback.get(chapter["unit_id"]) == plan["source_sha256"],
+                full_chapter=full_context,
+                source_char_limit=output_chars, span_limit=output_spans)
         except ValueError as exc:
             raise JobError("invalid source-bound structural translation progress") from exc
         if not selected:
             break
         system, user, _ = context(
             engine, slug, chapter, "translator", structural_segments=selected)
+        user, chapter_audit = chapter_context.append(
+            helper, plan, source, stage["segments"], selected, system, user)
+        if resilient_recovery.enabled() and (stage["glossary"] or stage["style_guide"]):
+            user += ("\nPROVISIONAL EARLIER SPAN DECISIONS (not canonical, verify against source): "+json.dumps({
+                "glossary":stage["glossary"],"style_guide":stage["style_guide"]},ensure_ascii=False)+
+                "\nDo not propose them again. Keep supported recurring names consistent.")
         prompt_context = {
             "role": "translator",
             "workflow_revision": status["workflow_revision"],
@@ -2084,6 +2149,7 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
             "execution_mode": "shared-structural-segments",
+            "chapter_context": chapter_audit,
             "helper_revision": PUBLIC_STRUCTURAL_HELPER_REVISION,
             "batch_segment_count": len(selected),
         }
@@ -2103,29 +2169,47 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                        "prompt_context": prompt_context})
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "TRANSLATOR", system, user)
+        protocol_repair_used = False
         try:
             translated, new_glossary, new_style = helper.parse_batch(
                 answer, [item["id"] for item in selected])
         except ValueError as exc:
+            protocol_repair_used = True
             code = helper.protocol_failure_code(str(exc))
             if code is None:
                 raise ModelError("structural translator rejected model output: "
                                  + str(exc)) from exc
-            # Bad generated output cannot authorize a write. Keep every
-            # previously staged span and use single-span batches from now on.
-            status.setdefault("structural_protocol_fallback_units", {})[
-                chapter["unit_id"]] = plan["source_sha256"]
+            # Rejected output never enters durable translations. In the
+            # experimental chapter-context mode reduce the number of IDs and
+            # expected response size gradually; retain the legacy single-span
+            # fallback for regular Auto and repeated minimum-size failures.
+            permanent_fallback = (not full_context or
+                coherent_batches.shrink_context_batch(
+                    status, chapter["unit_id"], plan["source_sha256"]))
+            if permanent_fallback:
+                status.setdefault("structural_protocol_fallback_units", {})[
+                    chapter["unit_id"]] = plan["source_sha256"]
             status["last_error_code"] = code
+            counts = status.setdefault("structural_protocol_failure_counts", {})
+            if not isinstance(counts, dict):
+                raise JobError("invalid structural protocol error counters")
+            prior_count = counts.get(chapter["unit_id"], 0)
+            if type(prior_count) is not int or not 0 <= prior_count < 10000:
+                raise JobError("invalid structural protocol error count")
+            counts[chapter["unit_id"]] = prior_count + 1
             count = status.get("model_calls_started", 0)
             if type(count) is not int or count >= model_call_limit():
                 raise ModelError("structural protocol repair exhausted paid model budget") from exc
             focused = selected[:1]
             repair_system, repair_user, _ = context(
                 engine, slug, chapter, "translator", structural_segments=focused)
+            repair_user, repair_audit = chapter_context.append(
+                helper, plan, source, stage["segments"], focused, repair_system, repair_user)
             status["model_calls_started"] = count + 1
             status["phase"] = "structural-json-repair-reserved"
             status["prompt_context"] = {
                 **prompt_context, "repair_code": code,
+                "chapter_context": repair_audit,
                 "batch_segment_count": len(focused),
                 "execution_mode": "shared-structural-json-repair",
             }
@@ -2155,6 +2239,10 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             rejected = [item for item in selected if item["id"] in incomplete]
             repair_system, repair_user, _ = context(
                 engine, slug, chapter, "translator", structural_segments=rejected)
+            repair_user, repair_audit = chapter_context.append(
+                helper, plan, source, stage["segments"], rejected, repair_system, repair_user)
+            status["prompt_context"] = {**prompt_context,
+                "chapter_context":repair_audit, "execution_mode":"shared-structural-short-output-repair"}
             repaired = complete_for_job(
                 status, "TRANSLATOR", repair_system,
                 repair_user + "\nREJECTED SHORT TRANSLATION: Translate EVERY "
@@ -2167,8 +2255,12 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             except ValueError as exc:
                 raise ModelError("structural translator repair rejected: " + str(exc)) from exc
             translated.update(corrected)
-            new_glossary = merge_unique_correction_decisions(new_glossary, extra_glossary)
-            new_style = merge_unique_correction_decisions(new_style, extra_style)
+            if resilient_recovery.enabled():
+                # Validate both optional memory batches independently before bounding the union.
+                for g,s in ((new_glossary,new_style),(extra_glossary,extra_style)):
+                    parse_translation(json.dumps({"translation":"validated placeholder","glossary":g,"style_guide":s},ensure_ascii=False))
+            new_glossary = merge_unique_correction_decisions(new_glossary, extra_glossary,status=status)
+            new_style = merge_unique_correction_decisions(new_style, extra_style,status=status)
             if incomplete_structural_batch(selected, translated):
                 raise ModelError("focused structural translator repair still omitted source text")
         _, new_glossary, new_style = parse_translation(json.dumps({
@@ -2181,11 +2273,34 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
         except ValueError as exc:
             raise ModelError("structural translation batch is not source-bound") from exc
         merged_glossary = merge_unique_correction_decisions(stage["glossary"],
-                                                             new_glossary)
+                                                             new_glossary,status=status)
         merged_style = merge_unique_correction_decisions(stage["style_guide"],
-                                                          new_style)
+                                                          new_style,status=status)
         stage.update({"segments": combined, "glossary": merged_glossary,
                       "style_guide": merged_style})
+        # Metrics contain numeric counts only; no prompts, literary text,
+        # provider configuration or model-generated answer bytes.
+        accepted_ids = set(translated)
+        requested_chars = sum(len(item["source"]) for item in selected)
+        accepted_chars = sum(len(item["source"]) for item in selected
+                             if item["id"] in accepted_ids)
+        history = status.setdefault("structural_batch_yield", [])
+        if not isinstance(history, list):
+            raise JobError("invalid structural batch metrics history")
+        history.append({
+            "unit_id": chapter["unit_id"],
+            "requested_ids": len(selected),
+            "accepted_ids": len(translated),
+            "requested_source_chars": requested_chars,
+            "accepted_source_chars": accepted_chars,
+            "system_plus_user_chars": len(system)+len(user),
+            "source_window_chars": chapter_audit.get("source_window_chars",0),
+        })
+        status["structural_batch_yield"] = history[-60:]
+        if full_context and not protocol_repair_used:
+            coherent_batches.adjust_after_sparse_response(
+                status,chapter["unit_id"],plan["source_sha256"],
+                len(selected),len(translated))
         store_json(stage_path, stage)
         status["structural_segment_progress"] = {
             "unit_id": chapter["unit_id"],
@@ -2269,14 +2384,20 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     staged_candidate = apply_correction_patches(translation, verified)
     check_markers(source, staged_candidate)
     try:
+        transactional_quality.require_safe(source, translation, staged_candidate, verified, unresolved, _anchor_position)
         correction_regression.require_no_new_repetitions(
             translation, staged_candidate)
     except correction_regression.CorrectionRegression as exc:
-        raise JobError("staged correction has a repeated-text regression") from exc
+        raise JobError("staged correction failed pre-acceptance quality guard: " + exc.code) from exc
     return path, stage
 
 
-def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict]) -> list[dict]:
+def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict], *, status=None) -> list[dict]:
+    if resilient_recovery.enabled():
+        updated,deferred=resilient_recovery.bounded_memory(existing,proposed)
+        if deferred and status is not None:
+            status["optional_memory_proposals_deferred"]=status.get("optional_memory_proposals_deferred",0)+deferred
+        return updated
     updated = list(existing)
     for item in proposed:
         if item not in updated:
@@ -2285,6 +2406,147 @@ def merge_unique_correction_decisions(existing: list[dict], proposed: list[dict]
         raise ModelError("corrector proposed too many unique literary decisions")
     return updated
 
+
+
+def verify_transactional_candidate(job_id: str, slug: str, status: dict, engine: Path,
+                                   chapter: dict, record: dict, source: str,
+                                   translation: str, patches: list[dict], stage_path: Path) -> bool:
+    """One independently vetted group per durable checkpoint, never PASS."""
+    findings=[f for f in record["quality_report"]["findings"] if not f["resolved"]]
+    candidate=apply_correction_patches(translation,patches)
+    try:
+        transactional_quality.require_safe(source,translation,candidate,patches,findings,_anchor_position)
+        cases=None
+        if span_map.enabled():
+            mapping=read_span_map(slug,chapter["unit_id"],source,translation)
+            cases=mapped_correction.cases(mapping,source,translation,candidate,patches,findings,_anchor_position)
+        mapped_cases=cases is not None
+        if cases is None:
+            cases=transactional_quality.transaction_cases(source,translation,candidate,patches,findings,_anchor_position)
+        complete_case_count=len(cases)
+        cases=single_review_gate.select_cases(cases,patches,findings)
+        if single_review_gate.enabled():
+            status["single_review_gate_summary"]={"unit_id":chapter["unit_id"],"total_cases":complete_case_count,
+                "high_risk_preflight_cases":len(cases),"canonical_review_required":True,"source_owned_cases":mapped_cases,
+                "candidate_sha256":transactional_quality.digest(candidate)}
+        if not cases and complete_case_count and single_review_gate.enabled():
+            # Machine acceptance only; next canonical independent review is mandatory.
+            return True
+        instructions,paths=role_contracts(engine,"reviewer")
+        # Supply the same literary memory to the veto as to the ordinary review.
+        root=ROOT/"books"/slug
+        glossary,style=full_shared_context(root)
+        metadata=read_json(root/"metadata.json")
+        instructions += "\n\nCURRENT LITERARY MEMORY:\n"+model_glossary_context(glossary,
+            source_language=metadata.get("source_language","unspecified"),
+            target_language=metadata.get("target_language","unspecified"))+"\nSTYLE GUIDE:\n"+style
+        cache_binding={"version":3 if correction_feedback.enabled() else 2,"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+                       "source_sha256":record["source_sha256"],"baseline_sha256":record["translation_sha256"],
+                       "workflow_revision":status["workflow_revision"],"contract_sha256":transactional_quality.digest(instructions),
+                       "glossary_sha256":fingerprint(root/"glossary.md"),"style_sha256":fingerprint(root/"style-guide.md")}
+        cache=transactional_quality.approval_cache(status,cache_binding)
+        pending=[case for case in cases if transactional_quality.approval_key(case,cache_binding) not in cache["approved"]]
+        groups=transactional_quality.group_prompts(pending,instructions)
+    except (correction_regression.CorrectionRegression,candidate_review.CandidateReviewError) as exc:
+        status["transactional_gate_failure"]={"unit_id":chapter["unit_id"],"reason":str(exc)[:240],
+                                               "patch_count":len(patches),"source_chars":len(source),
+                                               "target_chars":len(translation),"at":clock()}
+        raise ModelError("transactional candidate cannot be safely verified: "+str(exc)) from exc
+    if not cases:
+        raise JobError("empty transactional gate")
+    if not groups:
+        return True
+    keys=[transactional_quality.group_key(*g) for g in groups]
+    binding={"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+             "source_sha256":record["source_sha256"],"candidate_sha256":transactional_quality.digest(candidate),
+             "workflow_revision":status["workflow_revision"],"groups":keys,
+             "glossary_sha256":fingerprint(ROOT/"books"/slug/"glossary.md"),
+             "style_sha256":fingerprint(ROOT/"books"/slug/"style-guide.md")}
+    progress=status.get("transactional_gate",{})
+    if not isinstance(progress,dict) or progress.get("binding")!=binding:
+        progress={"binding":binding,"approved":[]}
+    approved=progress.get("approved")
+    if not isinstance(approved,list) or approved!=keys[:len(approved)]:
+        raise JobError("invalid transaction approval sequence")
+    status["transactional_gate"]=progress
+    if len(approved)==len(keys):
+        return True
+    count=status.get("model_calls_started",0)
+    if type(count) is not int or count<0:
+        raise JobError("invalid durable model call counter")
+    if count>=model_call_limit():
+        cli("release",slug,str(chapter["number"]),"--session-id",status["active"]["session_id"])
+        status["active"]=None
+        status.update({"state":"blocked","phase":"model-call-limit-reached",
+                       "last_error":"transactional gate call budget reached"})
+        checkpoint(job_id,status,slug)
+        return False
+    index=len(approved)
+    group,system,user=groups[index]
+    status.update({"model_calls_started":count+1,"phase":"candidate-semantic-preflight-reserved",
+                   "prompt_context":{"role":"reviewer","execution_mode":"transactional-block-veto",
+                                     "workflow_revision":status["workflow_revision"],"loaded_contracts":paths,
+                                     "case_count":len(group),"system_chars":len(system),"user_chars":len(user),
+                                     "group":index+1,"groups":len(groups)}})
+    checkpoint(job_id,status,slug)
+    answer=complete_for_job(status,"REVIEWER",system,user)
+    verdicts=None
+    try:
+        if correction_feedback.enabled():
+            verdicts=correction_feedback.decisions(answer,[c["finding_id"] for c in group])
+            rejected=[fid for fid,d in verdicts.items() if d["verdict"]=="reject"]
+        else:
+            rejected=candidate_review.parse_verdict(answer,[c["finding_id"] for c in group])
+    except candidate_review.CandidateReviewError as exc:
+        raise ModelError("transactional gate returned invalid evidence") from exc
+    transactional_quality.remember_approved(cache,group,cache_binding,rejected)
+    if rejected:
+        rejected_ids={fid for case in group if case["finding_id"] in rejected for fid in case["patch_ids"]}
+        audit=status.setdefault("correction_regression_rejections",[])
+        for p in patches:
+            if p["finding_id"] in rejected_ids:
+                audit.append({"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+                              "finding_id":p["finding_id"],"patch_sha256":correction_regression.patch_fingerprint(p),
+                              "reason":"transactional-semantic-veto","at":clock()})
+        status["correction_regression_rejections"]=audit[-64:]
+        # Keep other edits staged, not accepted. A new candidate requires fresh approval.
+        stage=read_json(stage_path)
+        if stage.get("patches")!=patches:
+            raise JobError("transactional veto stage identity changed")
+        stage["patches"]=[p for p in patches if p["finding_id"] not in rejected_ids]
+        stage["glossary"]=[];stage["style_guide"]=[]
+        store_json(stage_path,stage)
+        status.pop("transactional_gate",None)
+        status["last_semantic_preflight"]={"unit_id":chapter["unit_id"],"decision":"veto",
+                                          "candidate_sha256":binding["candidate_sha256"],
+                                          "rejected_count":len(rejected_ids),"model_call":count+1}
+        if verdicts is not None:
+            feedback_ids=correction_feedback.record_veto(status,chapter,record,group,verdicts,patches,
+                                                       correction_regression.patch_fingerprint)
+            if feedback_ids!=rejected_ids:
+                raise JobError("feedback veto identity mismatch")
+            items=correction_feedback.state(status,chapter,record)
+            exhausted=correction_feedback.exhausted(items)
+            status["last_semantic_preflight"].update({"risk_counts":{risk:sum(d["risk"]==risk for d in verdicts.values())
+                for risk in sorted({d["risk"] for d in verdicts.values()}-{"none"})},
+                "exhausted_findings":len(exhausted)})
+            status["correction_batch_progress"]={"unit_id":chapter["unit_id"],"review_record_id":record["record_id"],
+                "completed":len(stage["patches"]),"total":len(findings)}
+            status["phase"]="candidate-veto-feedback-staged"
+            checkpoint(job_id,status,slug)
+            # Valid negative literary evidence is not a broken model response.
+            # Preserve live claim, replan only the affected finding IDs.
+            return False
+        checkpoint(job_id,status,slug)
+        raise ModelError("transactional independent gate vetoed candidate")
+    approved.append(keys[index])
+    status["phase"]="candidate-semantic-preflight-staged"
+    status["last_semantic_preflight"]={"unit_id":chapter["unit_id"],"decision":"candidate_only_approved",
+                                      "candidate_sha256":binding["candidate_sha256"],
+                                      "approved_groups":len(approved),"total_groups":len(keys),
+                                      "model_call":count+1}
+    checkpoint(job_id,status,slug)
+    return len(approved)==len(keys)
 
 
 def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
@@ -2303,6 +2565,9 @@ def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
         active = candidate_review.enabled()
     except candidate_review.CandidateReviewError as exc:
         raise JobError(str(exc)) from exc
+    if transactional_quality.enabled():
+        return verify_transactional_candidate(job_id, slug, status, engine, chapter, record,
+                                              source, translation, patches, stage_path)
     if not active:
         return True
     if not patches:
@@ -2460,10 +2725,32 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
+    correction_map=read_span_map(slug,chapter["unit_id"],source,translation) if span_map.enabled() else None
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
                 if continue_batches else set())
+    feedback_items=correction_feedback.state(status,chapter,record) if correction_feedback.enabled() else {}
+    exhausted=correction_feedback.exhausted(feedback_items)
+    if exhausted:
+        isolated.update(exhausted)
+        execution_scheduler.record_isolated(status,chapter,record,isolated)
+    # A previously rejected isolated block gets one alternate, scope-preserving
+    # reconstruction before it is deferred. This remains a reviewer-bound patch.
+    if transactional_quality.enabled() and isolated:
+        seen_recovery = status.get("block_recovery_attempts", [])
+        known_unsafe = {x["finding_id"] for x in status.get("correction_regression_rejections", [])
+                        if x.get("unit_id")==chapter["unit_id"] and x.get("review_record_id")==record["record_id"]}
+        overlap = status.get("correction_overlap_deferred", {})
+        if overlap.get("unit_id")==chapter["unit_id"] and overlap.get("review_record_id")==record["record_id"]:
+            known_unsafe.update(overlap.get("unapplied_finding_ids", []))
+        for item in unresolved:
+            key = record["record_id"] + ":" + item["id"]
+            if (item["id"] in isolated and item["id"] not in exhausted and item["id"] in known_unsafe and key not in seen_recovery
+                    and block_recovery.spec(source, translation, item, _anchor_position) is not None):
+                isolated.remove(item["id"])
+                execution_scheduler.record_isolated(status, chapter, record, isolated)
+                break
     initially_pending = [
         item for item in unresolved if item["id"] not in already_staged | isolated]
     try:
@@ -2511,9 +2798,13 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 pending, translation, selected, status.get("correction_regression_rejections", []),
                 chapter["unit_id"], record["record_id"], failures=status.get("failures", 0),
                 pressure=pressure, isolated=bool(isolated))
+            if correction_map is not None:
+                selected=mapped_correction.selection(correction_map,source,translation,pending,selected,stage["patches"],
+                    status.get("correction_regression_rejections",[]),chapter["unit_id"],record["record_id"],
+                    _anchor_position,failures=status.get("failures",0),pressure=pressure,isolated=bool(isolated))
             if coherent_batches.enabled():
                 status["adaptive_correction_budget"]["current_selection_size"] = len(selected)
-        if continue_batches and isolated and len(pending) > 1:
+        if continue_batches and isolated and len(pending) > 1 and not single_review_gate.enabled():
             strategy = correction_orchestrator_strategy(
                 job_id, slug, status, engine, chapter, record, pending, isolated)
             if strategy == "isolate_remaining":
@@ -2539,6 +2830,22 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 + json.dumps(sorted(set(earlier))) +
                 ". Change the wording/strategy; do not repeat rejected text."
             )
+        recovery = None
+        recovery_key = None
+        if transactional_quality.enabled() and not pressure:
+            seen_recovery = status.get("block_recovery_attempts", [])
+            for item in selected:
+                key = record["record_id"] + ":" + item["id"]
+                if item["id"] in earlier and key not in seen_recovery:
+                    recovery = block_recovery.spec(source, translation, item, _anchor_position)
+                    if recovery is not None:
+                        selected = [item]
+                        recovery_key = key
+                        system, user, _ = context(engine, slug, chapter, "corrector", correction_findings=selected)
+                        user += block_recovery.prompt(recovery)
+                        break
+        if feedback_items:
+            user+=correction_feedback.prompt_feedback(feedback_items,selected)
         prompt_context = {
             "role": "corrector",
             "workflow_revision": status["workflow_revision"],
@@ -2546,7 +2853,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             "glossary_sha256": fingerprint(book / "glossary.md"),
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
-            "correction_mode": "bounded-review-patches",
+            "correction_mode": ("block-reconstruction" if recovery is not None else
+                                "mapped-coherent-patches" if correction_map is not None and "EXACT SOURCE-OWNED CORRECTION GROUPS" in user else "bounded-review-patches"),
             "batch_finding_count": len(selected),
         }
         count = status.get("model_calls_started", 0)
@@ -2566,6 +2874,12 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                        "prompt_context": prompt_context})
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "CORRECTOR", system, user)
+        if recovery is not None:
+            status["block_recovery_attempts"] = (status.get("block_recovery_attempts", []) + [recovery_key])[-100:]
+            try:
+                answer = block_recovery.compile_response(answer, recovery)
+            except block_recovery.RecoveryError as exc:
+                raise ModelError("corrector block reconstruction rejected") from exc
         try:
             patches, glossary, style = parse_correction_patches(
                 answer, selected, allow_partial=True)
@@ -2647,6 +2961,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 conflicting.append(patch["finding_id"])
                 continue
             try:
+                transactional_quality.require_safe(source, translation, candidate, combined + [patch], unresolved, _anchor_position)
                 correction_regression.require_no_new_repetitions(
                     translation, candidate)
             except correction_regression.CorrectionRegression as exc:
@@ -2686,9 +3001,9 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         # Do not persist literary proposals from a batch with no accepted patch.
         accepted_now = len(combined) > len(stage["patches"])
         updated_glossary = merge_unique_correction_decisions(
-            stage["glossary"], glossary if accepted_now else [])
+            stage["glossary"], glossary if accepted_now else [],status=status)
         updated_style = merge_unique_correction_decisions(
-            stage["style_guide"], style if accepted_now else [])
+            stage["style_guide"], style if accepted_now else [],status=status)
         # Stage only safe edits. Conflicted findings remain unresolved and are
         # independently rechecked after a partial translation improvement.
         stage.update({"patches": combined, "glossary": updated_glossary,
@@ -2732,6 +3047,10 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         # Keep the live claim. Next bounded Action continues the same stage.
         return None
     if not covered:
+        if correction_feedback.enabled() and exhausted:
+            # No safe improvement exists. Keep the accepted text unchanged and
+            # let canonical blocked-unit handling stop this unit, not invent PASS.
+            raise ModelError("all correction candidates were unsafe; no accepted patch")
         # A fresh bounded attempt must try a different candidate, not re-read
         # an all-isolated empty stage. Keep hashed unsafe-patch rejections.
         status.pop("correction_isolation", None)
@@ -2739,10 +3058,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
     try:
+        transactional_quality.require_safe(source, translation, translated, stage["patches"], unresolved, _anchor_position)
         correction_regression.require_no_new_repetitions(translation, translated)
     except correction_regression.CorrectionRegression as exc:
         # Do not leave a live claim stuck on an uncaught guard exception.
-        raise ModelError("final correction candidate introduces duplicated text") from exc
+        raise ModelError("final correction candidate failed quality guard: " + exc.code) from exc
     if not verify_semantic_correction_candidate(
             job_id, slug, status, engine, chapter, record, source,
             translation, stage["patches"], stage_path):
@@ -2916,6 +3236,20 @@ def focused_review_context(slug: str, chapter: dict, previous: dict,
             or delta.get("source_sha256") != source_sha
             or delta.get("translation_sha256") != translation_sha):
         raise JobError("review-delta does not match the current accepted artifacts")
+    if transactional_quality.enabled():
+        book = ROOT / "books" / slug
+        baseline_sha = previous.get("translation_sha256", "")
+        if HEX64.fullmatch(baseline_sha):
+            baseline = book / ".workflow" / "review-baselines" / (baseline_sha + ".md")
+            if baseline.is_file():
+                try:
+                    scoped = block_delta_review.scope(source, baseline.read_bytes().decode("utf-8"),
+                        translation, previous, {"glossary":fingerprint(book/"glossary.md"),
+                                                "style_guide":fingerprint(book/"style-guide.md")}, _anchor_position)
+                except (JobError, ValueError, UnicodeError):
+                    scoped = None
+                if scoped is not None and len(json.dumps(scoped, ensure_ascii=False)) <= MAX_FOCUSED_CONTEXT_CHARS:
+                    return scoped
     if delta.get("mode") != "focused_candidate":
         return None
     if delta.get("previous_record_id") != previous.get("record_id"):
@@ -3411,7 +3745,10 @@ GLOSSARY_POLICY = (
     "LITERARY GLOSSARY (model-authored): Independently identify stable, recurring "
     "names, aliases, titles, places, organizations and domain terms in the assigned "
     "source and its translation. Return only source-grounded decisions in the "
-    "existing glossary array (original, translation, type, notes); use dictionary "
+    "existing glossary array (original, translation, type, notes). Each optional "
+    "style_guide entry must have exactly source_pattern, translation_approach, evidence "
+    "(all nonempty single-line strings, max 700 chars each). Both arrays may be empty; "
+    "do not include other keys in their items. Use dictionary "
     "forms rather than incidental grammatical case. Classify semantically, not by "
     "capitalization, hyperlinks, EPUB markers or metadata tags. Do not promote "
     "generic tags or ordinary phrases merely because they are linked. Write type "
@@ -3505,7 +3842,14 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                    "markers. They will be restored deterministically. Translate "
                    "only the provided original-source text spans; do not add "
                    "technical markup or URLs or repeat any unrelated unit. "
-                   "The pinned Translator literary fidelity requirements still apply.")
+                   "The pinned Translator literary fidelity requirements still apply. "
+                   "For structural mode ONLY, the output wire format overrides any illustrative "
+                   "full-unit translation schema above: return exactly one JSON object with keys "
+                   "segments, glossary, style_guide. segments is an array of objects with exactly "
+                   "id and translation; use each supplied source ID at most once. "
+                   "Translate all selected IDs; if returning a partial result use a nonempty subset "
+                   "of those IDs only. Both literary proposal fields must be arrays, even when empty. "
+                   "Never return a full-unit translation field, extra segment IDs or commentary.")
     else:
         system += ("\n\nTokens beginning ZXBTLINK mark a visible link label; "
                    "preserve each STARTXZ/ENDXZ token exactly and in order.")
@@ -3546,13 +3890,31 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                       [item for item in findings if not item.get("resolved")])
         if not unresolved:
             raise JobError("correction requested without unresolved reviewer findings")
-        source_display = json.dumps([
-            {"finding_id": item["id"], "finding": item,
-             "source_context": _anchor_excerpt(source, item["source_anchor"]),
-             "translation_context": (_anchor_excerpt(translation_raw, item["translation_anchor"])
-                                     if item["translation_anchor"] else None)}
-            for item in unresolved
-        ], ensure_ascii=False)
+        grouped=None
+        if span_map.enabled() and correction_findings is not None:
+            mapping=read_span_map(slug,chapter["unit_id"],source,translation_raw)
+            if mapping is not None:
+                grouped=mapped_correction.packet(mapping,source,translation_raw,unresolved,_anchor_position)
+        if grouped is not None:
+            source_display=("EXACT SOURCE-OWNED CORRECTION GROUPS:\n"+json.dumps(grouped,ensure_ascii=False,separators=(",",":"))+
+                "\nCompare the entire corresponding span before proposing an edit. Resolve the selected findings coherently; "
+                "retain every source-supported detail and use only the existing original reviewer anchor for each patch. "
+                "Never return a whole span unless its exact anchor is the whole span. Do not claim a finding closed.")
+        else:
+            source_display = json.dumps([
+                {"finding_id": item["id"], "finding": item,
+                 "source_context": _anchor_excerpt(source, item["source_anchor"]),
+                 "translation_context": (_anchor_excerpt(translation_raw, item["translation_anchor"])
+                                         if item["translation_anchor"] else None)}
+                for item in unresolved
+            ], ensure_ascii=False)
+            if transactional_quality.enabled():
+                pairs = [transactional_quality.correction_context(source, translation_raw, item, _anchor_position)
+                         for item in unresolved]
+                source_display += "\nCOMPLETE ALIGNED SOURCE AND TARGET BLOCKS (when available):\n" + json.dumps(pairs, ensure_ascii=False)
+        if os.environ.get("BOOK_TRANSLATOR_CORRECTION_LINEAGE_FEEDBACK")=="on":
+            history=review_convergence.prior_attempts(ledger,record,unresolved,source,_anchor_position)
+            source_display+=review_convergence.prior_attempt_prompt(history)
         if any(item["translation_anchor"] is None for item in unresolved):
             source_display += ("\nCURRENT TRANSLATION FOR OMITTED-PASSAGE PLACEMENT:\n"
                                + mask_translation_links(source, translation_raw))
@@ -3620,6 +3982,13 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         else:
             user += "\nCURRENT ACCEPTED TRANSLATION:\n" + mask_translation_links(source, translation_raw)
             user += "\nREVIEW FINDINGS TO CORRECT:\n" + json.dumps(findings, ensure_ascii=False)
+    if patch_mode and transactional_quality.enabled():
+        user += ("\nEXACT REPLACEMENT SAFETY: replacement is the entire text replacing the "
+                 "reviewer's exact quote, not just the corrected word. If the quote is a whole "
+                 "sentence or paragraph, return the whole corrected sentence or paragraph. "
+                 "Retain every unchanged clause, dialogue tag and detail. Never remove source-supported "
+                 "text to fix terminology or style. For insert operations return only inserted text. "
+                 "Complete aligned blocks are context, not new replacement coordinates.")
     if role == "reviewer":
         user += (
             "\nREVIEW REPORT CONTRACT: Use evidence_version=2 with exactly "
@@ -3638,6 +4007,12 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
                  "and include only accepted decisions in style_guide):\n"
                  + json.dumps(pending_style or [], ensure_ascii=False))
         if bounded_review:
+            if bounded_review.get("block_delta_version") == 1:
+                user += ("\nSOURCE-PAIRED BLOCK FOLLOW-UP: compare EVERY supplied source/current-target pair. "
+                         "The previous independent full review and byte-identical outside-scope blocks "
+                         "supply the unchanged baseline. Explicitly recheck EVERY previous unresolved finding. "
+                         "If wider continuity, meaning or formatting is uncertain, request full review; do not PASS. "
+                         "Do not invent findings outside the supplied blocks.")
             user += (
                 "\nThis is a hash-bound focused follow-up. The previous independent review checked "
                 "the unchanged artifact; the supplied delta contains every changed paragraph plus "
@@ -3783,6 +4158,13 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
         user += ("\nScope reminder: the source unit above is the complete input for this call. "
                  "Do not report the absence of other chapters or of the full EPUB as a reason "
                  "the supplied unit cannot be handled.")
+    if structural_segments is not None and resilient_recovery.enabled():
+        user += ("\nReturn at most eight genuinely important new glossary proposals and three stable style observations "
+                 "per request. Optional proposals are not a translation requirement. Do not repeat known memory or invent entries.")
+    if structural_segments is not None and single_review_gate.paragraph_preserving():
+        user += ("\nEach supplied source span must preserve its exact number and order of blank-line-separated paragraphs. "
+                 "Translate EACH paragraph in place, do not merge or divide paragraphs; retain dialogue turns and all content. "
+                 "Read adjacent spans for context but never duplicate their text in another span.")
     if structural_segments is not None:
         user += ("\nThese are source-ID-bounded text fragments, not the complete "
                  "chapter. Original protected links and EPUB markers are withheld "
@@ -4035,7 +4417,7 @@ def review_chunk_stage_path(slug: str, unit_id: str) -> Path:
 
 def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
                         translation: str, chunk: dict, total: int,
-                        previous: dict | None) -> tuple[str, str]:
+                        previous: dict | None, *, mapping=None) -> tuple[str, str]:
     """New independent reviewer invocation, with exact paired source evidence."""
     book = ROOT / "books" / slug
     instructions, _ = role_contracts(engine, "reviewer")
@@ -4065,6 +4447,25 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "a concrete unresolved source-grounded concern. "
         "Do not change accepted text or fabricate checks.")
     system += "\n\n" + GLOSSARY_POLICY
+    if mapping is not None and addressed_review.supports_mapped(source,translation,mapping):
+        if addressed_review.has_protected(source,translation):
+            check_markers(source,translation)
+        data,sr,_=addressed_review.packet(source,translation,chunk,mapping)
+        user=addressed_review.build_user(data,chunk,total,bibliographic,
+            model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
+                                   target_language=bibliographic.get("target_language","unspecified")),
+            style,old_findings,source,sr)
+        addressed_system=system+addressed_review.response_contract(protected=bool(data.get("protected_ids")))
+        if len(addressed_system)+len(user)<=120_000:
+            return addressed_system,user
+    paired = compact_review.packet(source, translation, chunk) if compact_review.enabled() else None
+    if paired is not None:
+        compact_user = compact_review.build_user(paired, chunk, total, bibliographic,
+            model_glossary_context(glossary, source_language=bibliographic.get("source_language", "unspecified"),
+                                   target_language=bibliographic.get("target_language", "unspecified")),
+            style, old_findings)
+        if len(system) + len(compact_user) <= 120_000:
+            return system, compact_user
     user = (
         "BOUND REVIEW PART " + chunk["id"] + " OF " + str(total) +
         ". Only this source CORE is assigned; the orchestrator verifies exact "
@@ -4108,7 +4509,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "without chunk prefix; "
         "categories omission|addition|meaning|modality|referent|terminology|"
         "register|voice|style|structure; severity minor|major|critical. "
-        "Anchors: {quote:string,occurrence:0}, translation anchor may "
+        "Anchors: {quote:string,occurrence:0} (optional block_id as defined below), translation anchor may "
         "be null only for omissions. An unresolved finding requires "
         "outcome=CORRECTIONS_REQUIRED. "
         "style_guide is [] or source-grounded entries with exactly "
@@ -4125,6 +4526,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "do not turn acceptable stylistic variants into blocking issues. "
         "First reconcile old findings before adding genuinely new ones. "
         "Never claim checks for passages you did not compare.")
+    user += coherent_batches.block_address_prompt(source, translation)
     if len(system) + len(user) > 120_000:
         raise JobError("bounded reviewer prompt unexpectedly exceeds safe limit")
     return system, user
@@ -4140,12 +4542,13 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     translation = (book / chapter["translation_path"]).read_bytes().decode("utf-8")
     stage_path = review_chunk_stage_path(slug, chapter["unit_id"])
     stage = read_json(stage_path) if stage_path.is_file() else None
+    current_map=read_span_map(slug,chapter["unit_id"],source,translation) if span_map.enabled() else None
     prior_plan = stage.get("plan") if isinstance(stage, dict) else None
     prior_revision = (prior_plan.get("helper_revision")
                       if isinstance(prior_plan, dict) else None)
     # Keep an in-flight stage on its original planner, even if opt-in settings
     # change. Neither setting changes a book's canonical literary revision.
-    if prior_revision not in ({None, review_chunks.HELPER_REVISION} | review_chunks.ALIGNED_REVISIONS):
+    if prior_revision is not None and prior_revision not in review_chunks.PLAN_REVISIONS:
         raise JobError("unsupported durable reviewer helper revision")
     alignment_mode = os.environ.get("BOOK_TRANSLATOR_MARKER_ALIGNMENT", "off")
     incremental_mode = os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW", "off")
@@ -4153,14 +4556,28 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         raise JobError("review alignment/incremental flags must be on or off")
     pressure = adaptive_budget.provider_pressure(status, chapter["unit_id"], "reviewer")
     marker_plan = (prior_revision in review_chunks.ALIGNED_REVISIONS
-                   or (prior_revision is None and
+                   or (prior_revision in {None,review_chunks.REFINED_REVISION} and
                        (alignment_mode == "on" or incremental_mode == "on" or pressure)))
-    stable = (prior_revision == review_chunks.STABLE_ALIGNMENT_REVISION
+    stable = (prior_revision in {review_chunks.STABLE_ALIGNMENT_REVISION,review_chunks.PARAGRAPH_STABLE_REVISION}
               or (prior_revision is None and incremental_mode == "on"))
     remembered = execution_scheduler.review_target(status, chapter["unit_id"],
                                                    review_chunks.sha(source))
     target = min(remembered, adaptive_budget.review_target_chars(pressure))
     def planner(original, translated, *, target_chars, keep_count=False):
+        if current_map is not None and addressed_review.supports_mapped(original,translated,current_map):
+            if addressed_review.has_protected(original,translated):
+                check_markers(original,translated)
+            mapped=review_chunks.recreate_mapped_plan(prior_plan if keep_count else None,
+                original,translated,current_map,target_chars)
+            if mapped is not None:return mapped
+        if (single_review_gate.paragraph_preserving() and
+                prior_revision in {None,review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION}):
+            count=(len(prior_plan["chunks"]) if keep_count and prior_revision==review_chunks.PARAGRAPH_STABLE_REVISION
+                   and prior_plan.get("source_sha256")==review_chunks.sha(original) else None)
+            proposed=review_chunks.plan_paragraphs(original,translated,target_chars=target_chars,count=count,
+                                                  wider=not resilient_recovery.enabled() and not pressure and remembered==review_chunks.TARGET_CHARS)
+            if proposed is not None:
+                return proposed
         if marker_plan:
             count = (len(prior_plan["chunks"]) if keep_count and stable
                      and prior_revision == review_chunks.STABLE_ALIGNMENT_REVISION
@@ -4178,8 +4595,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                           and prior_plan.get("translation_sha256") == review_chunks.sha(translation))
         if current_hashes:
             review_chunks.validate_plan(prior_plan, source, translation)
+            existing_mapping=review_chunks.source_owned_map(prior_plan)
+            if existing_mapping is not None and existing_mapping!=read_span_map(slug,chapter["unit_id"],source,translation):
+                raise JobError("review plan lacks matching artifact span map")
             plan = prior_plan
-            if pressure and not stage.get("completed"):
+            if pressure and not stage.get("completed") and not resilient_recovery.enabled():
                 smaller = planner(source, translation,
                                   target_chars=target)
                 if len(smaller["chunks"]) > len(plan["chunks"]):
@@ -4192,11 +4612,15 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     if pressure or remembered < review_chunks.TARGET_CHARS:
         execution_scheduler.record_review_target(
             status, chapter["unit_id"], review_chunks.sha(source), target)
+    if (prior_revision in {review_chunks.PARAGRAPH_STABLE_REVISION,review_chunks.REFINED_REVISION,review_chunks.MAPPED_REVISION}
+            and plan["helper_revision"]!=prior_revision
+            and not (review_chunks.source_owned_map(prior_plan) is not None and review_chunks.source_owned_map(plan) is not None)):
+        stage=None
     binding = None
     if ((stage is not None and isinstance(stage, dict)
          and stage.get("schema_version") == incremental_review.STAGE_VERSION)
             or (stage is None and incremental_mode == "on"
-                and plan["helper_revision"] in review_chunks.ALIGNED_REVISIONS)):
+                and (plan["helper_revision"] in review_chunks.ALIGNED_REVISIONS or resilient_recovery.enabled()))):
         try:
             reviewer_contract, _ = role_contracts(engine, "reviewer")
             binding = incremental_review.binding(
@@ -4217,6 +4641,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 stage, chapter["unit_id"], status["workflow_revision"])
             changed = stage["plan"] != plan or stage["binding"] != binding
             if changed:
+                reuse_audit = {}
                 old_hash = stage["plan"]["translation_sha256"]
                 if (old_hash != plan["translation_sha256"]
                         and stage["binding"] != binding
@@ -4225,11 +4650,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                     # partial review findings from a different context.
                     resumed, reused = incremental_review.rebase(
                         stage, plan, source, translation, binding, previous,
-                        chapter["unit_id"], status["workflow_revision"])
+                        chapter["unit_id"], status["workflow_revision"], audit=reuse_audit)
                 elif old_hash != plan["translation_sha256"]:
                     resumed, reused = incremental_review.rebase(
                         stage, plan, source, translation, binding, previous,
-                        chapter["unit_id"], status["workflow_revision"])
+                        chapter["unit_id"], status["workflow_revision"], audit=reuse_audit)
                 else:
                     resumed = incremental_review.new_stage(
                         plan, chapter["unit_id"], status["workflow_revision"],
@@ -4245,6 +4670,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                     "translation_sha256": plan["translation_sha256"],
                     "reused_clean_chunks": reused,
                     "total_chunks": len(plan["chunks"]),
+                    "reason_counts": reuse_audit.get("reasons", {}),
                     "at": clock()})
                 status["review_incremental_rebases"] = audits[-40:]
             elif stage["accepted_review_record_id"] is not None:
@@ -4276,6 +4702,21 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
                 stage, plan, chapter["unit_id"], status["workflow_revision"])
         except ValueError as exc:
             raise JobError("invalid durable reviewer checkpoint: " + str(exc)) from exc
+    if (resilient_recovery.enabled() and pressure
+            and stage["schema_version"]==incremental_review.STAGE_VERSION
+            and status.get("provider_retry",{}).get("code") in adaptive_budget.SIZE_RETRY_CODES):
+        # Existing stage and current memory/contract binding have already been validated.
+        pending=next((part for part in plan["chunks"] if part["id"] not in stage["completed"]),None)
+        if pending and max(pending["source_core"][1]-pending["source_core"][0],
+                           pending["translation_core"][1]-pending["translation_core"][0])>6000:
+            refined=review_chunks.refine_pending(plan,pending["id"],source,translation)
+            if refined is not None:
+                stage=incremental_review.refine_current(stage,refined,source,translation,binding,chapter["unit_id"],status["workflow_revision"])
+                status["review_refinement_summary"]={"unit_id":chapter["unit_id"],"preserved_parts":len(stage["completed"]),
+                    "old_parts":len(plan["chunks"]),"new_parts":len(refined["chunks"]),"reason":status["provider_retry"]["code"]}
+                plan=refined
+                store_json(stage_path,stage)
+                checkpoint(job_id,status,slug)
     from workflow.review_anchors import verify_evidence_anchors
     # Re-validate persisted evidence on every continuation, not just when first
     # received. A malicious or stale checkpoint cannot authorize a review.
@@ -4310,9 +4751,11 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
     next_part = next((p for p in plan["chunks"]
                       if p["id"] not in stage["completed"]), None)
     if next_part is not None:
-        system, user = review_chunk_prompt(
-            engine, slug, chapter, source, translation, next_part,
-            len(plan["chunks"]), previous)
+        id_map=review_chunks.source_owned_map(plan)
+        if id_map is None:
+            system,user=review_chunk_prompt(engine,slug,chapter,source,translation,next_part,len(plan["chunks"]),previous)
+        else:
+            system,user=review_chunk_prompt(engine,slug,chapter,source,translation,next_part,len(plan["chunks"]),previous,mapping=id_map)
         count = status.get("model_calls_started", 0)
         if type(count) is not int or count < 0:
             raise JobError("invalid durable model call counter")
@@ -4332,7 +4775,8 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             "style_guide_sha256": fingerprint(book / "style-guide.md"),
             "system_chars": len(system), "user_chars": len(user),
             "review_context": "independent_session",
-            "execution_mode": "bounded-review-chunks",
+            "execution_mode": ("id-addressed-review" if user.startswith("ID-addressed independent review ") else
+                               "compact-paired-review" if user.startswith("Independent paired review, ") else "bounded-review-chunks"),
             "review_helper_revision": plan["helper_revision"],
             "incremental_stage_version": stage["schema_version"],
             "reused_clean_chunks": len(stage.get("reused", {})),
@@ -4344,11 +4788,24 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "REVIEWER", system, user)
         try:
-            normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
+            if id_map is not None and user.startswith("ID-addressed independent review "):
+                try:
+                    normalized=addressed_review.compile_response(answer,source,translation,next_part,id_map,
+                        review_chunks.find_previous_for_chunk(previous,next_part,source))
+                except (ValueError,KeyError,TypeError) as exc:
+                    raise ModelError("reviewer evidence is invalid: addressed review "+str(exc)) from exc
+            elif compact_review.enabled() and user.startswith("Independent paired review, "):
+                normalized = compact_review.compile_response(answer, source, translation, next_part,
+                    review_chunks.find_previous_for_chunk(previous, next_part, source))
+                normalized = coherent_batches.normalize_block_addresses(normalized, source, translation)
+            else:
+                normalized = coherent_batches.normalize_block_addresses(answer, source, translation)
+        except compact_review.CompactReviewError as exc:
+            raise ModelError("compact reviewer evidence rejected: " + str(exc)) from exc
         except ValueError as exc:
             raise ModelError("reviewer evidence is invalid: " + str(exc)) from exc
         outcome, report, style = parse_literary_review(normalized)
-        reviewer_glossary = reviewer_glossary_proposals(answer)
+        reviewer_glossary = reviewer_glossary_proposals(normalized)
         if report.get("evidence_version") != 2:
             raise ModelError("automatic reviewer must return anchored v2 evidence")
         try:
@@ -4399,7 +4856,7 @@ def process_review_chunks(job_id: str, slug: str, status: dict,
             and len(stage["reused"]) >= len(stage["completed"])):
         raise JobError("incremental reviewer has no independently rechecked changed part")
     try:
-        combined = review_chunks.combine(stage)
+        combined = review_chunks.combine(stage,status=status)
     except (ValueError, KeyError, TypeError) as exc:
         raise JobError("review chunk aggregation rejected: " + str(exc)) from exc
     # The pinned workflow's full-unit validator has the FINAL word on source
@@ -4475,6 +4932,93 @@ def archive_incremental_reviewer_stage(slug: str, chapter: dict,
         return False
 
 
+def mapped_full_review_context(engine,slug,chapter,previous,source,target,status):
+    """Try a single complete independent source-owned review before partitioning.
+
+    No cached approval or omitted coverage. A failed/abandoned paid attempt
+    reserves the normal chunk fallback; never discard a durable staged part.
+    """
+    unit=chapter["unit_id"]
+    if (os.environ.get("BOOK_TRANSLATOR_MAPPED_FULL_REVIEW")!="on"
+            or not span_map.enabled() or len(source)>MAX_DIRECT_REVIEW_CHARS
+            or status.get("review_chunk_fallback_unit")==unit
+            or review_chunk_stage_path(slug,unit).is_file()):
+        return None
+    mapping=read_span_map(slug,unit,source,target)
+    if mapping is None or not addressed_review.supports_mapped(source,target,mapping):
+        return None
+    part={"id":"chunk-001","source_core":[0,len(source)],"source_window":[0,len(source)],
+          "translation_core":[0,len(target)],"translation_window":[0,len(target)]}
+    system,user=review_chunk_prompt(engine,slug,chapter,source,target,part,1,previous,mapping=mapping)
+    if not user.startswith("ID-addressed independent review "):
+        return None
+    guidance=("\nThis is the ENTIRE chapter, not a partial core. Compare every source-owned "
+              "span and its translation in order. Check chapter-wide continuity, voice, "
+              "references, structure and terminology across all spans, not only near prior "
+              "findings. Complete an exhaustive comparison of all five dimensions before "
+              "returning a report. Report all concrete discrepancies together, including "
+              "remaining prior issues and newly identified defects; no stylistic preference "
+              "findings, no fabricated PASS and no unverified prior closure.")
+    if len(system)+len(user)+len(guidance)>120_000:
+        return None
+    prior=review_chunks.find_previous_for_chunk(previous,part,source)
+    return system,user+guidance,part,mapping,prior
+
+
+def mapped_followup_context(engine,slug,chapter,previous,source,target,*,audit=None):
+    """Read canonical delta and both immutable maps; never infer scope."""
+    def fail(reason):
+        if audit is not None:audit["reason"]=reason
+        return None
+    if (not span_map.enabled() or not isinstance(previous,dict)
+            or previous.get("outcome")!="CORRECTIONS_REQUIRED"
+            or EPUB_MARKER_RE.search(source) or MARKDOWN_LINK_RE.search(source)):
+        return fail("unsupported_scope")
+    book=ROOT/"books"/slug
+    old_sha=previous.get("translation_sha256","")
+    if not isinstance(old_sha,str) or not HEX64.fullmatch(old_sha):
+        return fail("invalid_baseline_identity")
+    baseline=book/".workflow"/"review-baselines"/(old_sha+".md")
+    if not baseline.is_file():return fail("baseline_missing")
+    before=baseline.read_bytes().decode("utf-8")
+    if span_map.sha(before)!=old_sha:raise JobError("corrupt mapped review baseline")
+    old_map=read_span_map(slug,chapter["unit_id"],source,before)
+    new_map=read_span_map(slug,chapter["unit_id"],source,target)
+    if old_map is None or new_map is None:return fail("map_missing")
+    delta=json.loads(cli("review-delta",slug,str(chapter["number"]),"--json"))
+    if delta.get("advisory_only") is not True or delta.get("unit_id")!=chapter["unit_id"]:
+        raise JobError("mapped review delta identity mismatch")
+    try:
+        scoped=mapped_followup.scope(source,before,target,old_map,new_map,previous,
+            {"glossary":fingerprint(book/"glossary.md"),"style_guide":fingerprint(book/"style-guide.md")},
+            delta,_anchor_position,audit=audit)
+    except (ValueError,KeyError,TypeError):
+        return fail("scope_validation_failed")
+    if scoped is None:return None
+    data,sr,tr,prior=scoped
+    glossary,style=full_shared_context(book);meta=read_json(book/"metadata.json")
+    bibliographic={k:meta[k] for k in ("title","author","source_language","target_language")
+                   if isinstance(meta.get(k),str)}
+    system,_=role_contracts(engine,"reviewer")
+    system+="\n\n"+GLOSSARY_POLICY+addressed_review.response_contract(followup=True)
+    user=addressed_review.build_user(data,{"id":"mapped-followup"},1,bibliographic,
+        model_glossary_context(glossary,source_language=bibliographic.get("source_language","unspecified"),
+                               target_language=bibliographic.get("target_language","unspecified")),
+        style,prior,source,sr)
+    user+=("\nBOUNDED FOLLOW-UP: the immediately preceding independent full review covered every source and target "
+           "passage. Actual bytes outside the supplied source-owned span scope are unchanged, as are the "
+           "glossary and style revisions. Verify every current supplied span, every previous unresolved finding, "
+           "adjacent dependencies, and chapter-level continuity using the unchanged baseline and provided opening/closing context. "
+           "Use the before/after texts to catch regressions. Rows marked changed:false have identical previous "
+           "and current target bytes; their earlier text is not duplicated. If you need any other evidence, or an edit may affect "
+           "distant meaning, references, chronology, voice, structure or terminology, return only "
+           '{"outcome":"FULL_REQUIRED"} . This requests a fresh full independent review and is not PASS. '
+           "Never certify a check without adequate evidence.")
+    if audit is not None:audit["prompt_chars"]=len(user)
+    if len(user)>MAX_FOCUSED_CONTEXT_CHARS or len(system)+len(user)>120000:return fail("prompt_budget")
+    return system,user,sr,tr,prior
+
+
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     active = status["active"]
     _, _, chapters = chapter_data(slug)
@@ -4495,6 +5039,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     patch_mode = False
     structural_plan = None
     structural_helper = None
+    candidate_span_map = None
+    addressed_followup = None
+    mapped_full = None
     review_context = "independent_session"
     reviewed_glossary: list[dict] = []
     # Fully validate the model response before changing canonical artifacts.
@@ -4608,12 +5155,23 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                             status, unit_id, review_chunks.sha(source), proactive)
                         pinned_review_target = proactive
             chunked_review = (candidate_target is not None and
-                              (status.get("review_chunk_fallback_unit") == unit_id
+                              (compact_review.prefer_initial_chunks(source, candidate_target)
+                               or status.get("review_chunk_fallback_unit") == unit_id
                                or provider_partition or archived_stage
                                or pinned_review_target < review_chunks.TARGET_CHARS
                                or (coherent_batches.enabled() and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS)
                                or (len(source) <= MAX_DIRECT_REVIEW_CHARS
                                    and should_chunk_review(source, candidate_target, scoped_count))))
+        if (role == "reviewer" and chunked_review and transactional_quality.enabled()
+                and not force_full_review and not pressure and not scoped_count
+                and len(source) <= MAX_DIRECT_REVIEW_CHARS
+                and candidate_target is not None and previous_record):
+            scoped = focused_review_context(slug, chapter, previous_record, source, candidate_target)
+            stage_file = review_chunk_stage_path(slug, unit_id)
+            stage_current = (stage_file.is_file() and read_json(stage_file).get("plan", {}).get("translation_sha256")
+                             == review_chunks.sha(candidate_target))
+            if scoped and scoped.get("block_delta_version") == 1 and not stage_current:
+                chunked_review = False
         if (role == "reviewer" and not chunked_review
                 and len(source) <= MAX_DIRECT_REVIEW_CHARS
                 and previous_quality.get("evidence_version") == 2 and not force_full_review):
@@ -4622,6 +5180,27 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if focused_review_context(slug, chapter, previous_record, source,
                                       current_translation) is not None:
                 review_context = "bounded_context"
+        if (role=="reviewer" and span_map.enabled() and not force_full_review and not pressure
+                and not scoped_count and len(source)<=MAX_DIRECT_REVIEW_CHARS
+                and candidate_target is not None and previous_record):
+            stage_file=review_chunk_stage_path(slug,unit_id)
+            stage_current=(stage_file.is_file() and read_json(stage_file).get("plan",{}).get("translation_sha256")==review_chunks.sha(candidate_target))
+            if not stage_current:
+                scope_audit={}
+                addressed_followup=mapped_followup_context(engine,slug,chapter,previous_record,source,candidate_target,audit=scope_audit)
+                status["mapped_followup_audit"]={"unit_id":unit_id,**scope_audit}
+                if addressed_followup is not None:
+                    system,user=addressed_followup[:2]
+                    chunked_review=False
+                    review_context="bounded_context"
+        if (role=="reviewer" and addressed_followup is None and not pressure and not scoped_count
+                and candidate_target is not None):
+            mapped_full=mapped_full_review_context(engine,slug,chapter,previous_record,
+                                                   source,candidate_target,status)
+            if mapped_full is not None:
+                system,user=mapped_full[:2]
+                chunked_review=False
+                review_context="independent_session"
         # Record the exact pinned input revisions, not the revisions after a
         # successful memory update. Never persist source passages in logs.
         prompt_context = {
@@ -4635,6 +5214,10 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         }
         if role == "reviewer":
             prompt_context["review_context"] = review_context
+            if addressed_followup is not None:
+                prompt_context["execution_mode"]="mapped-id-followup"
+            elif mapped_full is not None:
+                prompt_context["execution_mode"]="mapped-id-full-review"
         if patch_mode:
             prompt_context["correction_mode"] = "anchored-patches"
         preserve_links = (role in {"translator", "corrector"} and not patch_mode
@@ -4684,6 +5267,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             status["model_calls_started"] = count + 1
             status["phase"] = "model-call-reserved"
             status["prompt_context"] = prompt_context
+            if mapped_full is not None:
+                # A restart, timeout or malformed response falls back to
+                # smaller independent parts; success clears both flags.
+                status["review_chunk_fallback_unit"]=unit_id
+                status["force_full_review_unit"]=unit_id
             checkpoint(job_id, status, slug)
             answer = complete_for_job(status, "REVIEWER" if role == "reviewer" else
                               "CORRECTOR" if role == "corrector" else "TRANSLATOR",
@@ -4691,6 +5279,27 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             if role == "reviewer":
                 translation_bytes = (ROOT / "books" / slug / chapter["translation_path"]
                                      ).read_bytes()
+                if mapped_full is not None:
+                    try:
+                        _,_,part,mapping,prior=mapped_full
+                        answer=addressed_review.compile_response(answer,source,
+                            translation_bytes.decode("utf-8"),part,mapping,prior)
+                    except (ValueError,KeyError,TypeError) as exc:
+                        raise ModelError("reviewer evidence is invalid: addressed review "+str(exc)) from exc
+                if addressed_followup is not None:
+                    try:
+                        response=json.loads(answer)
+                        if response=={"outcome":"FULL_REQUIRED"}:
+                            cli("release",slug,str(chapter["number"]),"--session-id",active["session_id"])
+                            status["active"]=None
+                            status["force_full_review_unit"]=unit_id
+                            status["phase"]="mapped-followup-full-requested"
+                            checkpoint(job_id,status,slug)
+                            return
+                        _,_,sr,tr,prior=addressed_followup
+                        answer=addressed_review.compile_tables(answer,source,translation_bytes.decode("utf-8"),sr,tr,prior)
+                    except (ValueError,KeyError,TypeError) as exc:
+                        raise ModelError("reviewer evidence is invalid: mapped follow-up "+str(exc)) from exc
                 try:
                     outcome, report, reviewed_style = checked_reviewer_response(
                         answer, review_context=review_context, source=source,
@@ -4698,6 +5307,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                         claim=owned)
                     reviewed_glossary = reviewer_glossary_proposals(answer)
                 except ModelError as exc:
+                    if addressed_followup is not None or mapped_full is not None:
+                        raise
                     # Provider/transport failures happen outside this parse/verify
                     # block and never trigger an extra paid call. Repair only a
                     # rejected report, not an infrastructure failure.
@@ -4739,6 +5350,22 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 status["glossary_conflicts_rejected"] = (
                     status.get("glossary_conflicts_rejected", 0) + rejected)
             path = ROOT / "books" / slug / chapter["translation_path"]
+            if span_map.enabled():
+                try:
+                    if structural_plan is not None:
+                        saved_stage=read_json(structural_stage_path(slug,unit_id))
+                        candidate_span_map=span_map.from_render(structural_plan,saved_stage["segments"],source,translated)
+                    elif patch_mode and correction_stage_path(slug,unit_id).is_file():
+                        old_text=path.read_bytes().decode("utf-8")
+                        old_map=read_span_map(slug,unit_id,source,old_text)
+                        if old_map is not None:
+                            candidate_span_map=span_map.after_patches(old_map,source,old_text,translated,
+                                read_json(correction_stage_path(slug,unit_id))["patches"],_anchor_position)
+                except (ValueError,KeyError,TypeError):
+                    # No inference from a failed mapping. Canonical content and
+                    # ordinary independent review remain authoritative.
+                    status["span_map_unavailable_count"]=status.get("span_map_unavailable_count",0)+1
+                    candidate_span_map=None
             existing_translation = None
             if role == "corrector":
                 existing_translation = (path.read_bytes().decode("utf-8") if patch_mode
@@ -4781,7 +5408,10 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             recoverable_code = helper.failure_code(str(exc))
             if str(exc) == "reviewer-anchored corrections intersect protected EPUB markers":
                 recoverable_code = "protected_review_anchor"
-            elif str(exc) == "all correction candidates were unsafe; no accepted patch":
+            elif str(exc) in {"all correction candidates were unsafe; no accepted patch",
+                              "corrector block reconstruction rejected",
+                              "transactional independent gate vetoed candidate",
+                              "transactional gate returned invalid evidence"}:
                 recoverable_code = "unsafe_correction_exhausted"
             if (recoverable_code is None
                     and str(exc).startswith("typed correction repair invalid: ")):
@@ -4852,6 +5482,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             quality_report.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
             cli("review-record", slug, str(chapter["number"]), "--outcome", outcome,
                 "--session-id", active["session_id"], "--quality-report", str(quality_report))
+        if os.environ.get("BOOK_TRANSLATOR_CORRECTION_LINEAGE_FEEDBACK")=="on":
+            history=status.setdefault("review_convergence_history",[])
+            history.append({"unit_id":unit_id,"model_calls":status.get("model_calls_started",0),
+                            **review_convergence.round_counts(report,previous_record,outcome)})
+            status["review_convergence_history"]=history[-40:]
         status.pop("memory_recheck_unit", None)
         if status.get("force_full_review_unit") == unit_id:
             status.pop("force_full_review_unit", None)
@@ -4881,7 +5516,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # worker claim. A glossary write invalidates a second style CAS.
             # Preserve style evidence for the next eligible reviewer claim.
             reviewed_style = merge_unique_correction_decisions(
-                status.get("pending_style", []), reviewed_style)
+                status.get("pending_style", []), reviewed_style,status=status)
             if saved_glossary:
                 status["pending_style"] = reviewed_style
             else:
@@ -4899,21 +5534,31 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             path.write_text(translated, encoding="utf-8")
         cli("accept-translation", slug, str(chapter["number"]),
             "--session-id", active["session_id"])
+        if candidate_span_map is not None:
+            persist_span_map(slug,unit_id,candidate_span_map,source,path.read_bytes().decode("utf-8"))
+            status["span_map_summary"]={"unit_id":unit_id,"spans":len(candidate_span_map["spans"]),
+                "translation_sha256":candidate_span_map["translation_sha256"]}
+        else:
+            status.pop("span_map_summary",None)
         saved = save_claim_bound_decisions(
             ROOT / "books" / slug, unit_id, active["session_id"],
             "glossary", proposed_glossary)
         status["memory_glossary_saved"] = status.get("memory_glossary_saved", 0) + saved
         status["pending_style"] = merge_unique_correction_decisions(
-            status.get("pending_style", []), proposed_style)
+            status.get("pending_style", []), proposed_style,status=status)
         if structural_plan is not None:
             structural_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("structural_segment_progress", None)
             status.get("structural_protocol_fallback_units", {}).pop(unit_id, None)
+            status.get(coherent_batches.CONTEXT_PROGRESS_KEY, {}).pop(unit_id, None)
         if role == "corrector" and patch_mode:
             # Remove staging ONLY after canonical translation acceptance and
             # claim-bound glossary reconciliation have succeeded.
             correction_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
+            status.pop("transactional_gate", None)
+            status.pop("transactional_case_approvals", None)
+            status.pop("correction_feedback", None)
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)
@@ -4928,10 +5573,13 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 status["memory_recheck_unit"] = unit_id
         status.pop("_memory_only_change", None)
     if role == "reviewer" and (len(source) > MAX_DIRECT_REVIEW_CHARS
-                              or status.get("review_chunk_fallback_unit") == unit_id):
+                              or (span_map.enabled() and chunked_review)
+                              or status.get("review_chunk_fallback_unit") == unit_id
+                              or (transactional_quality.enabled() and review_context == "bounded_context"
+                                  and review_chunk_stage_path(slug, unit_id).is_file())):
         # An archived v2 stage is not acceptance evidence; only clean,
         # content-identical windows may be reused after the next correction.
-        archived = (outcome == "CORRECTIONS_REQUIRED"
+        archived = (outcome == "CORRECTIONS_REQUIRED" and review_context != "bounded_context"
                     and archive_incremental_reviewer_stage(
                         slug, chapter, status, report))
         if not archived:

@@ -17,19 +17,24 @@ def provider(status: dict, metric: dict) -> None:
     role = metric.get("role")
     if role not in {"translator", "reviewer", "corrector", "orchestrator"}:
         return
-    row = _metrics(status)["api"].setdefault(role, {})
-    def add(key, amount):
-        prior = row.get(key, 0)
-        if type(prior) is not int or prior < 0:
-            raise ValueError("invalid execution counter")
-        row[key] = prior + amount
-    add("completed_calls", 1)
-    add("responses" if metric.get("outcome") == "response" else "errors", 1)
-    for field in ("duration_ms", "request_chars", "prompt_tokens",
-                  "completion_tokens", "total_tokens"):
-        value = metric.get(field)
-        if type(value) is int and value >= 0:
-            add(field, value)
+    result=_metrics(status)
+    rows=[result["api"].setdefault(role,{})]
+    requested=metric.get("requested_role")
+    if requested in {"translator","reviewer","corrector","orchestrator"}:
+        rows.append(result.setdefault("requested_api",{}).setdefault(requested,{}))
+    for row in rows:
+        def add(key, amount):
+            prior = row.get(key, 0)
+            if type(prior) is not int or prior < 0:
+                raise ValueError("invalid execution counter")
+            row[key] = prior + amount
+        add("completed_calls", 1)
+        add("responses" if metric.get("outcome") == "response" else "errors", 1)
+        for field in ("duration_ms", "request_chars", "prompt_tokens",
+                      "completion_tokens", "total_tokens"):
+            value = metric.get(field)
+            if type(value) is int and value >= 0:
+                add(field, value)
 
 def accepted(status: dict, role: str, outcome: str | None = None) -> None:
     keys = ({"translator": "translated", "corrector": "corrected",

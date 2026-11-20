@@ -74,6 +74,57 @@ def _json_payload(text: str) -> object:
     return json.loads(value)
 
 
+def normalize_optional_memory(text: str) -> tuple[str, int]:
+    """Filter only malformed optional proposals from a recognized live envelope.
+
+    Call at the model boundary, never when reading durable state, validating
+    correction intents or importing reviewer evidence from another session.
+    Missing/unrecognized core fields remain for the strict parser to reject.
+    No repaired or invented glossary/style decision is emitted.
+    """
+    try:
+        data = _json_payload(text)
+    except (ModelError, ValueError, TypeError, AttributeError):
+        return text, 0
+    if not isinstance(data, dict):
+        return text, 0
+    envelopes = (
+        {"translation", "glossary", "style_guide"},
+        {"segments", "glossary", "style_guide"},
+        {"patches", "glossary", "style_guide"},
+        {"outcome", "checks", "findings", "glossary", "style_guide"},
+        {"evidence_version", "outcome", "checks", "findings", "glossary", "style_guide"},
+        {"outcome", "checks", "findings", "style_guide"},
+        {"evidence_version", "outcome", "checks", "findings", "style_guide"},
+    )
+    if set(data) not in envelopes:
+        return text, 0
+    rejected = 0
+    for field, keys in (("glossary", _NAME_KEYS), ("style_guide", _STYLE_KEYS)):
+        if field not in data:
+            continue
+        raw = data[field]
+        if not isinstance(raw, list):
+            data[field] = []
+            rejected += 1
+            continue
+        good = []
+        # Bound validation work independently of the provider's response size.
+        rejected += max(0, len(raw) - 4 * MAX_ITEMS)
+        for item in raw[:4 * MAX_ITEMS]:
+            try:
+                _entries([item], keys, field)
+            except ModelError:
+                rejected += 1
+                continue
+            if len(good) >= MAX_ITEMS:
+                rejected += 1
+                continue
+            good.append(item)
+        data[field] = good
+    return (json.dumps(data, ensure_ascii=False), rejected) if rejected else (text, 0)
+
+
 def parse_translation(text: str) -> tuple[str, list[dict], list[dict]]:
     try:
         data = _json_payload(text)

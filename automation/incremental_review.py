@@ -7,7 +7,9 @@ No literary content is stored in the added checkpoint metadata.
 """
 from __future__ import annotations
 
+import os
 import re
+from collections import Counter
 import review_chunks
 
 STAGE_VERSION = 2
@@ -47,7 +49,7 @@ def _validate_binding(value: dict) -> None:
 
 
 def new_stage(plan: dict, unit_id: str, workflow_revision: str, current_binding: dict) -> dict:
-    if plan.get("helper_revision") not in review_chunks.ALIGNED_REVISIONS:
+    if plan.get("helper_revision") not in review_chunks.PLAN_REVISIONS:
         raise ValueError("incremental reviewer requires protected marker alignment")
     _validate_binding(current_binding)
     return {
@@ -77,10 +79,9 @@ def validate_shape(stage: dict, unit_id: str, revision: str) -> None:
     _validate_binding(stage["binding"])
     plan = stage["plan"]
     if (not isinstance(plan, dict)
-            or set(plan) != {"schema_version", "helper_revision", "source_sha256",
-                            "translation_sha256", "chunks"}
+            or set(plan) != review_chunks.plan_fields(plan)
             or plan["schema_version"] != review_chunks.SCHEMA_VERSION
-            or plan["helper_revision"] not in review_chunks.ALIGNED_REVISIONS
+            or plan["helper_revision"] not in review_chunks.PLAN_REVISIONS
             or not all(isinstance(plan[key], str) and HEX64.fullmatch(plan[key])
                        for key in ("source_sha256", "translation_sha256"))
             or not isinstance(plan["chunks"], list)
@@ -181,7 +182,7 @@ def _old_report_matches(stage: dict, previous: dict | None) -> bool:
 
 def rebase(stage: dict, new_plan: dict, source: str, translation: str,
            current_binding: dict, previous: dict | None,
-           unit_id: str, revision: str) -> tuple[dict, int]:
+           unit_id: str, revision: str, *, audit: dict | None = None) -> tuple[dict, int]:
     """Return fresh stage, reusing only exact, clean, context-identical windows.
 
     A saved complete stage is reusable only if the canonical *last rejected*
@@ -192,28 +193,74 @@ def rebase(stage: dict, new_plan: dict, source: str, translation: str,
     _validate_binding(current_binding)
     review_chunks.validate_plan(new_plan, source, translation)
     fresh = new_stage(new_plan, unit_id, revision, current_binding)
-    if (stage["plan"]["source_sha256"] != new_plan["source_sha256"]
-            or stage["plan"]["translation_sha256"] == new_plan["translation_sha256"]
-            or any(stage["binding"][key] != current_binding[key]
-                   for key in ("glossary_sha256", "style_guide_sha256",
-                               "reviewer_contract_sha256"))):
-        return fresh, 0
+    reasons = Counter()
+    def finish(reason=None):
+        if reason:
+            reasons[reason] += len(new_plan["chunks"])
+        if audit is not None:
+            audit.update({"reused": len(fresh["completed"]), "reasons": dict(reasons)})
+        return fresh, len(fresh["completed"])
+
+    if stage["plan"]["source_sha256"] != new_plan["source_sha256"]:
+        return finish("source_changed")
+    if stage["plan"]["translation_sha256"] == new_plan["translation_sha256"]:
+        return finish("same_artifact")
+    for key in ("glossary_sha256", "style_guide_sha256", "reviewer_contract_sha256"):
+        if stage["binding"][key] != current_binding[key]:
+            return finish(key + "_changed")
     archive_record = stage["accepted_review_record_id"]
     if archive_record is not None:
         if not _old_report_matches(stage, previous):
-            return fresh, 0
+            return finish("archive_ledger_mismatch")
     elif stage["binding"]["previous_record_id"] != current_binding["previous_record_id"]:
-        return fresh, 0
+        return finish("previous_record_changed")
+
+    reuse_closed = (os.environ.get("BOOK_TRANSLATOR_REUSE_CLOSED_REVIEW") == "on"
+                    and archive_record is not None
+                    and previous["quality_report"].get("context") == "independent_session")
+    if reuse_closed:
+        # Do not reuse local literary judgments across known nonlocal risks.
+        # The prior full record remains immutable, and ordinary full comparison
+        # is still required for changed shared memory or cross-scope effects.
+        for finding in previous["quality_report"]["findings"]:
+            if not finding["resolved"] and (
+                    finding["category"] in {"structure", "voice", "terminology"}
+                    or finding["severity"] == "critical"
+                    or (finding["severity"] != "minor"
+                        and finding["category"] in {"referent", "register", "style"})):
+                return finish("nonlocal_prior_finding")
     old_by_id = {item["id"]: item for item in stage["plan"]["chunks"]}
+    mapped = (review_chunks.source_owned_map(stage["plan"]) is not None
+              and review_chunks.source_owned_map(new_plan) is not None)
+    old_by_source = {(tuple(item["source_core"]),tuple(item["source_window"])):item
+                     for item in stage["plan"]["chunks"]} if mapped else {}
+    def relative_target_core(item):
+        start=item["translation_window"][0]
+        return [i-start for i in item["translation_core"]]
     for part in new_plan["chunks"]:
-        key = part["id"]
-        old = old_by_id.get(key)
-        evidence = stage["completed"].get(key)
-        if (old is None or evidence is None or evidence["outcome"] != "PASS"
-                or evidence["report"].get("findings") != []
-                or old["source_core"] != part["source_core"]
+        key=part["id"]
+        old=(old_by_source.get((tuple(part["source_core"]),tuple(part["source_window"])))
+             if mapped else old_by_id.get(key))
+        old_key=old["id"] if old is not None else None
+        evidence=stage["completed"].get(old_key)
+        if old is None or evidence is None:
+            reasons["no_matching_window"] += 1
+            continue
+        if evidence["outcome"] != "PASS":
+            reasons["prior_window_rejected"] += 1
+            continue
+        findings = evidence["report"].get("findings")
+        if findings != [] and not (
+                reuse_closed and isinstance(findings, list)
+                and all(isinstance(f, dict) and f.get("resolved") is True
+                        and isinstance(f.get("resolves"), dict) for f in findings)):
+            reasons["prior_findings_not_reusable"] += 1
+            continue
+        if (old["source_core"] != part["source_core"]
                 or old["source_window"] != part["source_window"]
-                or stage["windows"][key] != window_hashes(part, source, translation)):
+                or relative_target_core(old) != relative_target_core(part)
+                or stage["windows"][old_key] != window_hashes(part,source,translation)):
+            reasons["window_or_context_changed"] += 1
             continue
         # Every *current* previous unresolved finding must be freshly checked,
         # even if it is in an otherwise byte-identical source/target window.
@@ -221,13 +268,53 @@ def rebase(stage: dict, new_plan: dict, source: str, translation: str,
             previous_findings = review_chunks.find_previous_for_chunk(
                 previous, part, source)
         except (ValueError, KeyError, TypeError):
+            reasons["prior_anchor_invalid"] += 1
             continue
         if previous_findings:
+            reasons["current_prior_recheck_required"] += 1
             continue
+        if findings:
+            # Old resolved rechecks have already been stored in the exact
+            # canonical previous record. Replaying them would refer to an
+            # older record and incorrectly claim new rechecks. Retain the
+            # observed clean window and its archive provenance, not the old
+            # recheck events. No omitted current finding can pass this branch.
+            evidence = {**evidence, "report": {**evidence["report"], "findings": []}}
         fresh["completed"][key] = evidence
-        fresh["windows"][key] = stage["windows"][key]
+        fresh["windows"][key] = stage["windows"][old_key]
         fresh["reused"][key] = {
             "from_translation_sha256": stage["plan"]["translation_sha256"],
             "from_record_id": archive_record,
         }
-    return fresh, len(fresh["completed"])
+    return finish()
+
+
+def refine_current(stage,new_plan,source,translation,current_binding,unit_id,revision):
+    """Same accepted bytes and context only. Preserve exact already-reviewed
+    windows, including their real findings and prior lineage. New split parts
+    never inherit evidence. No reuse across changed artifacts here.
+    """
+    validate_current(stage,stage["plan"],source,translation,current_binding,unit_id,revision)
+    review_chunks.validate_plan(new_plan,source,translation)
+    if stage["accepted_review_record_id"] is not None:
+        raise ValueError("cannot refine recorded review")
+    if new_plan["helper_revision"]!=review_chunks.REFINED_REVISION:
+        raise ValueError("expected deterministic refined review plan")
+    fresh=new_stage(new_plan,unit_id,revision,current_binding)
+    def identity(part):
+        return tuple(tuple(part[k]) for k in ("source_core","translation_core","source_window","translation_window"))
+    by_window={identity(p):p for p in new_plan["chunks"]}
+    for old in stage["plan"]["chunks"]:
+        key=old["id"]
+        if key not in stage["completed"]:
+            continue
+        match=by_window.get(identity(old))
+        if match is None:
+            raise ValueError("refinement would discard completed reviewer evidence")
+        dest=match["id"]
+        fresh["completed"][dest]=stage["completed"][key]
+        fresh["windows"][dest]=stage["windows"][key]
+        if key in stage["reused"]:
+            fresh["reused"][dest]=stage["reused"][key]
+    validate_current(fresh,new_plan,source,translation,current_binding,unit_id,revision)
+    return fresh

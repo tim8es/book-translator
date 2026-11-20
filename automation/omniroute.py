@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import json
 import os
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -110,8 +113,17 @@ def complete(role: str, system: str, user: str) -> str:
     except HTTPError as exc:
         if exc.code in {408, 429, 500, 502, 503, 504}:
             delay = exc.headers.get("Retry-After") if exc.headers else None
-            seconds = (min(int(delay), 3600)
-                       if isinstance(delay, str) and delay.isdecimal() else None)
+            seconds = None
+            if isinstance(delay,str):
+                try:
+                    if delay.isdecimal():
+                        seconds=min(int(delay),86400)
+                    else:
+                        until=parsedate_to_datetime(delay)
+                        if until.tzinfo is not None:
+                            seconds=min(86400,max(0,math.ceil((until-datetime.now(timezone.utc)).total_seconds())))
+                except (ValueError,TypeError,OverflowError):
+                    seconds=None
             raise TransientModelError(
                 f"model HTTP status {exc.code}", code=f"http_{exc.code}",
                 retry_after_seconds=seconds) from None

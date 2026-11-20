@@ -105,9 +105,16 @@ def provider_pressure(status: dict, unit_id: str, role: str) -> int:
             or retry.get("role") != role or retry.get("code") not in SIZE_RETRY_CODES):
         return 0
     attempts = retry.get("attempts")
-    if type(attempts) is not int or attempts < 2:
+    if type(attempts) is not int or attempts < 1:
         return 0
     metric = status.get("provider_call_metric")
+    if attempts == 1:
+        if (os.environ.get("BOOK_TRANSLATOR_COMPACT_REVIEW") == "on" and role == "reviewer"
+                and isinstance(metric, dict) and metric.get("unit_id") == unit_id
+                and metric.get("role") == role and metric.get("outcome") == retry["code"]
+                and type(metric.get("duration_ms")) is int and metric["duration_ms"] >= 120_000):
+            return 1
+        return 0
     if (isinstance(metric, dict) and metric.get("unit_id") == unit_id
             and metric.get("role") == role and metric.get("outcome") == retry["code"]
             and type(metric.get("duration_ms")) is int

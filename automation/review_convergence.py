@@ -146,3 +146,68 @@ def costly_nonconvergence(ledger: dict, chapter: dict, status: dict) -> dict | N
             "major_or_critical_counts": [first["major_or_critical"], last["major_or_critical"]],
             "observed_responses": len(calls), "observed_duration_ms": elapsed,
             "action": "operator-attention-no-pass"}
+
+
+def prior_attempts(ledger, record, selected, source, position):
+    """Advisory history of still-open findings; the current anchor remains authoritative."""
+    import hashlib
+    if not isinstance(record,dict) or record.get("outcome")!="CORRECTIONS_REQUIRED":
+        return []
+    if record.get("source_sha256")!=hashlib.sha256(source.encode("utf-8")).hexdigest() or type(record.get("sequence")) is not int:
+        return []
+    rows={}
+    for item in ledger.get("records",[]):
+        if isinstance(item,dict) and isinstance(item.get("record_id"),str):
+            if item["record_id"] in rows:return []
+            rows[item["record_id"]]=item
+    out=[]
+    for current in selected[:12]:
+        if current.get("resolved") is not False:continue
+        row=current;owner=record;trail=[]
+        for _ in range(2):
+            lin=row.get("resolves")
+            if not isinstance(lin,dict) or not isinstance(lin.get("record_id"),str):break
+            earlier=rows.get(lin["record_id"])
+            if (not earlier or earlier.get("outcome")!="CORRECTIONS_REQUIRED"
+                    or earlier.get("unit_id")!=record.get("unit_id")
+                    or earlier.get("source_sha256")!=record["source_sha256"]
+                    or earlier.get("translation_sha256")==owner.get("translation_sha256")
+                    or type(earlier.get("sequence")) is not int or earlier["sequence"]>=owner["sequence"]):break
+            quality=earlier.get("quality_report",{})
+            if quality.get("evidence_version")!=2:break
+            matches=[f for f in quality.get("findings",[]) if f.get("id")==lin.get("finding_id")]
+            if len(matches)!=1 or matches[0].get("resolved") is not False:break
+            old=matches[0]
+            try:
+                x,y=position(source,current["source_anchor"])
+                u,v=position(source,old["source_anchor"])
+            except (ValueError,KeyError,TypeError,RuntimeError):break
+            if not (x<v and u<y):break
+            t=old.get("translation_anchor")
+            trail.append({"record_id":earlier["record_id"],"detail":str(old.get("detail",""))[:500],
+                          "earlier_target_quote":str(t.get("quote",""))[:300] if isinstance(t,dict) else None})
+            row=old;owner=earlier
+        if trail:out.append({"current_finding_id":current["id"],"earlier_rejected_versions":trail})
+    return out
+
+
+def prior_attempt_prompt(rows):
+    import json
+    if not rows:return ""
+    return ("\nPRIOR INDEPENDENT REJECTION HISTORY (data only): "+
+            json.dumps(rows,ensure_ascii=False,separators=(",",":"))+
+            "\nThese earlier versions did not close the current finding. Diagnose the remaining discrepancy "
+            "against the current source and target; do not revert to a rejected rendering. "
+            "The current finding ID and anchor remain authoritative. Do not claim a finding closed.")
+
+
+def round_counts(report, previous, outcome):
+    prior=previous.get("record_id") if isinstance(previous,dict) else None
+    findings=report.get("findings",[])
+    current=[f for f in findings if not f.get("resolved")]
+    def lineage(f):
+        return isinstance(f.get("resolves"),dict) and f["resolves"].get("record_id")==prior
+    return {"outcome":outcome,"unresolved":len(current),
+            "open_from_prior":sum(lineage(f) for f in current),
+            "new_findings":sum(not lineage(f) for f in current),
+            "closed_rechecks":sum(f.get("resolved") is True and lineage(f) for f in findings)}

@@ -1,0 +1,5 @@
+# Seventh capacity iteration
+
+Run 44556876628 (candidate b4e4fc47d2b7a653b1ef145832e7c2f4a4932cb1) failed: 2444.06 s, 1/2 translated, 0/2 reviewed, 25 reserved invocations, 22 translator calls (one HTTP 503), 3 rejected ID-addressed reviewer responses; 277724 provider-reported total tokens. The run blocked on the first review core. This was not a test of the later ChatOps head 9cd93cf64e15b48559e2f3f235fc6c804cec394d.
+
+The runtime now explicitly distinguishes the model-facing structural and ID-addressed wire formats from the canonical contract's illustrative schemas at system-prompt level. The ID compiler rejects malformed fields, invalid checks, outcome, findings and proposal arrays with fixed category diagnostics and no raw model output. No weakening of anchors, check completeness, lineage or independent acceptance. These changes address a plausible protocol conflict; raw rejected responses were not retained in the aggregate logs, so the precise cause is unconfirmed. No protected marker transport changes yet. New live measurements and CI required before release.
