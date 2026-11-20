@@ -173,6 +173,48 @@ class ExternalAnchorCoverageTests(unittest.TestCase):
                 with self.assertRaises(book.BookError):
                     book.read_epub(self.path)
 
+    def test_collapsible_author_notes_are_fully_extracted_and_audited(self):
+        html = ('<html><body><h2>Chapter Notes</h2>'
+                '<details><summary>Content advisory.</summary>'
+                'An explanation appears here.'
+                '<p>More context to preserve.</p></details>'
+                '<p>Story follows.</p></body></html>')
+        fixture(self.path, html)
+        original = self.path.read_bytes()
+        chapters, _ = book.read_epub(self.path)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(self.audit(chapters)["state"], "verified")
+        content = chapters[0].content
+        snippets = ("Chapter Notes", "Content advisory.", "An explanation appears here.",
+                    "More context to preserve.", "Story follows.")
+        for excerpt in snippets:
+            self.assertIn(excerpt, content)
+        self.assertEqual([content.index(x) for x in snippets],
+                         sorted(content.index(x) for x in snippets))
+        output = render_markdown_xhtml("Notes", content, language="ru")
+        root = ET.fromstring(output)
+        generated_text = " ".join(root.itertext())
+        for excerpt in snippets:
+            self.assertIn(excerpt, generated_text)
+
+    def test_malformed_collapsible_notes_still_fail_source_coverage(self):
+        cases = [
+            "<details><p>Missing summary.</p></details>",
+            "<summary>Orphaned summary.</summary>",
+            "<details><summary>One</summary><summary>Two</summary></details>",
+            "<details onclick='run()'><summary>Text</summary>Body</details>",
+            "<details><summary>Outer</summary><details><summary>Inner</summary>Body</details></details>",
+        ]
+        for body in cases:
+            with self.subTest(body=body[:28]):
+                fixture(self.path, "<html><body>" + body + "</body></html>")
+                try:
+                    chapters, _ = book.read_epub(self.path)
+                except book.BookError:
+                    continue
+                with self.assertRaisesRegex(SourceCoverageError, "summary|details"):
+                    self.audit(chapters)
+
     def test_relative_unsafe_and_complex_links_fail_closed(self):
         for href in ("chapter2.xhtml#part", "javascript:alert(1)", "https://example.org/a[b]"):
             with self.subTest(href=href):
