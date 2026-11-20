@@ -492,42 +492,42 @@ historical evidence in the normal way.
 
 For user-approved changes to a previously reviewed translation, the Orchestrator
 must not edit a reviewed artifact and relabel its old evidence as current. If the
-target canonical workflow includes the generic \`reopen-reviewed\` command,
-prepare a book-local \`.workflow/editorial-reopen.json\` plan and a separate
-\`.workflow/workflow-upgrade-evidence.json\` bridge for **unchanged** reviewed
+target canonical workflow includes the generic `reopen-reviewed` command,
+prepare a book-local `.workflow/editorial-reopen.json` plan and a separate
+`.workflow/workflow-upgrade-evidence.json` bridge for **unchanged** reviewed
 units. Both bind the original source hash, original workflow revision, exact
 target workflow revision and pre-upgrade progress/ledger Git blob identities.
 
-The editorial plan has \`schema_version=1\`,
-\`kind="reopen-edited-reviewed-units"\`, \`book_slug\`,
-\`source_workflow_revision\`, \`target_workflow_revision\`,
-\`source_book_sha256\`, \`baseline_progress_blob_sha\`,
-\`baseline_ledger_blob_sha\`, and a \`units\` array. Each unit entry has
-\`unit_id\`, \`source_sha256\`, \`original_translation_sha256\`,
-\`candidate_translation_blob_sha\` (Git blob SHA-1, **not** a text SHA-256),
-and \`original_pass_record_id\`. The bridge covers every other unit exactly.
+The editorial plan has `schema_version=1`,
+`kind="reopen-edited-reviewed-units"`, `book_slug`,
+`source_workflow_revision`, `target_workflow_revision`,
+`source_book_sha256`, `baseline_progress_blob_sha`,
+`baseline_ledger_blob_sha`, and a `units` array. Each unit entry has
+`unit_id`, `source_sha256`, `original_translation_sha256`,
+`candidate_translation_blob_sha` (Git blob SHA-1, **not** a text SHA-256),
+and `original_pass_record_id`. The bridge covers every other unit exactly.
 Obtain these identities from actual pre-upgrade repository state. Do not
 fabricate or backfill historical evidence.
 
 Perform a read-only check first:
 
-\`\`\`bash
+```bash
 python scripts/book.py reopen-reviewed <book-slug> --dry-run
-\`\`\`
+```
 
 After confirming no active claims, finalized-output/source-promotion marker,
-wave, or conflicting operation, apply the same command without \`--dry-run\`.
+wave, or conflicting operation, apply the same command without `--dry-run`.
 It checks every unit's source, accepted hash, most recent historical PASS,
 candidate blob, unchanged PASS adoption, and exact baseline before one
-compare-and-swap update to \`progress.json\`. Selected units become
-\`extracted\` and lose **only** the stale \`translation_acceptance\`; the
+compare-and-swap update to `progress.json`. Selected units become
+`extracted` and lose **only** the stale `translation_acceptance`; the
 append-only review ledger and source are untouched. A second invocation fails
 closed because the baseline has changed.
 
 For each reopened unit, the normal Translator claim and
-\`accept-translation\` must accept the exact edited candidate, and a different,
+`accept-translation` must accept the exact edited candidate, and a different,
 independent Reviewer must compare source and translation and record a fresh
-PASS before \`accept-review\` restores \`reviewed\`. The old PASS is historical
+PASS before `accept-review` restores `reviewed`. The old PASS is historical
 and never automatically satisfies the new candidate. Do not run final EPUB
 until the entire book is back to current PASS and canonical validation passes.
 
