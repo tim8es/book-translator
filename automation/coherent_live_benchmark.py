@@ -143,7 +143,10 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
                           "mapped_followup_audit":status.get("mapped_followup_audit"),
                           "span_map":status.get("span_map_summary"),
                           "span_map_unavailable":status.get("span_map_unavailable_count",0),
-                          "correction_mode":prompt.get("correction_mode")},ensure_ascii=False),flush=True)
+                          "correction_mode":prompt.get("correction_mode"),
+                          "structural_stage":status.get("structural_segment_progress"),
+                          "structural_batch_yield":(status.get("structural_batch_yield") or [])[-1:],
+                          },ensure_ascii=False),flush=True)
         if result.returncode:
             reason = "runner-exit-" + str(result.returncode)
             break
@@ -197,6 +200,7 @@ def run_arm(home, source, mode, cap, *, environment=None, wall_budget_seconds=No
             "context_batch_profile":status.get("structural_full_context_batch_profiles",{}),
             "last_staged_source_spans":status.get("structural_segment_progress",{}),
             "provider_backoffs_seen":provider_failures,
+            "structural_batch_yield":status.get("structural_batch_yield",[]),
             "sections":len(chapters),"reviewed":sum(c["status"]=="reviewed" for c in chapters),
             "epub_verified":complete,"last_error_code":status.get("last_error_code"),"preflight_diagnostic":preflight}
 

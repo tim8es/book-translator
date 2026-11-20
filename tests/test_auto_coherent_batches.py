@@ -77,6 +77,23 @@ class CoherentTests(unittest.TestCase):
         more=coherent.structural_selection(Helper,plan,stage,24,full_chapter=True)
         self.assertNotEqual(one[0]["id"],more[0]["id"])
 
+    def test_sparse_valid_output_shrinks_next_batch_without_erasing_stage(self):
+        status={}
+        chapter="chapter-000001"
+        source="hash"
+        completed={"span-001":"Переведённое предложение."}
+        changed=coherent.adjust_after_sparse_response(status,chapter,source,8,2)
+        self.assertTrue(changed)
+        self.assertEqual(coherent.context_batch_caps(status,chapter,source),(3000,4))
+        self.assertFalse(coherent.adjust_after_sparse_response(status,chapter,source,4,3))
+        self.assertEqual(coherent.context_batch_caps(status,chapter,source),(3000,4))
+        self.assertTrue(coherent.adjust_after_sparse_response(status,chapter,source,4,1))
+        self.assertEqual(coherent.context_batch_caps(status,chapter,source),(1800,2))
+        self.assertEqual(completed,{"span-001":"Переведённое предложение."})
+        for req,returned in [(0,1),(3,0),(2,3)]:
+            with self.assertRaises(ValueError):
+                coherent.adjust_after_sparse_response(status,chapter,source,req,returned)
+
     def test_full_context_progress_rejects_corrupt_caps(self):
         status={coherent.CONTEXT_PROGRESS_KEY:{"u":{
             "source_sha256":"hash","max_source_chars":900000,"max_spans":8}}}

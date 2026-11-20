@@ -2276,6 +2276,29 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                                                           new_style,status=status)
         stage.update({"segments": combined, "glossary": merged_glossary,
                       "style_guide": merged_style})
+        # Metrics contain numeric counts only; no prompts, literary text,
+        # provider configuration or model-generated answer bytes.
+        accepted_ids = set(translated)
+        requested_chars = sum(len(item["source"]) for item in selected)
+        accepted_chars = sum(len(item["source"]) for item in selected
+                             if item["id"] in accepted_ids)
+        history = status.setdefault("structural_batch_yield", [])
+        if not isinstance(history, list):
+            raise JobError("invalid structural batch metrics history")
+        history.append({
+            "unit_id": chapter["unit_id"],
+            "requested_ids": len(selected),
+            "accepted_ids": len(translated),
+            "requested_source_chars": requested_chars,
+            "accepted_source_chars": accepted_chars,
+            "system_plus_user_chars": len(system)+len(user),
+            "source_window_chars": chapter_audit.get("source_window_chars",0),
+        })
+        status["structural_batch_yield"] = history[-60:]
+        if full_context:
+            coherent_batches.adjust_after_sparse_response(
+                status,chapter["unit_id"],plan["source_sha256"],
+                len(selected),len(translated))
         store_json(stage_path, stage)
         status["structural_segment_progress"] = {
             "unit_id": chapter["unit_id"],

@@ -49,6 +49,21 @@ def shrink_context_batch(status, unit_id, source_sha256):
     }
     return False
 
+def adjust_after_sparse_response(status, unit_id, source_sha256, requested, accepted):
+    """Bound repeated incomplete *valid* output without rejecting accepted IDs.
+
+    A model may legally return only part of a requested ID set. This signal
+    decreases future batch sizes, while every accepted source ID is checkpointed.
+    """
+    if (type(requested) is not int or type(accepted) is not int
+            or not 1 <= accepted <= requested):
+        raise ValueError("invalid structural response coverage counters")
+    if requested >= 4 and accepted * 2 <= requested:
+        shrink_context_batch(status, unit_id, source_sha256)
+        return True
+    return False
+
+
 def enabled():
     value = os.environ.get("BOOK_TRANSLATOR_COHERENT_BATCHES", "off")
     if value not in {"on", "off"}:
