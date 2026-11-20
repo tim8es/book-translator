@@ -2169,10 +2169,12 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
                        "prompt_context": prompt_context})
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "TRANSLATOR", system, user)
+        protocol_repair_used = False
         try:
             translated, new_glossary, new_style = helper.parse_batch(
                 answer, [item["id"] for item in selected])
         except ValueError as exc:
+            protocol_repair_used = True
             code = helper.protocol_failure_code(str(exc))
             if code is None:
                 raise ModelError("structural translator rejected model output: "
@@ -2295,7 +2297,7 @@ def process_structural_translation(job_id: str, slug: str, status: dict,
             "source_window_chars": chapter_audit.get("source_window_chars",0),
         })
         status["structural_batch_yield"] = history[-60:]
-        if full_context:
+        if full_context and not protocol_repair_used:
             coherent_batches.adjust_after_sparse_response(
                 status,chapter["unit_id"],plan["source_sha256"],
                 len(selected),len(translated))
