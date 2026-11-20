@@ -83,6 +83,49 @@ class FullChapterContextTests(unittest.TestCase):
         self.assertTrue(evidence["previously_translated_segments"])
         self.assertEqual(prior,{item["id"]:"Русский текст. "*60 for item in ordered[:35]})
 
+    def test_focused_context_reduces_repeated_input_without_losing_source(self):
+        # Compare the legacy 56k-window request against the same source-bound
+        # active IDs in the focused rolling-window design. No provider required.
+        paragraphs = [f"Scene {i:03d}: " + ("The speaker remembers the key and door. "*32)
+                      for i in range(75)]
+        source="\n\n".join(paragraphs)
+        plan=book_runner.bounded_source_plan(source,helper)
+        ordered=helper.spans(plan)
+        completed={x["id"]:"Переведённая предыдущая сцена. "*10 for x in ordered[:30]}
+        selected=helper.next_spans(plan,completed,limit=24)
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT":"on"}):
+            focused, audit=chapter_context.append(helper,plan,source,completed,selected,
+                                                   "system","selected original")
+            with patch.object(chapter_context,"MAX_SOURCE_CHARS",65000), \
+                 patch.object(chapter_context,"WINDOW_SOURCE_CHARS",56000), \
+                 patch.object(chapter_context,"PREVIOUS_TARGET_CHARS",15000):
+                old, legacy=chapter_context.append(helper,plan,source,completed,selected,
+                                                   "system","selected original")
+        self.assertLessEqual(audit["source_window_chars"],16000)
+        self.assertGreater(legacy["source_window_chars"],audit["source_window_chars"])
+        self.assertLess(len(focused),len(old)*0.60)
+        focused_evidence=json.loads(focused.rsplit("\n",1)[-1])
+        first,last=focused_evidence["context_source_range"]
+        self.assertEqual(focused_evidence["original_context"],source[first:last])
+        intro_end=focused_evidence["chapter_opening_source_range"][1]
+        self.assertEqual(focused_evidence["chapter_opening"],source[:intro_end])
+        self.assertTrue(set(focused_evidence["selected_segment_ids"]) ==
+                        {item["id"] for item in selected})
+        self.assertGreater(audit["chapter_opening_chars"],0)
+        # Persistent translation evidence and selected source are untouched.
+        self.assertEqual(completed,{x["id"]:"Переведённая предыдущая сцена. "*10
+                                    for x in ordered[:30]})
+
+    def test_short_chapter_still_gets_full_original(self):
+        source,plan,ordered=self.fixture()
+        with patch.dict(os.environ,{"BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT":"on"}):
+            prompt, audit=chapter_context.append(helper,plan,source,{},ordered,"system","user")
+        self.assertEqual(audit["mode"],"full")
+        self.assertEqual(audit["source_window_chars"],len(source))
+        self.assertEqual(audit["chapter_opening_chars"],0)
+        evidence=json.loads(prompt.rsplit("\n",1)[-1])
+        self.assertEqual(evidence["original_context"],source)
+
     def test_large_chapter_later_window_keeps_last_context(self):
         paragraphs=[("A great deal of original narrative and dialogue. "*18)
                     for _ in range(180)]

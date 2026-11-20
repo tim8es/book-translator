@@ -10,10 +10,13 @@ import hashlib
 import json
 import os
 
-MAX_SOURCE_CHARS = 65000
+# Preserve chapter continuity without retransmitting an entire long chapter
+# on every request. These are bounded input-character heuristics, not tokens.
+MAX_SOURCE_CHARS = 16000
 MAX_PROMPT_CHARS = 145000
-WINDOW_SOURCE_CHARS = 56000
-PREVIOUS_TARGET_CHARS = 15000
+WINDOW_SOURCE_CHARS = 16000
+PREVIOUS_TARGET_CHARS = 5000
+CHAPTER_OPENING_CHARS = 1400
 ENABLED = "BOOK_TRANSLATOR_FULL_CHAPTER_CONTEXT"
 
 def enabled():
@@ -116,15 +119,20 @@ def append(helper, plan, source, stage, selected, system, user):
                    not isinstance(v,str) or not v.strip() for k,v in stage.items())):
         raise ValueError("invalid completed/selected chapter spans")
 
-    # On large chapters translate bounded batches (typically ~12k source chars
-    # with coherent scheduling); give each batch ~56k of overlapping original
-    # prose. The selected source itself remains present in the normal prompt.
+    # Selected source IDs remain in the canonical task. A bounded overlapping
+    # excerpt plus the opening and nearby previously translated source spans
+    # preserves narrative continuity with less duplicated input.
     mode = "full" if len(source) <= MAX_SOURCE_CHARS else "window"
     initial_length = len(source) if mode=="full" else min(len(source),WINDOW_SOURCE_CHARS)
     length = initial_length
     while True:
         start,end,first,last = _window(source,offsets,active_ids,length)
         previous = _previous(ordered,offsets,stage,first,start,end)
+        # Source-only chapter opening disambiguates recurring characters and
+        # narrative voice when the moving local context no longer includes it.
+        # Never repeat opening bytes already inside the context window.
+        opening_end = min(start, CHAPTER_OPENING_CHARS)
+        opening = source[:opening_end]
         # Cap previous target context at the configured limit; remove the
         # oldest completed segments if the actual JSON encoding is larger.
         while True:
@@ -132,6 +140,8 @@ def append(helper, plan, source, stage, selected, system, user):
                 "chapter_source_chars":len(source),
                 "context_source_range":[start,end],
                 "original_context":source[start:end],
+                "chapter_opening_source_range":[0,opening_end],
+                "chapter_opening":opening,
                 "previously_translated_segments":previous,
                 "selected_segment_ids":active_ids}
             supplement = GUIDANCE+json.dumps(evidence,ensure_ascii=False,separators=(",",":"))
@@ -141,6 +151,7 @@ def append(helper, plan, source, stage, selected, system, user):
                     "mode":mode,"source_chars":len(source),
                     "source_window_chars":end-start,
                     "source_window_start":start,"source_window_end":end,
+                    "chapter_opening_chars":len(opening),
                     "prior_segments":len(previous),
                     "selected_segments":len(active_ids),"prompt_chars":total_chars}
             if previous:
