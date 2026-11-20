@@ -37,8 +37,8 @@ SAFE_HREF_RE = re.compile(r"(?:https?://|mailto:)[^\s()\[\]]+\Z")
 # like chapter.xhtml can instead be relative EPUB resources. Never guess a
 # scheme for relative paths, fragments, ports, or arbitrary pseudo-TLDs.
 BARE_PUBLIC_SUBDOMAIN_RE = re.compile(
-    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.){2,}"
-    r"(?:com|net|org|edu|gov|io|dev|app|co|uk|ru|me|info|biz)\\Z",
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}"
+    r"(?:com|net|org|edu|gov|io|dev|app|co|uk|ru|me|info|biz)\Z",
     re.IGNORECASE,
 )
 
