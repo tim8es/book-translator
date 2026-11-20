@@ -89,6 +89,46 @@ class OperatorEditorialCandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.JobError, "no longer matches"):
                 worker.verified_editorial_candidate(self.slug, self.chapter)
 
+    def test_explicit_upgrade_releases_obsolete_blocked_book_lane(self):
+        source = b"PK-source-stable-book"
+        digest = hashlib.sha256(source).hexdigest()
+        old_id = "05eed6ea814d3b5eec014c6d05b39e3f"
+        new_id = "a7b9e400d5f2439c8b1e110db202633f"
+        for job_id, revision in ((old_id, self.oldrevision),
+                                 (new_id, self.revision)):
+            intake = self.root / "intake" / "auto" / job_id
+            intake.mkdir(parents=True)
+            (intake / "source.epub").write_bytes(source)
+            worker.store_json(intake / "request.json", {
+                "schema_version": 1, "job_id": job_id,
+                "source_sha256": digest, "target_language": "ru",
+                "workflow_revision": revision,
+            })
+        metadata = json.loads((self.book / "metadata.json").read_text())
+        metadata["source"]["sha256"] = digest
+        worker.store_json(self.book / "metadata.json", metadata)
+        self.plan["source_book_sha256"] = digest
+        worker.store_json(self.book / ".workflow/editorial-reopen.json", self.plan)
+        worker.store_json(self.book / ".workflow/auto-control.json", {
+            "schema_version": 1, "mode": "auto",
+        })
+        old_status = {"schema_version": 1, "job_id": old_id, "state": "blocked",
+                      "phase": "attention-requires-operator", "book_slug": self.slug,
+                      "source_sha256": digest,
+                      "workflow_revision": self.oldrevision}
+        worker.store_json(self.root / "automation/status" / (old_id + ".json"), old_status)
+        worker.store_json(self.root / "automation/status" / (new_id + ".json"), {
+            "schema_version": 1, "job_id": new_id, "state": "paused",
+            "book_slug": self.slug,
+            "source_sha256": digest,
+            "workflow_revision": self.revision,
+        })
+        with patch.object(worker, "ROOT", self.root):
+            selected = worker.ready_jobs()
+            self.assertEqual([j["job_id"] for j in selected], [new_id])
+            (self.book / ".workflow/editorial-reopen.json").unlink()
+            self.assertEqual(worker.ready_jobs(), [])
+
     def test_mutated_plan_or_pass_must_fail_closed(self):
         with patch.object(worker, "ROOT", self.root):
             self.plan["target_workflow_revision"] = "f" * 40
