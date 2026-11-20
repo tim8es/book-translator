@@ -1185,6 +1185,39 @@ def book_key(job_id: str) -> str:
     return "intake-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
+def superseded_editorial_upgrade_job(job_id: str, status: dict) -> bool:
+    """An obsolete blocked job cannot starve an explicit source-identical revision migration.
+
+    Never clear/relabel the old blocked record or transfer its review evidence.
+    Require a separately authorized book-local operator plan and matching new
+    workflow pin; arbitrary duplicate intake jobs still cannot bypass blocking.
+    """
+    if (not isinstance(status, dict) or status.get("state") != "blocked"
+            or not safe_book_slug(status.get("book_slug"))):
+        return False
+    book = ROOT / "books" / status["book_slug"]
+    path = book / ".workflow" / "editorial-reopen.json"
+    if not path.is_file():
+        return False
+    plan = read_json(path)
+    metadata = read_json(book / "metadata.json")
+    request = request_for(job_id)
+    old = status.get("workflow_revision")
+    target = (metadata.get("workflow") or {}).get("resolved_revision")
+    source = (metadata.get("source") or {}).get("sha256")
+    return (
+        isinstance(old, str) and isinstance(target, str)
+        and old != target
+        and plan.get("schema_version") == 1
+        and plan.get("kind") == "reopen-edited-reviewed-units"
+        and plan.get("book_slug") == status["book_slug"]
+        and plan.get("source_workflow_revision") == old
+        and plan.get("target_workflow_revision") == target
+        and plan.get("source_book_sha256") == source
+        and source == status.get("source_sha256") == request["source_sha256"]
+    )
+
+
 def ready_jobs(limit: int = 6) -> list[dict]:
     """Admit at most six books per wake, fairly favoring least-recently served.
 
@@ -1204,6 +1237,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         try:
             state = read_json(state_file) if state_file.exists() else None
             if state and state.get("state") == "done":
+                continue
+            if state and superseded_editorial_upgrade_job(job_id, state):
                 continue
             key = book_key(job_id)
         except (OSError, ValueError, KeyError, JobError) as exc:
@@ -4529,6 +4564,79 @@ def archive_incremental_reviewer_stage(slug: str, chapter: dict,
         return False
 
 
+
+def verified_editorial_candidate(slug: str, chapter: dict) -> str | None:
+    """Reuse a specifically approved corrected artifact without model retranslating.
+
+    This is *translation acceptance only*: it never invents a review or bypasses
+    the pinned CLI's Translator claim/acceptance. A different Reviewer must
+    compare and accept the source/translation afterward.
+    """
+    if chapter.get("status") != "extracted":
+        return None
+    book = ROOT / "books" / slug
+    path = book / ".workflow" / "editorial-reopen.json"
+    if not path.is_file():
+        return None
+    try:
+        plan = read_json(path)
+        metadata = read_json(book / "metadata.json")
+        required = {
+            "schema_version", "kind", "book_slug", "source_workflow_revision",
+            "target_workflow_revision", "source_book_sha256",
+            "baseline_progress_blob_sha", "baseline_ledger_blob_sha", "units",
+        }
+        if (not isinstance(plan, dict) or set(plan) != required
+                or plan["schema_version"] != 1
+                or plan["kind"] != "reopen-edited-reviewed-units"
+                or plan["book_slug"] != slug
+                or plan["source_book_sha256"] != metadata["source"]["sha256"]
+                or plan["target_workflow_revision"] != metadata["workflow"]["resolved_revision"]
+                or plan["source_workflow_revision"] == plan["target_workflow_revision"]):
+            raise JobError("invalid operator-approved editorial candidate plan")
+        entries = plan["units"]
+        if not isinstance(entries, list):
+            raise JobError("invalid operator-approved editorial candidate entries")
+        selected = [e for e in entries if isinstance(e, dict)
+                    and e.get("unit_id") == chapter["unit_id"]]
+        if not selected:
+            return None
+        if len(selected) != 1:
+            raise JobError("duplicate operator-approved editorial candidate")
+        entry = selected[0]
+        expected = {
+            "unit_id", "source_sha256", "original_translation_sha256",
+            "candidate_translation_blob_sha", "original_pass_record_id",
+        }
+        if set(entry) != expected:
+            raise JobError("invalid operator-approved editorial unit identity")
+        source = (book / chapter["source_path"]).read_bytes()
+        candidate = (book / chapter["translation_path"]).read_bytes()
+        if not candidate.strip():
+            raise JobError("operator-approved editorial candidate is empty")
+        original_digest = hashlib.sha256(source).hexdigest()
+        candidate_digest = hashlib.sha256(candidate).hexdigest()
+        git_blob = hashlib.sha1(
+            b"blob " + str(len(candidate)).encode("ascii") + b"\x00" + candidate
+        ).hexdigest()
+        if (original_digest != entry["source_sha256"]
+                or git_blob != entry["candidate_translation_blob_sha"]
+                or candidate_digest == entry["original_translation_sha256"]):
+            raise JobError("operator-approved editorial candidate no longer matches exact source/target hashes")
+        ledger = read_json(book / "review-ledger.json")
+        prior = [r for r in ledger["records"] if r.get("unit_id") == chapter["unit_id"]]
+        last = prior[-1] if prior else None
+        if (not isinstance(last, dict) or last.get("outcome") != "PASS"
+                or last.get("record_id") != entry["original_pass_record_id"]
+                or last.get("source_sha256") != entry["source_sha256"]
+                or last.get("translation_sha256") != entry["original_translation_sha256"]
+                or last.get("workflow_revision") != plan["source_workflow_revision"]):
+            raise JobError("operator-approved editorial candidate lost historical PASS provenance")
+        return candidate.decode("utf-8")
+    except (UnicodeError, ValueError, KeyError, TypeError, OSError) as exc:
+        raise JobError("cannot safely admit operator-approved editorial candidate") from exc
+
+
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     active = status["active"]
     _, _, chapters = chapter_data(slug)
@@ -4562,6 +4670,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         if not isinstance(previous_quality, dict):
             previous_quality = {}
         patch_mode = (role == "corrector" and previous_quality.get("evidence_version") == 2)
+        editorial_candidate = (verified_editorial_candidate(slug, chapter)
+                               if role == "translator" else None)
         retranslate_incomplete = False
         if (role == "corrector"
                 and isinstance(chapter.get("source_path"), str)
@@ -4591,7 +4701,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             force_full_review=force_full_review)
         structural_helper = None
         structural_plan = None
-        if ((role == "translator" and not external_link_only(source)
+        if ((role == "translator" and editorial_candidate is None
+              and not external_link_only(source)
              and (len(source) > SOURCE_SPAN_CHAR_LIMIT or MARKDOWN_LINK_RE.search(source)
                   or EPUB_MARKER_RE.search(source))) or retranslate_incomplete):
             # Immutable public validation + bounded source chunks, without
@@ -4693,7 +4804,10 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             prompt_context["correction_mode"] = "anchored-patches"
         preserve_links = (role in {"translator", "corrector"} and not patch_mode
                           and external_link_only(source))
-        if patch_mode:
+        if editorial_candidate is not None:
+            prompt_context["execution_mode"] = "verified_operator_editorial_candidate"
+            translated, proposed_glossary, proposed_style = editorial_candidate, [], []
+        elif patch_mode:
             batched = process_correction_batches(job_id, slug, status, engine,
                                                  chapter, previous_record)
             if batched is None:
@@ -4772,7 +4886,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             else:
                 translated, proposed_glossary, proposed_style = parse_translation(answer)
         if role != "reviewer":
-            if not preserve_links and not patch_mode and structural_plan is None:
+            if (not preserve_links and not patch_mode and structural_plan is None
+                    and editorial_candidate is None):
                 translated = restore_markdown_links(source, translated)
             check_markers(source, translated)
             if (not preserve_links and not patch_mode and
