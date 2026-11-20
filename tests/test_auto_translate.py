@@ -62,6 +62,8 @@ class AutomatedBookTests(unittest.TestCase):
             incoming.mkdir(parents=True)
             book = root / "books" / slug
             book.mkdir(parents=True)
+            (book / "translated").mkdir()
+            (book / "output").mkdir()
             source_sha = "e" * 64
             request = {"schema_version": 1, "job_id": job_id,
                        "source_sha256": source_sha, "target_language": "ru"}
