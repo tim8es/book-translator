@@ -60,6 +60,17 @@ def complete(role: str, system: str, user: str) -> str:
         try:
             text, diagnostics = pi_complete(base, model, key, system, user, role=role)
         except PiTransportFailure as exc:
+            # Pi exits nonzero for some short-lived upstream failures even when
+            # its stderr is unsuitable for logging. Let the existing bounded
+            # Auto provider-backoff path retain the job identity and retry
+            # later. Configuration, model output, and tool/sandbox failures
+            # remain permanent; no untracked local retry is introduced.
+            if exc.code in {"pi_timeout", "pi_subprocess_failure",
+                            "pi_nonzero_exit"}:
+                raise TransientModelError(
+                    "Pi model execution failed; retry at the durable provider deadline",
+                    code="transport",
+                ) from None
             raise ModelError("Pi backend: " + exc.code) from None
         return CompletionText(text, diagnostics)
     if backend != "omniroute":
