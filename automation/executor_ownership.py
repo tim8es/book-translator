@@ -19,11 +19,13 @@ EXECUTORS = frozenset({"auto", "pi"})
 class OwnershipError(ValueError):
     """Invalid, missing or inconsistent execution lease."""
 
-    
+
 def _load(path: Path) -> dict | None:
+    if path.is_symlink():
+        raise OwnershipError("executor marker cannot be a symlink")
     if not path.exists():
         return None
-    if not path.is_file() or path.is_symlink():
+    if not path.is_file():
         raise OwnershipError("executor marker is not a regular file")
     try:
         record = json.loads(path.read_text("utf-8"))
@@ -63,7 +65,7 @@ def marker(job_id: str, source_sha256: str, executor: str, slug: str | None = No
 def selected(root: Path, job_id: str, source_sha256: str,
              slug: str | None = None) -> str:
     """Validate the job marker and, when present, its book-bound mirror."""
-    expected = marker(job_id, source_sha256, "auto")
+    marker(job_id, source_sha256, "auto")  # Validate identity even with no marker.
     job_record = _load(job_marker_path(root, job_id))
     if job_record is None:
         requested = "auto"
