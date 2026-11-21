@@ -232,7 +232,7 @@ def register_claim_commands(subparsers: argparse._SubParsersAction, root: Path) 
     claim.add_argument("selector", help="Chapter number or inclusive numeric range N-M.")
     claim.add_argument("--role", choices=("translator", "reviewer"), required=True)
     claim.add_argument("--session-id", required=True, help="Stable identity of the active worker/session.")
-    claim.add_argument("--lease-seconds", type=int, default=3600, help="Lease duration in seconds (default: 3600).")
+    claim.add_argument("--lease-seconds", type=int, default=900, help="Lease duration in seconds (maximum and default: 900).")
     claim.add_argument("--base-commit", help="Git commit associated with dispatch; best-effort HEAD when omitted for legacy/sequential claims.")
     claim.add_argument(
         "--glossary-revision",
@@ -261,7 +261,7 @@ def register_claim_commands(subparsers: argparse._SubParsersAction, root: Path) 
     renew.add_argument("slug", help="Book slug under books/.")
     renew.add_argument("selector", help="One chapter or inclusive range N-M.")
     renew.add_argument("--session-id", required=True)
-    renew.add_argument("--lease-seconds", type=int, default=3600)
+    renew.add_argument("--lease-seconds", type=int, default=900)
     renew.add_argument("--json", action="store_true")
     renew.set_defaults(func=lambda args: renew_command(args, root))
 

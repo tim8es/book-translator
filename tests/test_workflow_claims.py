@@ -124,7 +124,7 @@ class WorkflowClaimLifecycleTests(WorkflowClaimTestMixin, unittest.TestCase):
             id_factory=lambda: next(self.ids),
         )
 
-    def acquire(self, manager, selector, *, role="translator", session_id="session-a", lease_seconds=3600):
+    def acquire(self, manager, selector, *, role="translator", session_id="session-a", lease_seconds=900):
         return manager.acquire(
             self.progress(),
             selector,
@@ -219,7 +219,7 @@ class WorkflowClaimLifecycleTests(WorkflowClaimTestMixin, unittest.TestCase):
     def test_cleanup_removes_only_expired_claims_and_records_lease_expired_reason(self):
         manager = self.manager()
         self.acquire(manager, "1", lease_seconds=30)
-        self.acquire(manager, "2", lease_seconds=3600)
+        self.acquire(manager, "2", lease_seconds=900)
 
         later = self.manager("2026-09-05T12:01:00+00:00")
         results = later.cleanup_expired()
@@ -240,6 +240,26 @@ class WorkflowClaimLifecycleTests(WorkflowClaimTestMixin, unittest.TestCase):
         self.assertEqual(request["reason"], "lease_expired")
         self.assertEqual(request["unit_id"], "chapter-000001")
         self.assertEqual(completion["request_event_id"], request["event_id"])
+
+    def test_reservation_cannot_exceed_fifteen_minutes(self):
+        manager = self.manager()
+        with self.assertRaisesRegex(Exception, "lease_seconds"):
+            self.acquire(manager, "1", lease_seconds=901)
+        self.assertEqual(manager.list_active(), [])
+
+    def test_cleanup_limits_existing_long_claim_to_fifteen_minutes(self):
+        manager = self.manager()
+        self.acquire(manager, "1", lease_seconds=900)
+        path = ".workflow/claims/chapter-000001.json"
+        old = self.repository.read(path, SchemaKind.CLAIM)
+        claim = dict(old.data)
+        claim["expires_at"] = "2026-09-05T13:00:00Z"
+        self.repository.write_if_version(path, SchemaKind.CLAIM, claim, old.version)
+
+        later = self.manager("2026-09-05T12:16:00+00:00")
+        results = later.cleanup_expired()
+        self.assertEqual([(result.unit_id, result.status) for result in results], [("chapter-000001", "cleaned")])
+        self.assertEqual(later.list_active(), [])
 
     def test_cleanup_at_exact_expiry_boundary_treats_claim_as_expired(self):
         manager = self.manager()
