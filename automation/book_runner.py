@@ -1442,6 +1442,74 @@ def replay_disjoint_checkpoint(base: str, local_commit: str, remote: str,
                         data=f"auto: replay disjoint checkpoint {local_commit[:12]}\n".encode())
 
 
+def admit_pi_job(job_id: str) -> None:
+    """Claim a NEW intake for Pi before any model call or book creation.
+
+    The caller must hold GitHub's book-operation concurrency lane. A fresh
+    source-book identity is mandatory: this pilot never upgrades a historical
+    book's workflow or takes over a live Auto job.
+    """
+    request = request_for(job_id)
+    marker_path = executor_ownership.job_marker_path(ROOT, job_id)
+    if marker_path.exists():
+        status = read_json(status_path(job_id)) if status_path(job_id).exists() else None
+        if executor_ownership.selected(
+            ROOT, job_id, request["source_sha256"],
+            status.get("book_slug") if status else None,
+        ) != "pi":
+            raise executor_ownership.OwnershipError("existing intake belongs to another executor")
+        return
+    if status_path(job_id).exists():
+        raise executor_ownership.OwnershipError("cannot take over an existing Auto job")
+    source = job_path(job_id) / "source.epub"
+    title, author = epub_identity(source)
+    title = request.get("title") or title
+    author = request.get("author") or author
+    slug, old_book = locate_book(
+        title, author, request.get("source_filename", source.name),
+        request["target_language"], source_epub=source,
+        source_sha256=request["source_sha256"],
+    )
+    if old_book or (ROOT / "books" / slug).exists():
+        raise executor_ownership.OwnershipError(
+            "Pi pilot requires a new book, not an existing literary workspace")
+    if git("diff", "--cached", "--name-only"):
+        raise JobError("executor admission refused: staging index is not empty")
+    marker_path.write_text(
+        json.dumps(executor_ownership.marker(
+            job_id, request["source_sha256"], "pi"), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    rel = f"intake/auto/{job_id}/executor.json"
+    git("add", "--", rel)
+    staged = git("diff", "--cached", "--name-only", "-z").rstrip("\0").split("\0")
+    if staged != [rel]:
+        raise JobError("executor admission may only commit its single bound marker")
+    base = git("rev-parse", "HEAD")
+    git("-c", "user.name=github-actions[bot]",
+        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+        "commit", "-m", "auto: reserve Pi executor for " + job_id[:12])
+    local = git("rev-parse", "HEAD")
+    for attempt in range(12):
+        git("fetch", "--quiet", "origin", "main")
+        remote = git("rev-parse", "origin/main")
+        candidate = local if remote == base else replay_disjoint_checkpoint(
+            base, local, remote, [rel])
+        pushed = subprocess.run(
+            ["git", "push", "origin", f"{candidate}:refs/heads/main"],
+            cwd=ROOT, capture_output=True, text=True)
+        if pushed.returncode == 0:
+            if candidate != local:
+                git("reset", "--mixed", candidate)
+            return
+        error = pushed.stderr.lower()
+        if not any(word in error for word in (
+                "non-fast-forward", "fetch first", "stale info", "rejected")):
+            raise JobError("Pi admission push failed for a non-concurrency reason")
+        time.sleep(1 + attempt // 4)
+    raise JobError("could not publish Pi ownership after 12 attempts")
+
+
 def checkpoint(job_id: str, status: dict, slug: str | None) -> None:
     # A status-only quarantine must never include previously staged literary
     # files left by a failed canonical operation. Otherwise the subsequent Git
@@ -5629,7 +5697,22 @@ def main() -> int:
     parser.add_argument("--resume-blocked", action="store_true")
     parser.add_argument("--resume-interrupted", action="store_true")
     parser.add_argument("--batch", action="store_true")
+    parser.add_argument("--admit-pi", action="store_true")
     args = parser.parse_args()
+    if args.admit_pi:
+        if (args.batch or args.select or args.book_key or args.retry_status
+                or args.retry_at or args.list_ready_json
+                or args.resume_blocked or args.resume_interrupted):
+            parser.error("--admit-pi only accepts --job-id")
+        try:
+            admit_pi_job(safe_id(args.job_id))
+        except (executor_ownership.OwnershipError, BookIdentityError,
+                JobError, OSError, ValueError) as exc:
+            print("Pi intake reservation refused: " + type(exc).__name__ +
+                  ": " + str(exc)[:180], file=sys.stderr)
+            return 1
+        print("Pi executor ownership is reserved for the immutable intake")
+        return 0
     if args.batch:
         if args.select or args.book_key or args.retry_status or args.retry_at or args.list_ready_json:
             parser.error("batch requires an explicit book job")
