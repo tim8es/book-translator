@@ -31,6 +31,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from omniroute import ModelError, TransientModelError, complete
+import executor_ownership
 import review_chunks
 import correction_regression
 import candidate_review
@@ -936,6 +937,18 @@ def request_for(job_id: str) -> dict:
     return request
 
 
+class ExecutorMismatch(Exception):
+    """A stale Auto/Pi worker must not update even the job status."""
+
+
+def ensure_job_executor(job_id: str, request: dict, *,
+                        slug: str | None = None) -> None:
+    backend = os.environ.get("BOOK_TRANSLATOR_LLM_BACKEND", "omniroute")
+    if not executor_ownership.require(ROOT, job_id, request["source_sha256"],
+                                      slug=slug, backend=backend):
+        raise ExecutorMismatch("this job is reserved for a different executor")
+
+
 def auto_mode(slug: str) -> str:
     """Book-scoped operator preference. Literary authority remains progress/claims."""
     control = ROOT / "books" / slug / ".workflow" / "auto-control.json"
@@ -1640,6 +1653,9 @@ def init(job_id: str, request: dict, slug: str, revision: str) -> dict:
     metadata = read_json(ROOT / "books" / slug / "metadata.json")
     if metadata["workflow"]["resolved_revision"] != revision:
         raise JobError("new book did not pin its installed workflow")
+    # Durable Pi ownership follows the same source-bound commit as initial
+    # extraction. ChatOps mode is a separate, independently scoped preference.
+    executor_ownership.write_book_marker(ROOT, job_id, request["source_sha256"], slug)
     chatops = chatops_admission_requested(job_id, request)
     if chatops:
         # Persist the mode in the same checkpoint as the new book. The batch
@@ -5167,6 +5183,8 @@ def run(job_id: str, *, resume_blocked: bool = False,
     request = request_for(job_id)
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
+    ensure_job_executor(job_id, request,
+                        slug=status.get("book_slug") if status else None)
     if not resume_blocked and not resume_interrupted and status:
         if auto_resume_requested(status):
             # A newer explicit Auto handoff for an operator-blocked live claim
@@ -5225,6 +5243,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
         source_epub=source, source_sha256=request["source_sha256"]
     )
     folder = ROOT / "books" / slug
+    ensure_job_executor(job_id, request, slug=slug)
     if status and status.get("book_slug") not in (None, slug):
         raise BookIdentityError("stored job is linked to a different book workspace")
     if not metadata and folder.exists():
