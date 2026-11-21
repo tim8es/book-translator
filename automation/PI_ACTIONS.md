@@ -85,11 +85,14 @@ silently migrated. Already admitted Pi jobs are idempotently re-admitted.
 The literary `metadata.json.workflow.resolved_revision` is NEVER modified
 by these executor markers. ChatOps remains a separate book mode.
 
-The Pi Action must **refuse all live work until the state repository's GitHub
-visibility is `private`**. The safe probe may still run without model calls
-or book mutations. GitHub repository display names ending with `-private`
-do not ensure actual privacy. The Action verifies the real repository
-visibility via GitHub before assigning ownership.
+The state repository currently operates as a **public GitHub repository**
+by explicit operator choice. The manual Pi Action permits this and logs a
+publication warning before any non-probe run. A public repository can expose
+the full original EPUB, translation, review evidence and generated EPUB to
+everyone; the operator must only submit material authorized for public
+publication. A repository name ending in `-private` does not change its
+GitHub visibility. `probe_only=true` remains the default and never calls
+the model or writes literary state.
 
 The reviewed private deployment must update the scheduled Auto runtime lock
 and manual Pi executor SHA together, after all regression checks pass.
