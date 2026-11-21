@@ -51,7 +51,7 @@ def book_marker_path(root: Path, slug: str) -> Path:
 def marker(job_id: str, source_sha256: str, executor: str, slug: str | None = None) -> dict:
     if not isinstance(source_sha256, str) or not HEX.fullmatch(source_sha256):
         raise OwnershipError("executor source SHA-256 is invalid")
-    if executor not in EXECUTORS:
+    if not isinstance(executor, str) or executor not in EXECUTORS:
         raise OwnershipError("unsupported executor")
     record = {"schema_version": 1, "job_id": job_id,
               "source_sha256": source_sha256, "executor": executor}
@@ -71,14 +71,15 @@ def selected(root: Path, job_id: str, source_sha256: str,
         requested = "auto"
     else:
         requested = job_record.get("executor")
-        if requested not in EXECUTORS or job_record != marker(
+        if not isinstance(requested, str) or requested not in EXECUTORS or job_record != marker(
                 job_id, source_sha256, requested):
             raise OwnershipError("executor job marker does not bind to immutable intake")
     if slug is not None:
         book_path = book_marker_path(root, slug)
         book_record = _load(book_path)
         if book_record is not None:
-            if (book_record.get("executor") not in EXECUTORS
+            if (not isinstance(book_record.get("executor"), str)
+                    or book_record["executor"] not in EXECUTORS
                     or book_record != marker(
                         job_id, source_sha256, book_record["executor"], slug)
                     or book_record["executor"] != requested):
