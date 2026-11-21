@@ -56,6 +56,26 @@ class PiBackendTests(unittest.TestCase):
             with self.assertRaisesRegex(pi_backend.PiTransportFailure, "pi_invalid_token_limits"):
                 pi_backend.complete("https://test.invalid/v1", "model", "key", "rules", "user", role="REVIEWER")
 
+    def test_pi_subprocess_transient_failures_follow_auto_retry_contract(self):
+        config = ("https://test.invalid/v1", "token-sentinel", "book-translator")
+        with patch("omniroute.config", return_value=config), patch.dict(
+            "os.environ", {"BOOK_TRANSLATOR_LLM_BACKEND": "pi"}
+        ):
+            for code in ("pi_nonzero_exit", "pi_timeout", "pi_subprocess_failure"):
+                with self.subTest(code=code):
+                    with patch("pi_backend.complete", side_effect=pi_backend.PiTransportFailure(code)):
+                        with self.assertRaises(omniroute.TransientModelError) as caught:
+                            omniroute.complete("REVIEWER", "rules", "source")
+                    self.assertEqual(caught.exception.code, "transport")
+                    self.assertNotIn("token-sentinel", str(caught.exception))
+            for code in ("pi_binary_missing", "pi_invalid_configuration",
+                         "pi_empty_or_oversize_output"):
+                with self.subTest(code=code):
+                    with patch("pi_backend.complete", side_effect=pi_backend.PiTransportFailure(code)):
+                        with self.assertRaises(omniroute.ModelError) as caught:
+                            omniroute.complete("TRANSLATOR", "rules", "source")
+                    self.assertNotIsInstance(caught.exception, omniroute.TransientModelError)
+
     def test_dispatch_is_opt_in(self):
         config = ("https://test.invalid/v1", "token-sentinel", "book-translator")
         with patch("omniroute.config", return_value=config), patch.dict("os.environ", {"BOOK_TRANSLATOR_LLM_BACKEND": "pi"}):
