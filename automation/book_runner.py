@@ -1297,7 +1297,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
     return [item for _, _, item in candidates[:limit]]
 
 
-def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
+def provider_retry_signal(job_id: str, expected_not_before: str, *,
+                          executor: str = "auto") -> dict:
     """Read-only, generation-bound signal for a deferred workflow_dispatch.
 
     Check both before and after waiting. A stale retry must never wake a
@@ -1317,6 +1318,17 @@ def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
     if not state.exists():
         return stale
     status = read_json(state)
+    if executor not in {"auto", "pi"}:
+        raise JobError("unsupported provider retry executor")
+    request = request_for(job_id)
+    slug = status.get("book_slug")
+    if executor_ownership.selected(
+        ROOT, job_id, request["source_sha256"],
+        slug if safe_book_slug(slug) else None,
+    ) != executor:
+        return stale
+    if safe_book_slug(slug) and auto_mode(slug) != "auto":
+        return stale
     preflight = epub_preflight_retry_at(status)
     if preflight == expected_not_before and preflight is not None:
         remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
@@ -1334,11 +1346,6 @@ def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
     slug = status.get("book_slug")
     if not safe_book_slug(slug):
         raise JobError("provider retry signal has invalid book scope")
-    if auto_mode(slug) != "auto":
-        return stale
-    request = request_for(job_id)
-    if executor_ownership.selected(ROOT, job_id, request["source_sha256"], slug) != "auto":
-        return stale
     remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
     if remaining > MAX_WAITER_SECONDS + 30:
         raise JobError("provider retry deadline exceeds the bounded waiter")
@@ -5692,6 +5699,7 @@ def main() -> int:
     parser.add_argument("--book-key", action="store_true")
     parser.add_argument("--retry-status", action="store_true")
     parser.add_argument("--retry-at")
+    parser.add_argument("--retry-executor", choices=("auto", "pi"), default="auto")
     parser.add_argument("--list-ready-json", action="store_true")
     parser.add_argument("--job-id")
     parser.add_argument("--resume-blocked", action="store_true")
@@ -5725,10 +5733,13 @@ def main() -> int:
                 or args.resume_blocked or args.resume_interrupted
                 or not args.retry_at):
             parser.error("retry status requires only --job-id and --retry-at")
-        print(json.dumps(provider_retry_signal(safe_id(args.job_id), args.retry_at)))
+        print(json.dumps(provider_retry_signal(safe_id(args.job_id), args.retry_at,
+                                                executor=args.retry_executor)))
         return 0
     if args.retry_at:
         parser.error("--retry-at requires --retry-status")
+    if not args.retry_status and args.retry_executor != "auto":
+        parser.error("--retry-executor requires --retry-status")
     if args.list_ready_json:
         if args.select or args.book_key:
             parser.error("list-ready cannot be combined with select/book-key")
