@@ -63,7 +63,8 @@ class Chapter:
 class BlockHTMLParser(HTMLParser):
     """Extract headings and readable block text from simple HTML/XHTML."""
 
-    BLOCK_TAGS = {"p", "div", "li", "dt", "dd", "blockquote", "pre"}
+    BLOCK_TAGS = {"p", "div", "li", "dt", "dd", "blockquote", "pre",
+                  "details", "summary"}
     HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
     # Navigation is recreated from the verified ordered chapter list.
     # The source-coverage audit independently validates all TOC targets.
