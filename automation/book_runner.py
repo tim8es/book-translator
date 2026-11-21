@@ -949,6 +949,25 @@ def ensure_job_executor(job_id: str, request: dict, *,
         raise ExecutorMismatch("this job is reserved for a different executor")
 
 
+def selection_executor(job_id: str, slug: str | None = None) -> str:
+    """Legacy jobs require no extra original-source IO.
+
+    Only an explicit executor marker requires immutable intake verification.
+    This preserves old Auto selection for historical/no-source test fixtures
+    and keeps Pi admission fail-closed.
+    """
+    job_marker = executor_ownership.job_marker_path(ROOT, job_id)
+    book_marker = (executor_ownership.book_marker_path(ROOT, slug)
+                   if safe_book_slug(slug) else None)
+    if (not job_marker.exists() and not job_marker.is_symlink()
+            and (book_marker is None or
+                 (not book_marker.exists() and not book_marker.is_symlink()))):
+        return "auto"
+    request = request_for(job_id)
+    return executor_ownership.selected(ROOT, job_id, request["source_sha256"],
+                                       slug if safe_book_slug(slug) else None)
+
+
 def auto_mode(slug: str) -> str:
     """Book-scoped operator preference. Literary authority remains progress/claims."""
     control = ROOT / "books" / slug / ".workflow" / "auto-control.json"
@@ -1255,10 +1274,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                 continue
             # Legacy Auto must never discover an explicitly Pi-owned intake,
             # including one awaiting its first canonical extraction checkpoint.
-            request = request_for(job_id)
-            if executor_ownership.selected(
-                ROOT, job_id, request["source_sha256"],
-                state.get("book_slug") if state else None,
+            if selection_executor(
+                job_id, state.get("book_slug") if state else None,
             ) != "auto":
                 continue
             key = book_key(job_id)
@@ -1320,12 +1337,8 @@ def provider_retry_signal(job_id: str, expected_not_before: str, *,
     status = read_json(state)
     if executor not in {"auto", "pi"}:
         raise JobError("unsupported provider retry executor")
-    request = request_for(job_id)
     slug = status.get("book_slug")
-    if executor_ownership.selected(
-        ROOT, job_id, request["source_sha256"],
-        slug if safe_book_slug(slug) else None,
-    ) != executor:
+    if selection_executor(job_id, slug) != executor:
         return stale
     if safe_book_slug(slug) and auto_mode(slug) != "auto":
         return stale
@@ -1363,12 +1376,8 @@ def select(explicit: str | None) -> str:
             continue
         state = status_path(job_id)
         try:
-            request = request_for(job_id)
             recorded = read_json(state) if state.exists() else None
-            if executor_ownership.selected(
-                ROOT, job_id, request["source_sha256"],
-                recorded.get("book_slug") if recorded else None,
-            ) != "auto":
+            if selection_executor(job_id, recorded.get("book_slug") if recorded else None) != "auto":
                 continue
             if recorded is None:
                 return job_id
@@ -5745,12 +5754,8 @@ def main() -> int:
             parser.error("list-ready cannot be combined with select/book-key")
         if args.job_id:
             job_id = safe_id(args.job_id)
-            request = request_for(job_id)
             status = read_json(status_path(job_id)) if status_path(job_id).exists() else None
-            owned = executor_ownership.selected(
-                ROOT, job_id, request["source_sha256"],
-                status.get("book_slug") if status else None,
-            )
+            owned = selection_executor(job_id, status.get("book_slug") if status else None)
             print(json.dumps([{"job_id": job_id, "book_key": book_key(job_id)}]
                              if owned == "auto" else []))
         else:
