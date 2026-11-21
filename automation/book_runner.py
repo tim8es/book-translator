@@ -1253,6 +1253,14 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                 continue
             if state and superseded_editorial_upgrade_job(job_id, state):
                 continue
+            # Legacy Auto must never discover an explicitly Pi-owned intake,
+            # including one awaiting its first canonical extraction checkpoint.
+            request = request_for(job_id)
+            if executor_ownership.selected(
+                ROOT, job_id, request["source_sha256"],
+                state.get("book_slug") if state else None,
+            ) != "auto":
+                continue
             key = book_key(job_id)
         except (OSError, ValueError, KeyError, JobError) as exc:
             print(f"Skipping invalid job {job_id}: {type(exc).__name__}", file=sys.stderr)
@@ -1328,6 +1336,9 @@ def provider_retry_signal(job_id: str, expected_not_before: str) -> dict:
         raise JobError("provider retry signal has invalid book scope")
     if auto_mode(slug) != "auto":
         return stale
+    request = request_for(job_id)
+    if executor_ownership.selected(ROOT, job_id, request["source_sha256"], slug) != "auto":
+        return stale
     remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
     if remaining > MAX_WAITER_SECONDS + 30:
         raise JobError("provider retry deadline exceeds the bounded waiter")
@@ -1344,10 +1355,16 @@ def select(explicit: str | None) -> str:
         if not ID.fullmatch(job_id):
             continue
         state = status_path(job_id)
-        if not state.exists():
-            return job_id
         try:
-            recorded = read_json(state)
+            request = request_for(job_id)
+            recorded = read_json(state) if state.exists() else None
+            if executor_ownership.selected(
+                ROOT, job_id, request["source_sha256"],
+                recorded.get("book_slug") if recorded else None,
+            ) != "auto":
+                continue
+            if recorded is None:
+                return job_id
         except (OSError, ValueError, JobError):
             # An invalid status must not be overwritten or starve other jobs.
             # Recovery of this job requires explicit operator intervention.
@@ -5634,7 +5651,14 @@ def main() -> int:
             parser.error("list-ready cannot be combined with select/book-key")
         if args.job_id:
             job_id = safe_id(args.job_id)
-            print(json.dumps([{"job_id": job_id, "book_key": book_key(job_id)}]))
+            request = request_for(job_id)
+            status = read_json(status_path(job_id)) if status_path(job_id).exists() else None
+            owned = executor_ownership.selected(
+                ROOT, job_id, request["source_sha256"],
+                status.get("book_slug") if status else None,
+            )
+            print(json.dumps([{"job_id": job_id, "book_key": book_key(job_id)}]
+                             if owned == "auto" else []))
         else:
             if args.resume_blocked or args.resume_interrupted:
                 parser.error("blocked resume must select one explicit job ID")
@@ -5654,6 +5678,13 @@ def main() -> int:
     try:
         status = run(job_id, resume_blocked=args.resume_blocked,
                      resume_interrupted=args.resume_interrupted)
+    except ExecutorMismatch:
+        print("Book job executor does not match this runner; no state changed.", file=sys.stderr)
+        return 0
+    except executor_ownership.OwnershipError as exc:
+        print("Book job executor marker invalid; no state changed: "
+              + str(exc)[:160], file=sys.stderr)
+        return 1
     except BookIdentityError as exc:
         if (args.resume_blocked or args.resume_interrupted or
                 (job_is_blocked(job_id) and auto_resume_requested(read_json(status_path(job_id))))) and job_is_blocked(job_id):
