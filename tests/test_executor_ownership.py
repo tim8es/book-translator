@@ -66,6 +66,10 @@ class OwnershipTests(unittest.TestCase):
             file.write_text('broken json')
             with self.assertRaises(owner.OwnershipError):
                 owner.selected(root, JOB, SHA)
+            file.write_text(json.dumps({"schema_version":1, "job_id":JOB,
+                                        "source_sha256":SHA, "executor": []}))
+            with self.assertRaises(owner.OwnershipError):
+                owner.selected(root, JOB, SHA)
 
     def test_conflicting_book_and_job_markers_cannot_switch_execution(self):
         with tempfile.TemporaryDirectory() as t:
