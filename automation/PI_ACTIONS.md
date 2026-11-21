@@ -61,3 +61,41 @@ This is an experimental alternate model transport, not evidence of a
 successful full-book translation. The existing Auto schedule and ChatOps
 remain untouched. A Pi error produces a sanitized model failure and cannot
 bypass literary checks. Run no concurrent Auto/Pi jobs for the same book.
+
+## Executor ownership and production privacy
+
+The scheduled Auto executor and manual Pi executor operate against the SAME
+book state, but must never share an unowned job. Missing executor markers remain
+legacy Auto. New Pi jobs require SHA-bound explicit admission:
+
+- `intake/auto/<job-id>/executor.json` contains exactly `schema_version=1`,
+  `job_id`, original EPUB `source_sha256`, and `executor="pi"`;
+- on canonical source extraction, the same ownership is atomically persisted
+  as `books/<slug>/.workflow/executor.json`, with added `book_slug`;
+- both the normal Auto selector and every Auto checkpoint skip Pi-owned jobs;
+  Pi similarly refuses any Auto-owned job;
+- stale scheduled runs cannot commit status-only blocks or transfer claims;
+- provider retry waiters verify the stored executor BEFORE and AFTER sleeping,
+  and dispatch back to that executor only.
+
+The manual Pi Action calls `book_runner.py --admit-pi --job-id <32hex>` while
+holding the existing book-operation concurrency group. Admission is allowed
+only on a genuinely NEW intake and NEW book; existing jobs/books are never
+silently migrated. Already admitted Pi jobs are idempotently re-admitted.
+The literary `metadata.json.workflow.resolved_revision` is NEVER modified
+by these executor markers. ChatOps remains a separate book mode.
+
+The Pi Action must **refuse all live work until the state repository's GitHub
+visibility is `private`**. The safe probe may still run without model calls
+or book mutations. GitHub repository display names ending with `-private`
+do not ensure actual privacy. The Action verifies the real repository
+visibility via GitHub before assigning ownership.
+
+The reviewed private deployment must update the scheduled Auto runtime lock
+and manual Pi executor SHA together, after all regression checks pass.
+Otherwise an older Auto runtime would not know to honor Pi ownership.
+
+The shared `auto-provider-retry.yml` accepts an explicit `executor`
+(`auto` by default). A waiter is bound to its original job, exact retry
+timestamp, and executor; after its backoff it invokes only the rightful
+executor. No second queue, daemon, or book-specific workflow is created.
