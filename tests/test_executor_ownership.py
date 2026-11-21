@@ -58,8 +58,8 @@ class OwnershipTests(unittest.TestCase):
             file = put(root, f"intake/auto/{JOB}/executor.json", owner.marker(JOB, SHA, "pi"))
             with self.assertRaises(owner.OwnershipError):
                 owner.selected(root, JOB, "b" * 64)
-            with self.assertRaises(owner.OwnershipError):
-                owner.selected(root, "8" * 32, SHA, SLUG)
+            # A different job with no marker remains a legacy Auto job.
+            self.assertEqual(owner.selected(root, "8" * 32, SHA, SLUG), "auto")
             file.write_text('{"schema_version":1,"executor":"pi"}')
             with self.assertRaises(owner.OwnershipError):
                 owner.selected(root, JOB, SHA)
