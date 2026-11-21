@@ -12,7 +12,7 @@ import re
 
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 ID = re.compile(r"[0-9a-f]{32}\Z")
-SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+SLUG = re.compile(r"[^\W_][\w-]{0,99}\Z")
 EXECUTORS = frozenset({"auto", "pi"})
 
 
