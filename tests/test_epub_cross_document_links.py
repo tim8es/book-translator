@@ -99,6 +99,29 @@ class CrossSpineLinksTests(unittest.TestCase):
                 with self.assertRaises((ep.PreservedEpubError, book.BookError)):
                     book.read_epub(self.path)
 
+
+    def test_bare_author_hostname_remains_inert_and_unmodified(self):
+        for host in ("flawlessassholes.tumblr.com", "www.flawlessassholes.tumblr.com"):
+            with self.subTest(host=host):
+                source_epub(self.path, host)
+                original = self.path.read_bytes()
+                chapters, _ = book.read_epub(self.path)
+                report = ep.audit(self.path, chapters)
+                self.assertEqual(report["state"], "verified")
+                target = chapters[0].content.replace("next chapter", "страница автора")
+                translated = ep.build(
+                    self.path,
+                    [{"markdown": target}, {"markdown": chapters[1].content}],
+                    expected_source_sha256=hashlib.sha256(original).hexdigest(),
+                    language="ru")
+                with zipfile.ZipFile(io.BytesIO(translated)) as z:
+                    root = ET.fromstring(z.read("OPS/first.xhtml"))
+                    links = [n for n in root.iter() if n.tag.endswith("}a")]
+                    self.assertEqual(len(links), 1)
+                    self.assertEqual(links[0].get("href"), host)
+                    self.assertIn("страница автора", "".join(links[0].itertext()))
+                self.assertEqual(self.path.read_bytes(), original)
+
     def test_blocked_cross_link_retry_needs_exact_chatops_source(self):
         sys.path.insert(0, str(ROOT / "automation"))
         import book_runner as runner
