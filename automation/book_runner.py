@@ -2889,7 +2889,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             checkpoint(job_id, status, slug)
             repaired = complete_for_job(
                 status, "CORRECTOR", repair_system,
-                repair_user + "\nREJECTED RESPONSE: Return ONLY one bounded "
+                repair_user + (feedback["prompt"] if feedback_enabled else "")
+                + "\nREJECTED RESPONSE: Return ONLY one bounded "
                 "source-grounded correction intent for the exact finding(s) "
                 "below; never a whole chapter. The reviewer's source anchor "
                 "is the authoritative evidence.\n" + structured_guidance)
