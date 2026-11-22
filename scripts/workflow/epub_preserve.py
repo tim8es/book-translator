@@ -215,10 +215,21 @@ def _leaf_div_text(node: ET.Element) -> bool:
     for child in node.iter():
         if child is node:
             continue
-        if _local(child.tag) not in {"span", "em", "i", "big"}:
+        tag = _local(child.tag)
+        if tag == "a":
+            # XHTML converters also put ordinary linked prose directly in
+            # leaf divs, not just paragraphs. The cross-document href itself
+            # is certified against the source spine by _verify_prose_links.
+            # Keep these attributes in the original XHTML, never in prose.
+            if not child.get("href") or set(child.attrib) - {
+                "href", "rel", "id", "class", "title",
+            }:
+                return False
+            continue
+        if tag not in {"span", "em", "i", "big"}:
             return False
         if child.attrib and not (child is _whole_big_wrapper(node)
-                                 or _local(child.tag) in _STYLED_INLINE):
+                                 or tag in _STYLED_INLINE):
             return False
     return True
 
