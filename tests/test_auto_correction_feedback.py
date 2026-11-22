@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "automation"))
 
 import correction_feedback as feedback
+import execution_metrics as metrics
 import book_runner as runner
 
 
@@ -122,6 +123,33 @@ class CorrectionFeedbackTests(unittest.TestCase):
         self.assertEqual(status["model_unit_deferral_audit"][0]["error_code"],
                          "unchanged_correction")
         self.assertNotIn("PASS", str(status))
+
+
+    def test_first_observed_translation_to_pass_has_inspectable_duration(self):
+        status = {}
+        metrics.quality_started(status, "chapter-000001", "s" * 64, 10,
+                                "2026-11-22T12:00:00Z")
+        metrics.quality_started(status, "chapter-000001", "s" * 64, 99,
+                                "2026-11-22T13:00:00Z")
+        result = metrics.quality_passed(
+            status, "chapter-000001", "s" * 64, "t" * 64, 22, 3, 2,
+            "2026-11-22T13:30:00Z")
+        self.assertEqual(result["seconds_from_first_observed_translation"], 5400)
+        self.assertEqual(result["model_calls_after_first_observed_translation"], 12)
+        self.assertEqual(result["prior_rejected_reviews"], 3)
+        metrics.quality_passed(status, "chapter-000001", "s" * 64, "t" * 64,
+                               22, 3, 2, "2026-11-22T13:30:00Z")
+        self.assertEqual(len(status["quality_pass_metrics"]), 1)
+
+    def test_historical_chatops_translation_is_not_given_fake_time_to_pass(self):
+        status = {}
+        result = metrics.quality_passed(
+            status, "chapter-000002", "s" * 64, "t" * 64, 45, 4, 3,
+            "2026-11-22T13:30:00Z")
+        self.assertIsNone(result["seconds_from_first_observed_translation"])
+        self.assertIsNone(result["model_calls_after_first_observed_translation"])
+        self.assertEqual(result["prior_rejected_reviews"], 4)
+
 
 
 if __name__ == "__main__":
