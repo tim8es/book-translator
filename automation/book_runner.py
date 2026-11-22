@@ -1220,7 +1220,10 @@ def recoverable_epub_preflight(status: dict) -> bool:
     deadline = epub_preflight_retry_at(status)
     if deadline is not None and datetime.now(timezone.utc) >= datetime.fromisoformat(deadline):
         return True
-    return approved_epub_repair_retry(status)
+    # An explicit exact-SHA approval is a one-shot parser-repair exception to
+    # the EPUB preflight timer, not an exception to the retry count or coverage.
+    return (approved_epub_repair_retry(status)
+            or approved_plain_epub_link_retry(status))
 
 
 def recoverable_structural_span_blocked(status: dict) -> bool:
