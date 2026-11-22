@@ -66,7 +66,7 @@ class CorrectionFeedbackTests(unittest.TestCase):
         self.assertEqual(result["audit"]["recurring_anchored_findings"], 1)
         self.assertEqual(result["audit"]["prior_distinct_rejected_reviews"], 2)
         self.assertIn("Previous fix changed a word", result["prompt"])
-        self.assertIn("only allowed replacement locations", result["prompt"])
+        self.assertIn("ONLY allowed replacement locations", result["prompt"])
         self.assertNotIn("Previous fix changed", str(result["audit"]))
         self.assertNotIn("Путешественница", str(result["audit"]))
         self.assertNotIn('"PASS"', result["prompt"])
