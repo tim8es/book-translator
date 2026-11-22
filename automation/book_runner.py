@@ -1137,9 +1137,10 @@ def approved_epub_repair_retry(status: dict) -> bool:
         if not chatops_admission_requested(job_id, request):
             return False
         lock = read_json(ROOT / "automation" / "runtime.lock.json")
-        if (lock != {"schema_version": 1,
-                     "repository": "tim8es/book-translator",
-                     "revision": lock.get("revision")}
+        if (not isinstance(lock, dict)
+                or lock != {"schema_version": 1,
+                            "repository": "tim8es/book-translator",
+                            "revision": lock.get("revision")}
                 or not isinstance(lock.get("revision"), str)
                 or not SHA.fullmatch(lock["revision"])):
             return False
