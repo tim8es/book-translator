@@ -63,6 +63,17 @@ class ConvergenceDiagnosticsTests(unittest.TestCase):
         ledger, chapter = self.fixture((5, 3, 4))
         self.assertIsNone(convergence.stalled_rejected_reviews(ledger, chapter))
 
+
+    def test_oscillating_severity_without_net_progress_is_stalled(self):
+        ledger, chapter = self.fixture((8, 16, 13))
+        result = convergence.stalled_rejected_reviews(ledger, chapter)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["severity_scores"], [8, 16, 13])
+        self.assertEqual(result["action"], "operator-attention-no-pass")
+
+    def test_eventual_net_improvement_is_not_stalled(self):
+        ledger, chapter = self.fixture((16, 20, 13))
+        self.assertIsNone(convergence.stalled_rejected_reviews(ledger, chapter))
     def test_refuse_stale_mixed_source_or_prior_pass(self):
         ledger, chapter = self.fixture()
         chapter["translation_acceptance"]["translation_sha256"] = digest("another")
