@@ -1016,8 +1016,61 @@ def _legacy_known_epub_preflight_blocker(status: dict) -> bool:
             ), error) is not None)
 
 
+
+def approved_plain_epub_link_retry(status: dict) -> bool:
+    """One-shot Auto retry of the former plain-EPUB relative-link parser error.
+
+    Consent is per intake and exact blocked checkpoint. The immutable source,
+    selected public runtime and retry budget are checked again by the runner.
+    An unrelated malformed URL cannot opt into retry through this gate.
+    """
+    job_id = status.get("job_id")
+    error = status.get("last_error")
+    retries = status.get("preflight_retries", 0)
+    if (status.get("state") != "blocked"
+            or status.get("phase") != "operator-intervention-required"
+            or status.get("book_slug") is not None
+            or status.get("active") is not None
+            or status.get("workflow_revision") is not None
+            or status.get("source_sha256") is not None
+            or not isinstance(job_id, str) or ID.fullmatch(job_id) is None
+            or type(retries) is not int
+            or not 0 <= retries < len(AUTO_RETRY_DELAYS_SECONDS)
+            or not isinstance(error, str)
+            or re.fullmatch(
+                r"JobError: canonical CLI rejected operation: ERROR: "
+                r"Cannot extract EPUB spine document [A-Za-z0-9_./-]+\.(?:html|htm): "
+                r"Unsupported anchor destination; only same-document EPUB "
+                r"fragments or safe external links are supported\n?", error,
+            ) is None):
+        return False
+    try:
+        request = request_for(job_id)
+        if (job_path(job_id) / "chatops-control.json").exists():
+            return False
+        lock = read_json(ROOT / "automation" / "runtime.lock.json")
+        if (not isinstance(lock, dict) or lock != {
+                "schema_version": 1, "repository": "tim8es/book-translator",
+                "revision": lock.get("revision"),
+        } or not isinstance(lock.get("revision"), str)
+                or SHA.fullmatch(lock["revision"]) is None):
+            return False
+        return read_json(job_path(job_id) / "auto-preflight-repair.json") == {
+            "schema_version": 1,
+            "kind": "retry-after-epub-link-parser-fix",
+            "job_id": job_id,
+            "source_sha256": request["source_sha256"],
+            "last_error": error,
+            "failed_at": status["updated_at"],
+            "preflight_retries": retries,
+            "runtime_revision": lock["revision"],
+        }
+    except (OSError, ValueError, KeyError, TypeError, JobError):
+        return False
+
+
 def known_epub_preflight_blocker(status: dict) -> bool:
-    if _legacy_known_epub_preflight_blocker(status):
+    if _legacy_known_epub_preflight_blocker(status) or approved_plain_epub_link_retry(status):
         return True
     # Re-admit only a pre-init <details> coverage rejection repaired by the
     # source-bound XHTML preservation path. The exact source SHA must already
