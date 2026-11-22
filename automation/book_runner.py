@@ -1726,21 +1726,8 @@ def checkpoint(job_id: str, status: dict, slug: str | None) -> None:
     for attempt in range(32):
         git("fetch", "--quiet", "origin", "main")
         remote = git("rev-parse", "origin/main")
-        try:
-            candidate = (local_commit if remote == base else
-                         replay_disjoint_checkpoint(base, local_commit, remote, paths))
-        except JobError as exc:
-            if str(exc) == "remote main is behind checkpoint base; retry fetch":
-                if attempt == 31:
-                    raise JobError("remote ref remained stale after 32 fetches "
-                                   f"(base={base[:12]}, remote={remote[:12]})") from exc
-                # GitHub's read replicas can briefly lag the runner's checkout.
-                # Never retry a genuine rewrite or a same-book/status conflict.
-                print(f"Stale origin/main at checkpoint {attempt+1}/32: "
-                      f"base={base[:12]} remote={remote[:12]}", file=sys.stderr)
-                time.sleep(1 + attempt // 8)
-                continue
-            raise
+        candidate = (local_commit if remote == base else
+                     replay_disjoint_checkpoint(base, local_commit, remote, paths))
         result = subprocess.run(
             ["git", "push", "origin", f"{candidate}:refs/heads/main"],
             cwd=ROOT, capture_output=True, text=True)
