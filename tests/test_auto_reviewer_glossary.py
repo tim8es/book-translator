@@ -197,11 +197,11 @@ class ReviewerGlossaryTests(unittest.TestCase):
                 "operation": "correct_translation", "unit_id": chapter["unit_id"],
                 "chapter_number": 1,
             })
-            with patch.object(runner, "ROOT", root), \\
+            with patch.object(runner, "ROOT", root), \
                  patch.object(runner, "pinned_scripts_dir",
-                              return_value=ROOT / "scripts"), \\
+                              return_value=ROOT / "scripts"), \
                  patch.object(runner, "chapter_data",
-                              return_value=({}, ledger, [chapter])), \\
+                              return_value=({}, ledger, [chapter])), \
                  patch.object(runner, "cli", return_value=decision):
                 self.assertEqual(runner.canonical_dispatch("synthetic", {})[0], "corrector")
                 glossary.write_text(new, "utf-8")
