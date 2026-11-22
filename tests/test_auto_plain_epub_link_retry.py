@@ -92,6 +92,19 @@ class PlainEpubLinkRetryTests(unittest.TestCase):
                 "Unmapped prose", "Unsafe script"),
         }))
 
+    def test_reviewed_repair_approval_bypasses_only_timer(self):
+        # The original block is too recent for normal retry backoff.
+        self.status["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self.assertFalse(runner.recoverable_epub_preflight(self.status))
+        self.approve()
+        self.assertTrue(runner.recoverable_epub_preflight(self.status))
+        self.assertFalse(runner.recoverable_epub_preflight({
+            **self.status, "preflight_retries": 1,
+        }))
+        self.assertFalse(runner.recoverable_epub_preflight({
+            **self.status, "state": "running",
+        }))
+
     def test_wrong_source_error_or_runtime_is_not_authorized(self):
         self.approve()
         for change in (
