@@ -2442,6 +2442,25 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     if not path.exists():
         return path, expected
     stage = read_json(path)
+    # An independent new reviewer record supersedes temporary corrector edits
+    # targeting the prior rejected record. Reuse only if the immutable source,
+    # translation, workflow and unit identities still match; other mismatches
+    # remain blocking rather than silently discarding untrusted state.
+    if (status.get("glossary_recheck_unit") == chapter["unit_id"]
+            and isinstance(stage, dict)
+            and stage.get("review_record_id") != record["record_id"]
+            and all(stage.get(key) == expected[key] for key in (
+                "schema_version", "unit_id", "source_sha256",
+                "translation_sha256", "workflow_revision"))
+            and record.get("outcome") == "CORRECTIONS_REQUIRED"):
+        path.unlink()
+        status.pop("correction_batch_progress", None)
+        status["stale_correction_stage_retired"] = {
+            "unit_id": chapter["unit_id"],
+            "prior_review_record_id": stage["review_record_id"],
+            "current_review_record_id": record["record_id"],
+        }
+        return path, expected
     if (not isinstance(stage, dict) or set(stage) != set(expected)
             or any(stage.get(k) != v for k, v in expected.items()
                    if k not in {"patches", "glossary", "style_guide"})
@@ -3520,6 +3539,69 @@ def apply_operator_review_reopen(job_id: str, slug: str, status: dict) -> bool:
     return True
 
 
+def glossary_only_recheck_needed(slug: str, chapter: dict, record: dict | None) -> bool:
+    """Review a *changed glossary*, never mark a translated artifact PASS.
+
+    A previous terminology-only rejection may have become obsolete after a
+    separately reconciled literary decision. The pinned reviewer must still
+    re-evaluate the entire source/target and explicitly close each finding.
+    Neither model-output failures nor unchanged memory authorize this route.
+    """
+    if (not isinstance(record, dict)
+            or record.get("outcome") != "CORRECTIONS_REQUIRED"):
+        return False
+    report = record.get("quality_report")
+    if not isinstance(report, dict) or report.get("evidence_version") != 2:
+        return False
+    unresolved = [f for f in report.get("findings", [])
+                  if isinstance(f, dict) and f.get("resolved") is False]
+    if not unresolved or any(f.get("category") != "terminology" for f in unresolved):
+        return False
+    accepted = chapter.get("translation_acceptance")
+    if (not isinstance(accepted, dict)
+            or accepted.get("source_sha256") != record.get("source_sha256")
+            or accepted.get("translation_sha256") != record.get("translation_sha256")):
+        return False
+    frozen = record.get("shared_state_revisions")
+    if not isinstance(frozen, dict) or not isinstance(frozen.get("glossary"), str):
+        return False
+    book = ROOT / "books" / slug
+    current = fingerprint(book / "glossary.md")
+    if current == frozen["glossary"]:
+        return False
+    # The older literary revision must itself implement the narrow
+    # glossary_reconciliation exception to immutable v2 review lineage.
+    try:
+        scripts_dir = str(pinned_scripts_dir())
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from workflow.review_anchors import verify_correction_lineage
+        if "current_shared_state_revisions" not in inspect.signature(
+                verify_correction_lineage).parameters:
+            return False
+        source = (book / chapter["source_path"]).read_text("utf-8")
+        translation = (book / chapter["translation_path"]).read_text("utf-8")
+    except (ImportError, OSError, KeyError, TypeError, ValueError):
+        return False
+    if (hashlib.sha256(source.encode("utf-8")).hexdigest()
+            != record["source_sha256"]
+            or hashlib.sha256(translation.encode("utf-8")).hexdigest()
+            != record["translation_sha256"]):
+        return False
+    for finding in unresolved:
+        for field, body in (("source_anchor", source),
+                            ("translation_anchor", translation)):
+            anchor = finding.get(field)
+            if (not isinstance(anchor, dict)
+                    or not isinstance(anchor.get("quote"), str)
+                    or not anchor["quote"]
+                    or type(anchor.get("occurrence")) is not int
+                    or anchor["occurrence"] < 0
+                    or body.count(anchor["quote"]) <= anchor["occurrence"]):
+                return False
+    return True
+
+
 def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
     """Use the pinned engine's authoritative resume decision for automatic work.
 
@@ -3588,6 +3670,14 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             and report.get("evidence_version") != 2):
         return "reviewer", chapter
     if operation == "correct_translation":
+        if (glossary_only_recheck_needed(slug, chapter, record)
+                and accepted_review_count(ledger, chapter) < operator_unit_limit(
+                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)):
+            # The source/translation is unchanged; only a new glossary
+            # decision can be checked against the old terminology findings.
+            # Never infer PASS or silently increase the reviewer budget.
+            status["glossary_recheck_unit"] = unit_id
+            return "reviewer", chapter
         if (status.get("memory_recheck_unit") != unit_id
                 and not (pinned_scripts_dir() / "workflow" / "attention.py").exists()
                 and defer_stalled_review(slug, status, ledger, chapter)):
