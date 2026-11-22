@@ -52,7 +52,7 @@ class DisclosurePreservationTests(unittest.TestCase):
         source = chapters[0].content
         for phrase in ("Spoiler label", "Secret", "More hidden content.", "After."):
             self.assertIn(phrase, source)
-        self.assertEqual(source.count("<!-- bt-block:"), 5)
+        self.assertEqual(source.count("<!-- bt-block:"), 6)
         report = epub_preserve.audit(self.path, chapters)
         self.assertEqual(report["state"], "verified")
         target = (source.replace("Beginning", "Начало")
