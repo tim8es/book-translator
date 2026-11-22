@@ -61,7 +61,8 @@ class PlainEpubLinkRetryTests(unittest.TestCase):
             "schema_version": 1, "kind": "retry-after-epub-link-parser-fix",
             "job_id": self.job_id, "source_sha256": self.digest,
             "last_error": self.status["last_error"],
-            "failed_at": self.status["updated_at"], "preflight_retries": 0,
+            "failed_at": self.status["updated_at"],
+            "preflight_retries": self.status.get("preflight_retries", 0),
             "runtime_revision": self.revision,
         })
 
@@ -72,6 +73,23 @@ class PlainEpubLinkRetryTests(unittest.TestCase):
         self.assertTrue(runner.recoverable_epub_preflight(self.status))
         self.assertFalse(runner.known_epub_preflight_blocker({
             **self.status, "preflight_retries": 1,
+        }))
+
+    def test_next_plain_html_leaf_div_blocker_can_be_repaired_once(self):
+        self.status["last_error"] = (
+            "JobError: canonical CLI rejected operation: ERROR: "
+            "EPUB source-preserving extraction blocked: "
+            "Pizza_With_Pineapples_split_001.html: Unmapped prose in <div>\n"
+        )
+        self.status["preflight_retries"] = 1
+        self.approve()
+        self.assertTrue(runner.known_epub_preflight_blocker(self.status))
+        self.assertFalse(runner.known_epub_preflight_blocker({
+            **self.status, "preflight_retries": 2,
+        }))
+        self.assertFalse(runner.known_epub_preflight_blocker({
+            **self.status, "last_error": self.status["last_error"].replace(
+                "Unmapped prose", "Unsafe script"),
         }))
 
     def test_wrong_source_error_or_runtime_is_not_authorized(self):
