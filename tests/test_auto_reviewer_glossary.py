@@ -177,7 +177,7 @@ class ReviewerGlossaryTests(unittest.TestCase):
             }
             record = {
                 "record_id": "f" * 32, "unit_id": "chapter-000001",
-                "outcome": "CORRECTIONS_REQUIRED",
+                "sequence": 1, "outcome": "CORRECTIONS_REQUIRED",
                 "source_sha256": digest(source),
                 "translation_sha256": digest(target),
                 "shared_state_revisions": {"glossary": old_sha},
