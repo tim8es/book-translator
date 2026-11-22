@@ -171,6 +171,7 @@ class CorrectionBatchGuardTests(unittest.TestCase):
             fixture = self.fixture(folder)
             root, chapter, record, status, stage, stage_path, safe, _ = fixture
             record["sequence"] = 2
+            record["unit_id"] = chapter["unit_id"]
             old = {
                 **record, "sequence": 1, "record_id": "old",
                 "translation_sha256": "a" * 64,
@@ -198,8 +199,8 @@ class CorrectionBatchGuardTests(unittest.TestCase):
                               return_value=([safe], [], [])):
                 auto.process_correction_batches(
                     self.JOB, "synthetic", status, root, chapter, record)
-            self.assertIn("CORRECTION FEEDBACK", model.call_args.args[3])
-            self.assertIn("Previous sentence remained inconsistent", model.call_args.args[3])
+            self.assertIn("CORRECTION FEEDBACK", model.call_args_list[0].args[3])
+            self.assertIn("Previous sentence remained inconsistent", model.call_args_list[0].args[3])
             self.assertEqual(status["correction_feedback"]["strategy"],
                              "replan_anchored_clause")
             self.assertNotIn("Previous sentence", json.dumps(status))
