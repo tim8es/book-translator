@@ -97,5 +97,62 @@ class ReplayCheckpointTests(unittest.TestCase):
                 worker.checkpoint(self.job_id, status, "sample")
 
 
+    def test_unpublished_local_checkpoint_is_recovered_without_losing_other_book(self):
+        # The prior local checkpoint survived in the runner, but a competing
+        # main update advanced without including that unpublished commit.
+        sample = self.runner / "books" / "sample" / "progress.json"
+        sample.write_text('{"chapters": [{"id": "accepted"}]}\n', encoding="utf-8")
+        git(self.runner, "add", "books/sample/progress.json")
+        git(self.runner, "commit", "-m", "local-only accepted translation")
+        self.other_book_push()
+        status = {"schema_version": 1, "job_id": self.job_id,
+                  "state": "running", "phase": "review-ready"}
+        with patch.object(worker, "ROOT", self.runner):
+            worker.checkpoint(self.job_id, status, "sample")
+            self.assertEqual(git(self.runner, "diff", "--cached", "--name-only"), "")
+            status["phase"] = "next-reviewed-checkpoint"
+            worker.checkpoint(self.job_id, status, "sample")
+        git(self.writer, "pull", "--ff-only", "origin", "main")
+        self.assertEqual(
+            (self.writer / "books" / "sample" / "progress.json").read_text("utf-8"),
+            '{"chapters": [{"id": "accepted"}]}\n')
+        self.assertEqual(
+            (self.writer / "books" / "other" / "progress.json").read_text("utf-8"),
+            '{"revision": 2}\n')
+        published = json.loads((self.writer / "automation" / "status" /
+                               (self.job_id + ".json")).read_text("utf-8"))
+        self.assertEqual(published["phase"], "next-reviewed-checkpoint")
+
+    def test_unpublished_checkpoint_refuses_conflicting_remote_book_change(self):
+        sample = self.runner / "books" / "sample" / "progress.json"
+        sample.write_text('{"chapters": [{"id": "accepted"}]}\n', encoding="utf-8")
+        git(self.runner, "add", "books/sample/progress.json")
+        git(self.runner, "commit", "-m", "unpublished book change")
+        other = self.writer / "books" / "sample" / "progress.json"
+        other.write_text('{"chapters": [{"id": "another-writer"}]}\n', encoding="utf-8")
+        git(self.writer, "add", "books/sample/progress.json")
+        git(self.writer, "commit", "-m", "conflicting published book change")
+        git(self.writer, "push", "origin", "main")
+        with patch.object(worker, "ROOT", self.runner):
+            with self.assertRaisesRegex(worker.JobError, "remote changed this job"):
+                worker.checkpoint(self.job_id, {"phase": "ready"}, "sample")
+        self.assertEqual(other.read_text("utf-8"),
+                         '{"chapters": [{"id": "another-writer"}]}\n')
+
+    def test_rewritten_remote_with_no_shared_ancestor_is_fail_closed(self):
+        # Never patch into an unrelated history even when a path happens to
+        # have the same name; there is no trusted common book-state baseline.
+        git(self.writer, "checkout", "--orphan", "unrelated")
+        git(self.writer, "rm", "-r", "--cached", ".")
+        (self.writer / "books" / "sample" / "progress.json").write_text(
+            '{"chapters": []}\n', encoding="utf-8")
+        git(self.writer, "add", ".")
+        git(self.writer, "commit", "-m", "unrelated history")
+        git(self.writer, "push", "--force", "origin", "HEAD:main")
+        with patch.object(worker, "ROOT", self.runner):
+            with self.assertRaisesRegex(worker.JobError, "without shared ancestry"):
+                worker.checkpoint(self.job_id, {"phase": "ready"}, "sample")
+
+
 if __name__ == "__main__":
     unittest.main()
