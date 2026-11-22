@@ -166,8 +166,8 @@ class ReviewerGlossaryTests(unittest.TestCase):
             (book / "extracted" / "001.md").write_text(source, "utf-8")
             (book / "translated" / "001.md").write_text(target, "utf-8")
             glossary = book / "glossary.md"
-            old = "| Linnet | Коноплянка | персонаж | женский род |\\n"
-            new = "| Linnet | Зеленушка | персонаж | мужской род |\\n"
+            old = "| Linnet | Коноплянка | персонаж | женский род |\n"
+            new = "| Linnet | Зеленушка | персонаж | мужской род |\n"
             glossary.write_text(old, "utf-8")
             old_sha = digest(old)
             finding = {
