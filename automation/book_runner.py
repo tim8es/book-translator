@@ -1560,32 +1560,48 @@ def git(*args: str) -> str:
 
 def replay_disjoint_checkpoint(base: str, local_commit: str, remote: str,
                                paths: list[str]) -> str:
-    """Build a new commit atop remote without touching the active checkout.
+    """Replay only this book/job's committed state onto the latest remote ref.
 
-    The pinned engine can leave tracked scripts modified in the runner worktree.
-    Rebase/reset/autostash of that checkout is unsafe. Instead apply only the
-    committed book/status patch to a temporary Git index based on remote.
+    GitHub Actions can observe a remote history that no longer contains an
+    earlier local checkpoint (a concurrent rewrite, stale ref, or a push whose
+    parent was replaced). Never discard those unpublished local changes.
+
+    A replay is permitted only when the remote has not changed this book/job
+    since the exact shared ancestor, OR its scoped tree matches our local base.
+    In the former case replay the *cumulative* patch since the ancestor.
+    Otherwise fail closed. Never rebase/reset the active pinned-engine checkout.
     """
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", base, remote],
         cwd=ROOT, capture_output=True)
-    if ancestor.returncode:
-        # GitHub can briefly serve an older origin/main ref after a successful
-        # concurrent push. An *ancestor* of our checkout base is stale, not
-        # rewritten history. Let checkpoint re-fetch instead of discarding
-        # a model response or weakening the ancestry guard.
-        behind = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", remote, base],
-            cwd=ROOT, capture_output=True)
-        if ancestor.returncode == 1 and behind.returncode == 0:
-            raise JobError("remote main is behind checkpoint base; retry fetch")
-        raise JobError("upstream history diverged; refusing automatic checkpoint "
-                       f"(base={base[:12]}, remote={remote[:12]})")
-    if git("diff", "--name-only", base, remote, "--", *paths):
+    if ancestor.returncode not in (0, 1):
+        raise JobError("cannot establish checkpoint ancestry")
+    patch_base = base
+    if ancestor.returncode == 1:
+        common = subprocess.run(
+            ["git", "merge-base", base, remote],
+            cwd=ROOT, capture_output=True, text=True)
+        if common.returncode or not common.stdout.strip():
+            raise JobError("upstream history diverged without shared ancestry; "
+                           "refusing automatic checkpoint")
+        shared = common.stdout.strip()
+        # The remote may contain our old checkpoint bytes under a different
+        # history. That case requires only the latest local delta.
+        if not git("diff", "--name-only", base, remote, "--", *paths):
+            patch_base = base
+        # If a previously local-only checkpoint never made it into main, keep
+        # its complete book/status delta instead of losing a model response.
+        elif not git("diff", "--name-only", shared, remote, "--", *paths):
+            patch_base = shared
+        else:
+            raise JobError("remote changed this job's book/status; "
+                           "refusing stale checkpoint")
+    elif git("diff", "--name-only", base, remote, "--", *paths):
         raise JobError("remote changed this job's book/status; refusing stale checkpoint")
 
     patch = subprocess.run(
-        ["git", "diff", "--binary", "--full-index", base, local_commit, "--", *paths],
+        ["git", "diff", "--binary", "--full-index", patch_base,
+         local_commit, "--", *paths],
         cwd=ROOT, capture_output=True)
     if patch.returncode or not patch.stdout:
         raise JobError("cannot construct isolated checkpoint patch")
