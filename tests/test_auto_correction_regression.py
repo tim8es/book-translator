@@ -166,6 +166,44 @@ class CorrectionBatchGuardTests(unittest.TestCase):
             artifact = root / "books" / "synthetic" / chapter["translation_path"]
             self.assertNotIn("Начальное предложение", artifact.read_text("utf-8"))
 
+    def test_opted_in_corrector_receives_review_history_without_logging_book_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fixture = self.fixture(folder)
+            root, chapter, record, status, stage, stage_path, safe, _ = fixture
+            record["sequence"] = 2
+            old = {
+                **record, "sequence": 1, "record_id": "old",
+                "translation_sha256": "a" * 64,
+                "quality_report": {"evidence_version": 2, "findings": [
+                    {**record["quality_report"]["findings"][0],
+                     "source_anchor": {"quote": "A simple sentence.", "occurrence": 0},
+                     "translation_anchor": {"quote": "Старый перевод.", "occurrence": 0},
+                     "detail": "Previous sentence remained inconsistent"}]},
+            }
+            record["quality_report"]["findings"][0].update({
+                "source_anchor": {"quote": "A simple sentence.", "occurrence": 0},
+                "translation_anchor": {"quote": "Первое предложение", "occurrence": 0},
+                "detail": "Current sentence is wrong",
+            })
+            ledger = {"records": [old, record]}
+            with patch.dict("os.environ", {"BOOK_TRANSLATOR_CORRECTION_FEEDBACK": "on"}), \\
+                 patch.object(auto, "ROOT", root), \\
+                 patch.object(auto, "chapter_data", return_value=({}, ledger, [chapter])), \\
+                 patch.object(auto, "load_correction_stage", return_value=(stage_path, stage)), \\
+                 patch.object(auto, "context", return_value=("sys", "current evidence", "")), \\
+                 patch.object(auto, "role_contracts", return_value=("sys", ["AGENTS.md"])), \\
+                 patch.object(auto, "checkpoint"), \\
+                 patch.object(auto, "complete_for_job", return_value="{}") as model, \\
+                 patch.object(auto, "parse_correction_patches",
+                              return_value=([safe], [], [])):
+                auto.process_correction_batches(
+                    self.JOB, "synthetic", status, root, chapter, record)
+            self.assertIn("CORRECTION FEEDBACK", model.call_args.args[3])
+            self.assertIn("Previous sentence remained inconsistent", model.call_args.args[3])
+            self.assertEqual(status["correction_feedback"]["strategy"],
+                             "replan_anchored_clause")
+            self.assertNotIn("Previous sentence", json.dumps(status))
+
     def test_same_rejected_patch_is_not_reused(self):
         with tempfile.TemporaryDirectory() as folder:
             fixture = self.fixture(folder)
