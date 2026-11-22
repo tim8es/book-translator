@@ -1,6 +1,8 @@
 """Aggregate content-free Auto metrics from this runtime's first observed event."""
 from __future__ import annotations
 from datetime import datetime, timezone
+import os
+import re
 
 def _metrics(status: dict) -> dict:
     result = status.setdefault("execution_metrics", {
@@ -13,36 +15,70 @@ def _metrics(status: dict) -> dict:
         raise ValueError("invalid execution metrics")
     return result
 
+def _pi_revision_metrics(status: dict) -> dict | None:
+    """Separate completed Pi metrics by exact immutable executor revision.
+
+    The historical aggregate remains untouched. Only the opt-in Pi backend
+    with an Actions-pinned full Git SHA acquires a revision-specific bucket;
+    unknown/unconfigured revisions must never be attributed to current code.
+    """
+    if os.environ.get("BOOK_TRANSLATOR_LLM_BACKEND") != "pi":
+        return None
+    revision = os.environ.get("PI_EXECUTOR_SHA", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    revisions = _metrics(status).setdefault("runtime_revisions", {})
+    if not isinstance(revisions, dict):
+        raise ValueError("invalid runtime revision metrics")
+    bucket = revisions.setdefault(revision, {
+        "since": datetime.now(timezone.utc).isoformat(),
+        "api": {}, "accepted_operations": {},
+    })
+    if (not isinstance(bucket, dict) or
+            not isinstance(bucket.get("api"), dict) or
+            not isinstance(bucket.get("accepted_operations"), dict)):
+        raise ValueError("invalid runtime revision bucket")
+    return bucket
+
+
 def provider(status: dict, metric: dict) -> None:
     role = metric.get("role")
     if role not in {"translator", "reviewer", "corrector", "orchestrator"}:
         return
-    row = _metrics(status)["api"].setdefault(role, {})
-    def add(key, amount):
-        prior = row.get(key, 0)
-        if type(prior) is not int or prior < 0:
-            raise ValueError("invalid execution counter")
-        row[key] = prior + amount
-    add("completed_calls", 1)
-    add("responses" if metric.get("outcome") == "response" else "errors", 1)
-    for field in ("duration_ms", "request_chars", "prompt_tokens",
-                  "completion_tokens", "total_tokens"):
-        value = metric.get(field)
-        if type(value) is int and value >= 0:
-            add(field, value)
+    buckets = (_metrics(status), _pi_revision_metrics(status))
+    for bucket in buckets:
+        if bucket is None:
+            continue
+        row = bucket["api"].setdefault(role, {})
+        def add(key, amount):
+            prior = row.get(key, 0)
+            if type(prior) is not int or prior < 0:
+                raise ValueError("invalid execution counter")
+            row[key] = prior + amount
+        add("completed_calls", 1)
+        add("responses" if metric.get("outcome") == "response" else "errors", 1)
+        for field in ("duration_ms", "request_chars", "prompt_tokens",
+                      "completion_tokens", "total_tokens"):
+            value = metric.get(field)
+            if type(value) is int and value >= 0:
+                add(field, value)
+
 
 def accepted(status: dict, role: str, outcome: str | None = None) -> None:
-    keys = ({"translator": "translated", "corrector": "corrected",
-             "promote": "reviewed"})
+    keys = {"translator": "translated", "corrector": "corrected",
+            "promote": "reviewed"}
     if role == "reviewer":
         key = "review_pass" if outcome == "PASS" else "review_rejected"
     else:
         key = keys[role]
-    row = _metrics(status)["accepted_operations"]
-    prior = row.get(key, 0)
-    if type(prior) is not int or prior < 0:
-        raise ValueError("invalid accepted operation counter")
-    row[key] = prior + 1
+    for bucket in (_metrics(status), _pi_revision_metrics(status)):
+        if bucket is None:
+            continue
+        row = bucket["accepted_operations"]
+        prior = row.get(key, 0)
+        if type(prior) is not int or prior < 0:
+            raise ValueError("invalid accepted operation counter")
+        row[key] = prior + 1
     if role == "reviewer" and outcome == "PASS":
         accepted(status, "promote")
 
