@@ -1115,9 +1115,55 @@ def epub_preflight_retry_at(status: dict) -> str | None:
         return None
 
 
+def approved_epub_repair_retry(status: dict) -> bool:
+    """Allow one immediate, explicitly approved parser-repair replay.
+
+    An operator reviews and pins the fixed public runtime, then adds an
+    approval bound to the immutable intake, exact failed checkpoint and pinned
+    runtime revision. The first replay checkpoints an incremented attempt count
+    before extraction, invalidating this approval even if extraction fails.
+    Neither arbitrary blocked jobs nor provider backoff may use this path.
+    """
+    if not known_epub_preflight_blocker(status):
+        return False
+    job_id = status.get("job_id")
+    retries = status.get("preflight_retries", 0)
+    if (not isinstance(job_id, str) or not ID.fullmatch(job_id)
+            or type(retries) is not int
+            or not 0 <= retries < len(AUTO_RETRY_DELAYS_SECONDS)):
+        return False
+    try:
+        request = request_for(job_id)  # validates the preserved source SHA-256
+        if not chatops_admission_requested(job_id, request):
+            return False
+        lock = read_json(ROOT / "automation" / "runtime.lock.json")
+        if (not isinstance(lock, dict)
+                or lock != {"schema_version": 1,
+                            "repository": "tim8es/book-translator",
+                            "revision": lock.get("revision")}
+                or not isinstance(lock.get("revision"), str)
+                or not SHA.fullmatch(lock["revision"])):
+            return False
+        approval = read_json(job_path(job_id) / "preflight-repair.json")
+        return approval == {
+            "schema_version": 1,
+            "kind": "retry-after-reviewed-epub-parser-repair",
+            "job_id": job_id,
+            "source_sha256": request["source_sha256"],
+            "last_error": status["last_error"],
+            "failed_at": status["updated_at"],
+            "preflight_retries": retries,
+            "runtime_revision": lock["revision"],
+        }
+    except (OSError, ValueError, KeyError, TypeError, JobError):
+        return False
+
+
 def recoverable_epub_preflight(status: dict) -> bool:
     deadline = epub_preflight_retry_at(status)
-    return deadline is not None and datetime.now(timezone.utc) >= datetime.fromisoformat(deadline)
+    if deadline is not None and datetime.now(timezone.utc) >= datetime.fromisoformat(deadline):
+        return True
+    return approved_epub_repair_retry(status)
 
 
 def recoverable_structural_span_blocked(status: dict) -> bool:
