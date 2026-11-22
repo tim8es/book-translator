@@ -186,14 +186,14 @@ class CorrectionBatchGuardTests(unittest.TestCase):
                 "detail": "Current sentence is wrong",
             })
             ledger = {"records": [old, record]}
-            with patch.dict("os.environ", {"BOOK_TRANSLATOR_CORRECTION_FEEDBACK": "on"}), \\
-                 patch.object(auto, "ROOT", root), \\
-                 patch.object(auto, "chapter_data", return_value=({}, ledger, [chapter])), \\
-                 patch.object(auto, "load_correction_stage", return_value=(stage_path, stage)), \\
-                 patch.object(auto, "context", return_value=("sys", "current evidence", "")), \\
-                 patch.object(auto, "role_contracts", return_value=("sys", ["AGENTS.md"])), \\
-                 patch.object(auto, "checkpoint"), \\
-                 patch.object(auto, "complete_for_job", return_value="{}") as model, \\
+            with patch.dict("os.environ", {"BOOK_TRANSLATOR_CORRECTION_FEEDBACK": "on"}), \
+                 patch.object(auto, "ROOT", root), \
+                 patch.object(auto, "chapter_data", return_value=({}, ledger, [chapter])), \
+                 patch.object(auto, "load_correction_stage", return_value=(stage_path, stage)), \
+                 patch.object(auto, "context", return_value=("sys", "current evidence", "")), \
+                 patch.object(auto, "role_contracts", return_value=("sys", ["AGENTS.md"])), \
+                 patch.object(auto, "checkpoint"), \
+                 patch.object(auto, "complete_for_job", return_value="{}") as model, \
                  patch.object(auto, "parse_correction_patches",
                               return_value=([safe], [], [])):
                 auto.process_correction_batches(
