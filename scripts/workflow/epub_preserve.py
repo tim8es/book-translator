@@ -125,6 +125,14 @@ def _path(opf: str, href: str) -> str:
     return result
 
 
+def _inert_bare_hostname(href: str) -> bool:
+    """Retain literal author-site hostnames without inventing a URL scheme."""
+    return (isinstance(href, str) and re.fullmatch(
+        r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+        r"(?:com|org|net|io|info|edu|gov)", href, re.I,
+    ) is not None)
+
+
 def _source_style_classes(zf: zipfile.ZipFile) -> tuple[set[str], set[str]]:
     """Discover semantic emphasis and large initials from original CSS."""
     italic: set[str] = set()
@@ -290,10 +298,11 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             # Source-bound links to another spine XHTML are allowed only with
             # explicit package and fragment verification in analyze(). The
             # original href is kept by the inline-marker EPUB renderer.
-            if not re.fullmatch(
+            if (not _inert_bare_hostname(node.get("href", ""))
+                    and not re.fullmatch(
                 r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
                 node.get("href", ""),
-            ):
+            )):
                 raise PreservedEpubError("Unsupported cross-document hyperlink in prose")
     output = []
     for node in body.iter():
@@ -523,6 +532,10 @@ def _verify_prose_links(root: ET.Element, document: str,
             continue
         href = link.get("href", "")
         if href.startswith(("https://", "http://", "mailto:", "#")):
+            continue
+        if _inert_bare_hostname(href):
+            # This source may use an author's bare website as href.
+            # Preserve exact bytes without adding https:// or fetching it.
             continue
         if not re.fullmatch(
             r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
