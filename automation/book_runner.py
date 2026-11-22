@@ -1039,9 +1039,13 @@ def approved_plain_epub_link_retry(status: dict) -> bool:
             or not isinstance(error, str)
             or re.fullmatch(
                 r"JobError: canonical CLI rejected operation: ERROR: "
-                r"Cannot extract EPUB spine document [A-Za-z0-9_./-]+\.(?:html|htm): "
+                r"(?:Cannot extract EPUB spine document "
+                r"[A-Za-z0-9_./-]+\.(?:html|htm): "
                 r"Unsupported anchor destination; only same-document EPUB "
-                r"fragments or safe external links are supported\n?", error,
+                r"fragments or safe external links are supported|"
+                r"EPUB source-preserving extraction blocked: "
+                r"[A-Za-z0-9_./-]+\.(?:html|htm): Unmapped prose in <div>)\n?",
+                error,
             ) is None):
         return False
     try:
