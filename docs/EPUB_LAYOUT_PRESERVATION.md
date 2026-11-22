@@ -6,6 +6,17 @@ fail-closed compatibility path, not a general HTML-to-EPUB converter.
 
 ## Purpose and provenance
 
+The same source-bound `original_xhtml_v1` path now admits a narrow subset of
+HTML disclosure controls (`<details>`) even when the EPUB contains no images.
+A disclosure must have exactly one nonempty `<summary>` as its first child,
+with independently mapped prose blocks inside. Nested disclosures, executable
+attributes, malformed summaries, and unmapped direct prose still fail closed.
+The summary label and every contained paragraph are separate translatable
+blocks; the original `<details>` tag, `open` state, attributes, and child order
+are retained in EPUB output. Do not flatten hidden text into always-visible
+Markdown, or treat a successful ZIP extraction as source-coverage evidence.
+
+
 Do **not** flatten an image-rich source into freely rebuilt Markdown XHTML.
 The original EPUB ZIP package remains immutable and SHA-256 bound. The extracted
 units are ordered prose-bearing **source XHTML documents**. Image-only spine
