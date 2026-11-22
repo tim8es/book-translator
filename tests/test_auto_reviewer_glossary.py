@@ -226,6 +226,7 @@ class ReviewerGlossaryTests(unittest.TestCase):
                       "source_sha256": "1" * 64,
                       "translation_sha256": "2" * 64}
             status = {"workflow_revision": "3" * 40,
+                      "glossary_recheck_unit": chapter["unit_id"],
                       "correction_batch_progress": {"old": True}}
             staged = {"schema_version": 1, "unit_id": chapter["unit_id"],
                       "review_record_id": old,
