@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,3 +118,46 @@ class DisclosurePreservationTests(unittest.TestCase):
                 disclosure_epub(self.path, fragment)
                 with self.assertRaises((book.BookError, epub_preserve.PreservedEpubError)):
                     book.read_epub(self.path)
+
+    def test_blocked_chatops_intake_can_retry_only_exact_source(self):
+        sys.path.insert(0, str(ROOT / "automation"))
+        import book_runner as runner
+
+        job_id = "ac37df793a0a6b348c42de5376ce0e3d"
+        disclosure_epub(self.path,
+            '<details><summary>Author note</summary><p>Keep every word.</p></details>')
+        source = self.path.read_bytes()
+        source_sha = hashlib.sha256(source).hexdigest()
+        temp_root = Path(self.temp.name)
+        incoming = temp_root / "intake" / "auto" / job_id
+        incoming.mkdir(parents=True)
+        (incoming / "source.epub").write_bytes(source)
+        request = {"schema_version": 1, "job_id": job_id,
+                   "source_sha256": source_sha, "target_language": "ru"}
+        control = {"schema_version": 1, "job_id": job_id,
+                   "source_sha256": source_sha, "mode": "chatops"}
+        import json
+        (incoming / "request.json").write_text(json.dumps(request), encoding="utf-8")
+        (incoming / "chatops-control.json").write_text(json.dumps(control), encoding="utf-8")
+        status = {"schema_version": 1, "job_id": job_id, "state": "blocked",
+                  "phase": "operator-intervention-required", "book_slug": None,
+                  "preflight_retries": 1, "updated_at": "2026-11-20T14:03:56+00:00",
+                  "last_error": "JobError: canonical CLI rejected operation: ERROR: "
+                  "EPUB source coverage blocked: Alligator_Bites_Never_split_009.xhtml: "
+                  "unsupported semantic element <details>\\n"}
+        with patch.object(runner, "ROOT", temp_root):
+            self.assertTrue(runner.known_epub_preflight_blocker(status))
+            self.assertIsNotNone(runner.epub_preflight_retry_at(status))
+            (incoming / "chatops-control.json").write_text(
+                json.dumps({**control, "source_sha256": "a" * 64}), encoding="utf-8")
+            self.assertFalse(runner.known_epub_preflight_blocker(status))
+            (incoming / "chatops-control.json").write_text(json.dumps(control), encoding="utf-8")
+            for mismatch in (
+                {"active": {"role": "translator"}},
+                {"source_sha256": source_sha},
+                {"book_slug": "a-book"},
+                {"last_error": status["last_error"].replace("<details>", "<script>")},
+                {"last_error": status["last_error"].replace("coverage blocked", "preserving extraction blocked")},
+            ):
+                with self.subTest(mismatch=mismatch):
+                    self.assertFalse(runner.known_epub_preflight_blocker({**status, **mismatch}))
