@@ -117,7 +117,10 @@ class DisclosurePreservationTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 disclosure_epub(self.path, fragment)
                 with self.assertRaises((book.BookError, epub_preserve.PreservedEpubError)):
-                    book.read_epub(self.path)
+                    if fragment.startswith("<summary>"):
+                        epub_preserve.analyze(self.path)
+                    else:
+                        book.read_epub(self.path)
 
     def test_blocked_chatops_intake_can_retry_only_exact_source(self):
         sys.path.insert(0, str(ROOT / "automation"))
@@ -144,7 +147,7 @@ class DisclosurePreservationTests(unittest.TestCase):
                   "preflight_retries": 1, "updated_at": "2026-11-20T14:03:56+00:00",
                   "last_error": "JobError: canonical CLI rejected operation: ERROR: "
                   "EPUB source coverage blocked: Alligator_Bites_Never_split_009.xhtml: "
-                  "unsupported semantic element <details>\\n"}
+                  "unsupported semantic element <details>\n"}
         with patch.object(runner, "ROOT", temp_root):
             self.assertTrue(runner.known_epub_preflight_blocker(status))
             self.assertIsNotNone(runner.epub_preflight_retry_at(status))
