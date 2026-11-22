@@ -331,7 +331,7 @@ class AutomatedBookTests(unittest.TestCase):
                     worker.replay_disjoint_checkpoint(
                         base, local, conflicting, ["books/our-book"])
 
-    def test_disjoint_checkpoint_classifies_stale_remote_as_retryable(self):
+    def test_disjoint_checkpoint_recovers_scope_from_unpublished_base(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             def cmd(*args):
@@ -353,12 +353,13 @@ class AutomatedBookTests(unittest.TestCase):
             cmd("commit", "-qm", "local checkpoint")
             local = cmd("rev-parse", "HEAD")
             with patch.object(worker, "ROOT", root):
-                with self.assertRaisesRegex(worker.JobError, "remote main is behind"):
-                    worker.replay_disjoint_checkpoint(
-                        base, local, older_remote, ["books/chapter.md"])
+                replay = worker.replay_disjoint_checkpoint(
+                    base, local, older_remote, ["books/chapter.md"])
+            self.assertEqual(cmd("show", replay + ":books/chapter.md"), "translated")
+            self.assertNotIn("other.txt", cmd("ls-tree", "-r", "--name-only", replay))
             self.assertEqual(cmd("rev-parse", "HEAD"), local)
 
-    def test_checkpoint_refetches_behind_remote_without_forcing_or_overwriting(self):
+    def test_checkpoint_recovers_unpublished_base_without_forcing_or_overwriting(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "books" / "sample").mkdir(parents=True)
@@ -378,18 +379,17 @@ class AutomatedBookTests(unittest.TestCase):
             with patch.object(worker, "ROOT", root), \
                  patch.object(worker, "git", side_effect=fake_git), \
                  patch.object(worker, "replay_disjoint_checkpoint",
-                              side_effect=[worker.JobError(
-                                  "remote main is behind checkpoint base; retry fetch"), "e" * 40]) as replay, \
+                              return_value="e" * 40) as replay, \
                  patch.object(worker.time, "sleep") as sleep, \
                  patch.object(worker.subprocess, "run") as run:
                 run.return_value.returncode = 0
                 worker.checkpoint("a" * 32, {"phase": "reviewer-completed"}, "sample")
-            self.assertEqual(replay.call_count, 2)
-            sleep.assert_called_once_with(1)
+            replay.assert_called_once()
+            sleep.assert_not_called()
             run.assert_called_once()
             self.assertEqual(run.call_args.args[0][:3], ["git", "push", "origin"])
             self.assertNotIn("--force", run.call_args.args[0])
-            self.assertEqual(calls.count(("fetch", "--quiet", "origin", "main")), 2)
+            self.assertEqual(calls.count(("fetch", "--quiet", "origin", "main")), 1)
 
     def test_disjoint_checkpoint_rejects_rewritten_history(self):
         with tempfile.TemporaryDirectory() as temp:
