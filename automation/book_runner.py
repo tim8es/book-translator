@@ -1034,7 +1034,7 @@ def known_epub_preflight_blocker(status: dict) -> bool:
             and re.fullmatch(
                 r"JobError: canonical CLI rejected operation: ERROR: "
                 r"EPUB source coverage blocked: "
-                r"[A-Za-z0-9_./-]+\\.xhtml: unsupported semantic element <details>\\n?",
+                r"[A-Za-z0-9_./-]+\.xhtml: unsupported semantic element <details>\n?",
                 disclosure_error,
             )):
         try:
