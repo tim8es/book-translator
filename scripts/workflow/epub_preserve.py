@@ -291,7 +291,7 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             # explicit package and fragment verification in analyze(). The
             # original href is kept by the inline-marker EPUB renderer.
             if not re.fullmatch(
-                r"[A-Za-z0-9_./%-]+\\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
+                r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
                 node.get("href", ""),
             ):
                 raise PreservedEpubError("Unsupported cross-document hyperlink in prose")
@@ -525,7 +525,7 @@ def _verify_prose_links(root: ET.Element, document: str,
         if href.startswith(("https://", "http://", "mailto:", "#")):
             continue
         if not re.fullmatch(
-            r"[A-Za-z0-9_./%-]+\\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
+            r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
             href,
         ):
             raise PreservedEpubError(f"{document}: unsupported hyperlink destination")
