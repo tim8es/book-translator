@@ -19,11 +19,13 @@ import book
 
 
 def source_epub(path: Path, href: str, *, second: str = '<p id="land">Destination.</p>',
-                link_body: str | None = None, disclosure: bool = True) -> None:
+                link_body: str | None = None, disclosure: bool = True,
+                inline_div: bool = False) -> None:
     anchor = (link_body if link_body is not None else f'<a href="{href}">next chapter</a>')
     paragraph = '<p>Visit ' + anchor + ' for context.</p>'
     body = ('<details><summary>Read more</summary>' + paragraph + '</details>'
-            if disclosure else paragraph)
+            if disclosure else ('<div>Visit ' + anchor + ' for context.</div>'
+                                if inline_div else paragraph))
     first = '<html xmlns="http://www.w3.org/1999/xhtml"><body>' + body + '</body></html>'
     second_xhtml = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>'
                     + second + '</body></html>')
@@ -72,6 +74,30 @@ class CrossSpineLinksTests(unittest.TestCase):
                     self.assertEqual(link.get("href"), href)
                     self.assertIn("следующая глава", "".join(link.itertext()))
                 self.assertEqual(self.path.read_bytes(), original)
+
+    def test_safe_leaf_div_links_are_translatable_and_source_bound(self):
+        source_epub(self.path, "second.xhtml#land", disclosure=False, inline_div=True)
+        original = self.path.read_bytes()
+        self.assertTrue(ep.needs_preserved_xhtml(self.path))
+        chapters, _ = book.read_epub(self.path)
+        self.assertEqual(len(chapters), 2)
+        self.assertEqual(ep.audit(self.path, chapters)["state"], "verified")
+        self.assertIn("Visit", chapters[0].content)
+        self.assertIn("<!-- bt-inline:", chapters[0].content)
+        changed = chapters[0].content.replace("Visit ", "Посмотрите ").replace(
+            "next chapter", "следующую главу")
+        output = ep.build(
+            self.path, [{"markdown": changed}, {"markdown": chapters[1].content}],
+            expected_source_sha256=hashlib.sha256(original).hexdigest(),
+            language="ru",
+        )
+        ep.validate(output, source=self.path, expected_docs=2)
+        with zipfile.ZipFile(io.BytesIO(output)) as archive:
+            xml = ET.fromstring(archive.read("OPS/first.xhtml"))
+            anchor = next(n for n in xml.iter() if n.tag.endswith("}a"))
+            self.assertEqual(anchor.get("href"), "second.xhtml#land")
+            self.assertIn("следующую главу", "".join(anchor.itertext()))
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_plain_cross_spine_links_remain_fail_closed(self):
         """Routing to preservation never admits missing or escaping targets."""
