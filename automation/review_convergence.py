@@ -88,7 +88,13 @@ def stalled_rejected_reviews(ledger: dict, chapter: dict,
     if any(item is None for item in summaries):
         return None
     scores = [item["score"] for item in summaries]
-    if not all(later >= former for former, later in zip(scores, scores[1:])):
+    # A temporary improvement followed by a regression still fails to
+    # converge if the latest artifact is no better than the oldest one.
+    # Preserve a reduction in serious findings as real progress even when
+    # the raw severity sum happens to be unchanged.
+    if (scores[-1] < scores[0] or
+            summaries[-1]["major_or_critical"] <
+            summaries[0]["major_or_critical"]):
         return None
     return {
         "reason": "consecutive-reviews-without-net-severity-improvement",
