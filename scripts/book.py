@@ -41,7 +41,7 @@ from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
 from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub, canonical_external_href
-from workflow.epub_preserve import (has_raster_xhtml, extract as preserve_extract,
+from workflow.epub_preserve import (needs_preserved_xhtml, extract as preserve_extract,
     audit as preserve_audit, PreservedEpubError, MODE as PRESERVE_MODE)
 
 
@@ -334,7 +334,7 @@ def split_txt(text: str, fallback_title: str) -> list[Chapter]:
 
 
 def read_epub(source: Path) -> tuple[list[Chapter], dict[str, str | None]]:
-    if has_raster_xhtml(source):
+    if needs_preserved_xhtml(source):
         try:
             with zipfile.ZipFile(source) as zf:
                 opf = ET.fromstring(zf.read(next(n.get("full-path") for n in ET.fromstring(zf.read("META-INF/container.xml")).iter() if n.tag.endswith("rootfile"))))
@@ -564,7 +564,7 @@ def extract_command(args: argparse.Namespace) -> int:
         shutil.copy2(source, stored_source)
 
     chapters, detected = extract_chapters(stored_source, source_format)
-    preserve_layout = source_format == "epub" and has_raster_xhtml(stored_source)
+    preserve_layout = source_format == "epub" and needs_preserved_xhtml(stored_source)
     coverage = None
     if source_format == "epub":
         try:

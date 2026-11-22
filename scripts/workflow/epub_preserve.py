@@ -22,8 +22,8 @@ from xml.etree import ElementTree as ET
 VALIDATOR = "epub-preserved-xhtml-v1"
 MODE = "original_xhtml_v1"
 _MARKER = re.compile(r"(?m)^<!-- bt-block:(\d{6}) -->\s*$")
-_PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre"}
-_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "small", "sub", "sup", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr"}
+_PROSE = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "blockquote", "pre", "summary"}
+_ALLOWED = {"html", "head", "title", "meta", "link", "style", "body", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6", "a", "em", "i", "b", "strong", "big", "small", "sub", "sup", "br", "hr", "img", "svg", "image", "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "wbr", "details", "summary"}
 _STYLED_INLINE = {"big", "small", "sub", "sup"}
 _INLINE_TOKEN = re.compile(r"<!-- bt-inline:(\d{6}):(start|end) -->")
 _MEDIA_INLINE = {"br", "hr", "img", "wbr"}
@@ -259,6 +259,21 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
         name = _local(node.tag)
         if name not in _ALLOWED:
             raise PreservedEpubError(f"Unsupported semantic element <{name}>")
+        if name == "details":
+            children = list(node)
+            summaries = [child for child in children if _local(child.tag) == "summary"]
+            if (not children or _local(children[0].tag) != "summary"
+                    or len(summaries) != 1
+                    or not "".join(summaries[0].itertext()).strip()):
+                raise PreservedEpubError("Disclosure requires one nonempty first-child <summary>")
+            if any(_local(child.tag) == "details" for child in node.iter() if child is not node):
+                raise PreservedEpubError("Nested disclosure elements are unsupported")
+            if any(_local(child.tag) in _PROSE | {"div", "section"}
+                   for child in summaries[0].iter() if child is not summaries[0]):
+                raise PreservedEpubError("Disclosure summary cannot contain nested prose blocks")
+        if name == "summary" and (parents.get(node) is None
+                                  or _local(parents[node].tag) != "details"):
+            raise PreservedEpubError("Disclosure summary must be a direct child of <details>")
         if name == "wbr":
             parent = parents.get(node)
             while parent is not None and _local(parent.tag) != "a":
@@ -600,6 +615,18 @@ def has_raster_xhtml(source: Path) -> bool:
         return any(
             name.lower().endswith((".xhtml", ".html"))
             and re.search(rb"<img(?:\s|/?>)", zf.read(name), re.I)
+            for name in zf.namelist()
+        )
+
+
+def needs_preserved_xhtml(source: Path) -> bool:
+    """Preserve disclosure controls as original XHTML, not flattened prose."""
+    if has_raster_xhtml(source):
+        return True
+    with zipfile.ZipFile(source) as zf:
+        return any(
+            name.lower().endswith((".xhtml", ".html"))
+            and re.search(rb"<details(?=[\s/>])", zf.read(name), re.I)
             for name in zf.namelist()
         )
 

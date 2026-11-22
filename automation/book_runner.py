@@ -1018,6 +1018,29 @@ def _legacy_known_epub_preflight_blocker(status: dict) -> bool:
 def known_epub_preflight_blocker(status: dict) -> bool:
     if _legacy_known_epub_preflight_blocker(status):
         return True
+    # Re-admit only a pre-init <details> coverage rejection repaired by the
+    # source-bound XHTML preservation path. The exact source SHA must already
+    # be approved for ChatOps; never reopen arbitrary blocked/model jobs.
+    disclosure_error = status.get("last_error")
+    disclosure_job = status.get("job_id")
+    if (status.get("state") == "blocked"
+            and status.get("phase") == "operator-intervention-required"
+            and status.get("book_slug") is None
+            and status.get("active") is None
+            and status.get("workflow_revision") is None
+            and status.get("source_sha256") is None
+            and isinstance(disclosure_job, str) and ID.fullmatch(disclosure_job)
+            and isinstance(disclosure_error, str)
+            and re.fullmatch(
+                r"JobError: canonical CLI rejected operation: ERROR: "
+                r"EPUB source coverage blocked: "
+                r"[A-Za-z0-9_./-]+\.xhtml: unsupported semantic element <details>\n?",
+                disclosure_error,
+            )):
+        try:
+            return chatops_admission_requested(disclosure_job, request_for(disclosure_job))
+        except (JobError, OSError, ValueError, KeyError):
+            return False
     # The old extractor cannot read a bare author-credit website. Only an
     # explicit exact-source ChatOps admission permits this bounded retry;
     # unrelated malformed hyperlinks and arbitrary blocked jobs stay blocked.
