@@ -80,7 +80,7 @@ class CrossSpineLinksTests(unittest.TestCase):
                      '<p id="land">One.</p><p id="land">Two.</p>'):
             with self.subTest(body=body):
                 source_epub(self.path, "second.xhtml#land", second=body)
-                with self.assertRaisesRegex(ep.PreservedEpubError,
+                with self.assertRaisesRegex(book.BookError,
                                             "missing or duplicate hyperlink fragment"):
                     book.read_epub(self.path)
 
