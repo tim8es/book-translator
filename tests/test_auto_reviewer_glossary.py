@@ -151,6 +151,71 @@ class ReviewerGlossaryTests(unittest.TestCase):
             self.assertEqual(status["pending_style"], [style_entry()])
             self.assertIsNone(status["active"])
 
+    def test_changed_glossary_routes_only_current_terminology_findings_to_reviewer(self):
+        import hashlib
+        def digest(value):
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            book = root / "books" / "synthetic"
+            for sub in ("extracted", "translated"):
+                (book / sub).mkdir(parents=True, exist_ok=True)
+            source = "The Linnet said farewell."
+            target = "Зеленушка сказал прощай."
+            (book / "extracted" / "001.md").write_text(source, "utf-8")
+            (book / "translated" / "001.md").write_text(target, "utf-8")
+            glossary = book / "glossary.md"
+            old = "| Linnet | Коноплянка | персонаж | женский род |\\n"
+            new = "| Linnet | Зеленушка | персонаж | мужской род |\\n"
+            glossary.write_text(old, "utf-8")
+            old_sha = digest(old)
+            finding = {
+                "id": "term-1", "category": "terminology", "resolved": False,
+                "source_anchor": {"quote": "Linnet", "occurrence": 0},
+                "translation_anchor": {"quote": "Зеленушка", "occurrence": 0},
+            }
+            record = {
+                "record_id": "f" * 32, "unit_id": "chapter-000001",
+                "outcome": "CORRECTIONS_REQUIRED",
+                "source_sha256": digest(source),
+                "translation_sha256": digest(target),
+                "shared_state_revisions": {"glossary": old_sha},
+                "quality_report": {"evidence_version": 2, "findings": [finding]},
+            }
+            chapter = {
+                "number": 1, "status": "translated", "unit_id": "chapter-000001",
+                "source_path": "extracted/001.md",
+                "translation_path": "translated/001.md",
+                "translation_acceptance": {
+                    "source_sha256": digest(source),
+                    "translation_sha256": digest(target),
+                },
+            }
+            ledger = {"records": [record]}
+            decision = json.dumps({
+                "operation": "correct_translation", "unit_id": chapter["unit_id"],
+                "chapter_number": 1,
+            })
+            with patch.object(runner, "ROOT", root), \\
+                 patch.object(runner, "pinned_scripts_dir",
+                              return_value=ROOT / "scripts"), \\
+                 patch.object(runner, "chapter_data",
+                              return_value=({}, ledger, [chapter])), \\
+                 patch.object(runner, "cli", return_value=decision):
+                self.assertEqual(runner.canonical_dispatch("synthetic", {})[0], "corrector")
+                glossary.write_text(new, "utf-8")
+                status = {}
+                self.assertEqual(runner.canonical_dispatch("synthetic", status)[0], "reviewer")
+                self.assertEqual(status["glossary_recheck_unit"], chapter["unit_id"])
+                # The same exception cannot waive meaning errors or a stale artifact.
+                record["quality_report"]["findings"][0]["category"] = "meaning"
+                self.assertEqual(runner.canonical_dispatch("synthetic", {})[0], "corrector")
+                record["quality_report"]["findings"][0]["category"] = "terminology"
+                chapter["translation_acceptance"]["translation_sha256"] = digest("modified")
+                self.assertFalse(runner.glossary_only_recheck_needed(
+                    "synthetic", chapter, record))
+
     def test_missing_or_ungrounded_reviewer_proposal_does_not_corrupt_memory(self):
         row = name("Mara", "Мара")
         accepted, dropped = runner.filter_ungrounded_glossary_proposals(
