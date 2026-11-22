@@ -93,7 +93,7 @@ class CrossSpineLinksTests(unittest.TestCase):
 
     def test_unsupported_url_schemes_and_document_types_stay_blocked(self):
         for href in ("javascript:alert(1)", "second.svg#land",
-                     "https://example.org/with space", "second.xhtml?x=1"):
+                     "second.xhtml?x=1", "other.epub#entry"):
             with self.subTest(href=href):
                 source_epub(self.path, href)
                 with self.assertRaises((ep.PreservedEpubError, book.BookError)):
