@@ -2442,6 +2442,24 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     if not path.exists():
         return path, expected
     stage = read_json(path)
+    # An independent new reviewer record supersedes temporary corrector edits
+    # targeting the prior rejected record. Reuse only if the immutable source,
+    # translation, workflow and unit identities still match; other mismatches
+    # remain blocking rather than silently discarding untrusted state.
+    if (isinstance(stage, dict)
+            and stage.get("review_record_id") != record["record_id"]
+            and all(stage.get(key) == expected[key] for key in (
+                "schema_version", "unit_id", "source_sha256",
+                "translation_sha256", "workflow_revision"))
+            and record.get("outcome") == "CORRECTIONS_REQUIRED"):
+        path.unlink()
+        status.pop("correction_batch_progress", None)
+        status["stale_correction_stage_retired"] = {
+            "unit_id": chapter["unit_id"],
+            "prior_review_record_id": stage["review_record_id"],
+            "current_review_record_id": record["record_id"],
+        }
+        return path, expected
     if (not isinstance(stage, dict) or set(stage) != set(expected)
             or any(stage.get(k) != v for k, v in expected.items()
                    if k not in {"patches", "glossary", "style_guide"})
