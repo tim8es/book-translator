@@ -1041,6 +1041,29 @@ def known_epub_preflight_blocker(status: dict) -> bool:
             return chatops_admission_requested(disclosure_job, request_for(disclosure_job))
         except (JobError, OSError, ValueError, KeyError):
             return False
+    # The preserved-XHTML extractor previously rejected links to other
+    # spine files before it could check the target. Retry only the exact
+    # pre-initialization error approved by the source-bound ChatOps control.
+    link_error = status.get("last_error")
+    link_job = status.get("job_id")
+    if (status.get("state") == "blocked"
+            and status.get("phase") == "operator-intervention-required"
+            and status.get("book_slug") is None
+            and status.get("active") is None
+            and status.get("workflow_revision") is None
+            and status.get("source_sha256") is None
+            and isinstance(link_job, str) and ID.fullmatch(link_job)
+            and isinstance(link_error, str)
+            and re.fullmatch(
+                r"JobError: canonical CLI rejected operation: ERROR: "
+                r"EPUB source-preserving extraction blocked: "
+                r"[A-Za-z0-9_./-]+\.xhtml: Unsupported cross-document hyperlink in prose\n?",
+                link_error,
+            )):
+        try:
+            return chatops_admission_requested(link_job, request_for(link_job))
+        except (JobError, OSError, ValueError, KeyError):
+            return False
     # The old extractor cannot read a bare author-credit website. Only an
     # explicit exact-source ChatOps admission permits this bounded retry;
     # unrelated malformed hyperlinks and arbitrary blocked jobs stay blocked.

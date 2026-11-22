@@ -118,6 +118,20 @@ outside links remain blocked. The output OPF and translated XHTML declare the ta
   Missing, duplicated, or reordered markers block assembly and Auto acceptance.
   Artwork inside hyperlinks and inline SVG requiring semantic reflow remain
   blocked unless verified independently.
+- Some imported EPUBs contain unqualified author-site `href` values like
+  `flawlessassholes.tumblr.com`. A narrow hostname-only allowlist of common
+  public domain suffixes preserves these inert source attributes exactly,
+  without guessing `https://`, making external requests, or certifying
+  the link is usable. URLs with paths, query strings, arbitrary schemes or
+  unknown document-type suffixes still fail closed.
+- Body-prose hyperlinks to another XHTML document in the original EPUB spine
+  are supported as source-bound inline links. The extractor verifies their
+  relative document path against the package spine, and any fragment against
+  exactly one target ID in the original XHTML. The translated label may change
+  inside existing `bt-inline` markers, but the original href and attributes
+  are copied unchanged. Missing/duplicate anchors, links outside the spine,
+  unsafe paths, foreign schemes, and unsupported document types remain blocked.
+  This is not a general link-rewriting or off-spine-notes capability.
 - A prose-only `div` containing one inert HTTP(S), mailto or same-document
   hyperlink may be translated as a whole block, including any direct text
   preceding or following the link. Its `href`, `rel`, classes and original

@@ -125,6 +125,14 @@ def _path(opf: str, href: str) -> str:
     return result
 
 
+def _inert_bare_hostname(href: str) -> bool:
+    """Retain literal author-site hostnames without inventing a URL scheme."""
+    return (isinstance(href, str) and re.fullmatch(
+        r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+        r"(?:com|org|net|io|info|edu|gov)", href, re.I,
+    ) is not None)
+
+
 def _source_style_classes(zf: zipfile.ZipFile) -> tuple[set[str], set[str]]:
     """Discover semantic emphasis and large initials from original CSS."""
     italic: set[str] = set()
@@ -287,8 +295,15 @@ def _blocks(root: ET.Element) -> list[tuple[ET.Element, str]]:
             if attr == "style" and re.search(r"display\s*:\s*none|visibility\s*:\s*hidden", value, re.I):
                 raise PreservedEpubError("Hidden text requires explicit preservation")
         if name == "a" and not node.get("href", "").startswith(("https://", "http://", "mailto:", "#")):
-            # Cross-document TOC is handled separately. Other links are rejected.
-            raise PreservedEpubError("Unsupported cross-document hyperlink in prose")
+            # Source-bound links to another spine XHTML are allowed only with
+            # explicit package and fragment verification in analyze(). The
+            # original href is kept by the inline-marker EPUB renderer.
+            if (not _inert_bare_hostname(node.get("href", ""))
+                    and not re.fullmatch(
+                r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
+                node.get("href", ""),
+            )):
+                raise PreservedEpubError("Unsupported cross-document hyperlink in prose")
     output = []
     for node in body.iter():
         if id(node) in preserved:
@@ -509,6 +524,39 @@ def _vellum_toc(root: ET.Element, path: str, archive: zipfile.ZipFile,
     return True
 
 
+def _verify_prose_links(root: ET.Element, document: str,
+                        archive: zipfile.ZipFile, spine_paths: set[str]) -> None:
+    """Certify cross-document XHTML targets without altering source URLs."""
+    for link in root.iter():
+        if _local(link.tag) != "a":
+            continue
+        href = link.get("href", "")
+        if href.startswith(("https://", "http://", "mailto:", "#")):
+            continue
+        if _inert_bare_hostname(href):
+            # This source may use an author's bare website as href.
+            # Preserve exact bytes without adding https:// or fetching it.
+            continue
+        if not re.fullmatch(
+            r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
+            href,
+        ):
+            raise PreservedEpubError(f"{document}: unsupported hyperlink destination")
+        target = _path(document, href)
+        if target not in spine_paths:
+            raise PreservedEpubError(f"{document}: hyperlink target outside EPUB spine")
+        if "#" in href:
+            fragment = unquote(href.split("#", 1)[1])
+            if not fragment:
+                raise PreservedEpubError(f"{document}: empty hyperlink fragment")
+            try:
+                target_root = ET.fromstring(archive.read(target))
+            except (KeyError, ET.ParseError) as exc:
+                raise PreservedEpubError(f"{document}: invalid hyperlink target") from exc
+            if sum(node.get("id") == fragment for node in target_root.iter()) != 1:
+                raise PreservedEpubError(f"{document}: missing or duplicate hyperlink fragment")
+
+
 def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
     """Inventory source independently of Markdown or translation renderers."""
     zf, opf, package, manifest, spine = _open(source)
@@ -577,6 +625,7 @@ def analyze(source: Path) -> tuple[list[Document], dict[str, str]]:
                 imgs.append({"path": asset, "sha256": _hash(data), "media_type": media_type})
             try:
                 blocks = _blocks(root)
+                _verify_prose_links(root, path, zf, spine_paths)
             except PreservedEpubError as exc:
                 raise PreservedEpubError(f"{path}: {exc}") from exc
             if not blocks and not imgs:
