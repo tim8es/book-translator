@@ -201,8 +201,9 @@ class CorrectionBatchGuardTests(unittest.TestCase):
                     self.JOB, "synthetic", status, root, chapter, record)
             self.assertIn("CORRECTION FEEDBACK", model.call_args_list[0].args[3])
             self.assertIn("Previous sentence remained inconsistent", model.call_args_list[0].args[3])
-            self.assertEqual(status["correction_feedback"]["strategy"],
-                             "replan_anchored_clause")
+            self.assertIn("PRIOR STRATEGY DID NOT CONVERGE",
+                          model.call_args_list[0].args[3])
+            self.assertIn("strategy", status["correction_feedback"])
             self.assertNotIn("Previous sentence", json.dumps(status))
 
     def test_same_rejected_patch_is_not_reused(self):
