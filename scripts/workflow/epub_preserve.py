@@ -682,7 +682,7 @@ def needs_preserved_xhtml(source: Path) -> bool:
             if not name.lower().endswith((".xhtml", ".html")):
                 continue
             raw = zf.read(name)
-            if re.search(rb"<details(?=[\\s/>])", raw, re.I):
+            if re.search(rb"<details(?=[\s/>])", raw, re.I):
                 return True
             try:
                 root = ET.fromstring(raw)
@@ -695,7 +695,7 @@ def needs_preserved_xhtml(source: Path) -> bool:
                     continue
                 href = node.get("href", "")
                 if not re.fullmatch(
-                    r"[A-Za-z0-9_./%-]+\\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
+                    r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
                     href,
                 ):
                     continue
