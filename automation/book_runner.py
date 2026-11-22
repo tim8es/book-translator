@@ -5212,8 +5212,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         status["last_error"] = str(exc)[:350]
         status["blocked_unit_id"] = unit_id
         recoverable_code = None
-        if (role == "corrector" and patch_mode and
-                str(exc) == "corrector returned unchanged translation and memory"):
+        if (role == "corrector" and patch_mode and correction_feedback.enabled()
+                and str(exc) == "corrector returned unchanged translation and memory"):
             key = {"unit_id": unit_id,
                    "review_record_id": previous_record.get("record_id"),
                    "translation_sha256": previous_record.get("translation_sha256")}
