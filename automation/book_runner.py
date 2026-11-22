@@ -5320,6 +5320,18 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 candidates[:40], source_text, accepted_text)
             candidates, conflicts = filter_conflicting_glossary_proposals(book, candidates)
             cli("accept-review", slug, str(chapter["number"]))
+            if correction_feedback.enabled():
+                acceptance = chapter.get("translation_acceptance", {})
+                execution_metrics.quality_passed(
+                    status, unit_id, acceptance["source_sha256"],
+                    acceptance["translation_sha256"],
+                    status.get("model_calls_started", 0),
+                    sum(1 for item in ledger.get("records", [])
+                        if item.get("unit_id") == unit_id
+                        and item.get("source_sha256") == acceptance["source_sha256"]
+                        and item.get("outcome") == "CORRECTIONS_REQUIRED"),
+                    status.get("correction_rounds", {}).get(unit_id, 0),
+                    clock())
             saved_glossary = save_claim_bound_decisions(
                 book, unit_id, active["session_id"], "glossary", candidates)
             status["memory_glossary_saved"] = (
@@ -5352,6 +5364,11 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             path.write_text(translated, encoding="utf-8")
         cli("accept-translation", slug, str(chapter["number"]),
             "--session-id", active["session_id"])
+        if role == "translator" and correction_feedback.enabled():
+            execution_metrics.quality_started(
+                status, unit_id,
+                hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                status.get("model_calls_started", 0), clock())
         saved = save_claim_bound_decisions(
             ROOT / "books" / slug, unit_id, active["session_id"],
             "glossary", proposed_glossary)
