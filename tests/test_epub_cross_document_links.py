@@ -19,11 +19,12 @@ import book
 
 
 def source_epub(path: Path, href: str, *, second: str = '<p id="land">Destination.</p>',
-                link_body: str | None = None) -> None:
+                link_body: str | None = None, disclosure: bool = True) -> None:
     anchor = (link_body if link_body is not None else f'<a href="{href}">next chapter</a>')
-    first = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>'
-             '<details><summary>Read more</summary><p>Visit ' + anchor +
-             ' for context.</p></details></body></html>')
+    paragraph = '<p>Visit ' + anchor + ' for context.</p>'
+    body = ('<details><summary>Read more</summary>' + paragraph + '</details>'
+            if disclosure else paragraph)
+    first = '<html xmlns="http://www.w3.org/1999/xhtml"><body>' + body + '</body></html>'
     second_xhtml = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>'
                     + second + '</body></html>')
     with zipfile.ZipFile(path, "w") as z:
@@ -45,6 +46,41 @@ class CrossSpineLinksTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "book.epub"
+
+
+    def test_plain_cross_spine_links_use_verified_preserved_xhtml(self):
+        """A plain text-only EPUB must not fall into the single-document parser."""
+        for href in ("second.xhtml#land", "second.xhtml"):
+            with self.subTest(href=href):
+                source_epub(self.path, href, disclosure=False)
+                original = self.path.read_bytes()
+                self.assertTrue(ep.needs_preserved_xhtml(self.path))
+                chapters, _ = book.read_epub(self.path)
+                self.assertEqual(len(chapters), 2)
+                self.assertEqual(ep.audit(self.path, chapters)["state"], "verified")
+                self.assertIn("<!-- bt-inline:", chapters[0].content)
+                localized = chapters[0].content.replace("next chapter", "следующая глава")
+                result = ep.build(
+                    self.path, [{"markdown": localized}, {"markdown": chapters[1].content}],
+                    expected_source_sha256=hashlib.sha256(original).hexdigest(),
+                    language="ru",
+                )
+                ep.validate(result, source=self.path, expected_docs=2)
+                with zipfile.ZipFile(io.BytesIO(result)) as archive:
+                    root = ET.fromstring(archive.read("OPS/first.xhtml"))
+                    link = next(n for n in root.iter() if n.tag.endswith("}a"))
+                    self.assertEqual(link.get("href"), href)
+                    self.assertIn("следующая глава", "".join(link.itertext()))
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_plain_cross_spine_links_remain_fail_closed(self):
+        """Routing to preservation never admits missing or escaping targets."""
+        for href in ("unknown.xhtml#land", "second.xhtml#missing",
+                     "../second.xhtml#land", "second.xhtml?x=1"):
+            with self.subTest(href=href):
+                source_epub(self.path, href, disclosure=False)
+                with self.assertRaises(book.BookError):
+                    book.read_epub(self.path)
 
     def test_link_and_disclosure_are_source_bound_in_translated_epub(self):
         source_epub(self.path, "second.xhtml#land")

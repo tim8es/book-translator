@@ -669,16 +669,47 @@ def has_raster_xhtml(source: Path) -> bool:
 
 
 def needs_preserved_xhtml(source: Path) -> bool:
-    """Preserve disclosure controls as original XHTML, not flattened prose."""
+    """Route unrepresentable EPUB structure through source-bound XHTML preservation.
+
+    Ordinary Markdown extraction cannot safely remap links between distinct
+    spine documents. The preserving extractor verifies their package targets
+    and leaves original href attributes intact during EPUB reconstruction.
+    """
     if has_raster_xhtml(source):
         return True
     with zipfile.ZipFile(source) as zf:
-        return any(
-            name.lower().endswith((".xhtml", ".html"))
-            and re.search(rb"<details(?=[\s/>])", zf.read(name), re.I)
-            for name in zf.namelist()
-        )
-
+        for name in zf.namelist():
+            if not name.lower().endswith((".xhtml", ".html")):
+                continue
+            raw = zf.read(name)
+            if re.search(rb"<details(?=[\s/>])", raw, re.I):
+                return True
+            try:
+                root = ET.fromstring(raw)
+            except ET.ParseError:
+                # Let the existing extractor report malformed content; never
+                # infer a safe target from an unparseable XHTML document.
+                continue
+            # EPUB navigation is handled by the existing TOC verifier;
+            # it must not change extraction mode for otherwise plain prose.
+            nav_links = {
+                id(link)
+                for nav in root.iter() if _local(nav.tag) == "nav"
+                for link in nav.iter()
+            }
+            for node in root.iter():
+                if _local(node.tag) != "a" or id(node) in nav_links:
+                    continue
+                href = node.get("href", "")
+                if not re.fullmatch(
+                    r"[A-Za-z0-9_./%-]+\.(?:xhtml|html|htm)(?:#[A-Za-z0-9_.:%-]+)?",
+                    href,
+                ):
+                    continue
+                target = href.partition("#")[0]
+                if target != posixpath.basename(name):
+                    return True
+    return False
 
 def _escaped_source(text: str) -> str:
     return "".join("\\" + ch if ch in "\\*`[]" else ch for ch in text)
