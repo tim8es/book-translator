@@ -34,6 +34,7 @@ from omniroute import ModelError, TransientModelError, complete
 import executor_ownership
 import review_chunks
 import correction_regression
+import correction_feedback
 import candidate_review
 import incremental_review
 import adaptive_budget
@@ -2731,6 +2732,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     }
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
+    feedback_enabled = correction_feedback.enabled()
+    historical_ledger = chapter_data(slug)[1] if feedback_enabled else None
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
@@ -2802,6 +2805,15 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 and overlap.get("review_record_id") == record["record_id"]):
             earlier += [fid for fid in overlap.get("unapplied_finding_ids", [])
                         if fid in {item["id"] for item in selected}]
+        if feedback_enabled:
+            try:
+                feedback = correction_feedback.plan(
+                    historical_ledger, chapter, record, selected,
+                    status.get("no_effect_correction"))
+            except ValueError as exc:
+                raise JobError("invalid source-bound correction feedback") from exc
+            user += feedback["prompt"]
+            status["correction_feedback"] = feedback["audit"]
         if earlier:
             user += (
                 "\nPREVIOUS UNSAFE CORRECTION CANDIDATES: The proposed "
@@ -2819,6 +2831,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             "system_chars": len(system), "user_chars": len(user),
             "correction_mode": "bounded-review-patches",
             "batch_finding_count": len(selected),
+            "history_strategy": (status.get("correction_feedback", {}).get("strategy")
+                                 if feedback_enabled else "off"),
         }
         count = status.get("model_calls_started", 0)
         if type(count) is not int or count < 0:
@@ -3126,13 +3140,14 @@ def reconcile_deferred_model_reviews(status: dict, chapters: list[dict]) -> None
 
 
 def defer_protocol_failed_unit(slug: str, chapter: dict, record: dict | None,
-                               status: dict, code: str | None) -> bool:
+                               status: dict, code: str | None, *,
+                               minimum_failures: int = MAX_FAILURES) -> bool:
     """Only defer an unchanged independently rejected unit, never provider errors.
 
     Canonical defer-review is the final hash/claim CAS gate. No translation,
     source, finding, review result or reviewer PASS is edited here.
     """
-    if (not code or status.get("failures", 0) < MAX_FAILURES
+    if (not code or status.get("failures", 0) < minimum_failures
             or not isinstance(record, dict)
             or record.get("outcome") != "CORRECTIONS_REQUIRED"
             or chapter.get("status") != "translated"):
@@ -5196,7 +5211,17 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         status["last_error"] = str(exc)[:350]
         status["blocked_unit_id"] = unit_id
         recoverable_code = None
-        if role == "corrector" and patch_mode and isinstance(exc, ModelError):
+        if (role == "corrector" and patch_mode and
+                str(exc) == "corrector returned unchanged translation and memory"):
+            key = {"unit_id": unit_id,
+                   "review_record_id": previous_record.get("record_id"),
+                   "translation_sha256": previous_record.get("translation_sha256")}
+            old = status.get("no_effect_correction")
+            attempts = (old.get("count", 0) if isinstance(old, dict)
+                        and all(old.get(k) == v for k, v in key.items()) else 0)
+            status["no_effect_correction"] = {**key, "count": min(99, attempts + 1)}
+            recoverable_code = "unchanged_correction"
+        elif role == "corrector" and patch_mode and isinstance(exc, ModelError):
             # Unknown provider, safety, or workflow failures must not be
             # silently turned into benign model-format failures.
             helper = load_public_correction_helper(engine)
@@ -5250,8 +5275,14 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 slug, chapter, status, recoverable_code):
             checkpoint(job_id, status, slug)
             return
+        no_effect_count = status.get("no_effect_correction", {}).get("count", 0)
+        bounded_no_effect = (recoverable_code == "unchanged_correction"
+                             and no_effect_count >= 2)
+        defer_code = (None if recoverable_code == "unchanged_correction"
+                      and not bounded_no_effect else recoverable_code)
         if (role == "corrector" and defer_protocol_failed_unit(
-                slug, chapter, previous_record, status, recoverable_code)):
+                slug, chapter, previous_record, status, defer_code,
+                minimum_failures=2 if bounded_no_effect else MAX_FAILURES)):
             # The correction-only deferral requires an exact, *current*
             # rejected review. A reviewer still checking a new translation
             # must never pass an older rejected report into this route.
@@ -5339,6 +5370,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)
+            status.pop("no_effect_correction", None)
         if role == "corrector":
             rounds = status["correction_rounds"]
             rounds[unit_id] = rounds.get(unit_id, 0) + 1
