@@ -90,6 +90,40 @@ class QueueAndMetricsTests(unittest.TestCase):
         self.assertEqual(s["execution_metrics"]["accepted_operations"]["reviewed"], 1)
         self.assertNotIn("secret", json.dumps(s))
 
+    def test_pi_metrics_are_split_by_pinned_executor_not_just_global_totals(self):
+        import execution_metrics as metrics
+        revision_a, revision_b = "a" * 40, "b" * 40
+        status = {}
+        for revision, duration in ((revision_a, 100), (revision_b, 200)):
+            with patch.dict(os.environ, {
+                "BOOK_TRANSLATOR_LLM_BACKEND": "pi",
+                "PI_EXECUTOR_SHA": revision,
+            }):
+                metrics.provider(status, {"role": "reviewer", "outcome": "response",
+                                          "duration_ms": duration, "request_chars": 50})
+                metrics.accepted(status, "reviewer", "CORRECTIONS_REQUIRED")
+        totals = status["execution_metrics"]
+        self.assertEqual(totals["api"]["reviewer"]["completed_calls"], 2)
+        self.assertEqual(totals["accepted_operations"]["review_rejected"], 2)
+        for revision, duration in ((revision_a, 100), (revision_b, 200)):
+            scoped = totals["runtime_revisions"][revision]
+            self.assertEqual(scoped["api"]["reviewer"]["duration_ms"], duration)
+            self.assertEqual(scoped["accepted_operations"]["review_rejected"], 1)
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_BACKEND": "auto",
+                                      "PI_EXECUTOR_SHA": "c" * 40}):
+            metrics.provider(status, {"role": "translator", "outcome": "response"})
+        self.assertEqual(set(totals["runtime_revisions"]), {revision_a, revision_b})
+        self.assertNotIn("content", json.dumps(status))
+
+    def test_unpinned_pi_call_does_not_claim_known_runtime_revision(self):
+        import execution_metrics as metrics
+        s = {}
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_BACKEND": "pi",
+                                      "PI_EXECUTOR_SHA": "unknown"}):
+            metrics.provider(s, {"role": "corrector", "outcome": "response"})
+        self.assertNotIn("runtime_revisions", s["execution_metrics"])
+
+
     def test_costly_queue_candidate_requires_distinct_canonical_artifacts_and_cost(self):
         import review_convergence as convergence
         unit = "chapter-000001"

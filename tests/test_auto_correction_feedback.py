@@ -94,6 +94,25 @@ class CorrectionFeedbackTests(unittest.TestCase):
         self.assertEqual(feedback.plan(ledger, chapter, current, [finding()], attempt)[
             "audit"]["strategy"], "focused_patch")
 
+
+    def test_oscillating_severity_switches_strategy_without_reusing_anchors(self):
+        ledger, chapter, current = self.fixture()
+        for i, item in enumerate(ledger["records"]):
+            for f in item["quality_report"]["findings"]:
+                f["source_anchor"]["quote"] = f"Unique source quote {i}"
+        ledger["records"][1]["quality_report"]["findings"].append(
+            finding("f2", "meaning"))
+        ledger["records"][1]["quality_report"]["findings"][1][
+            "source_anchor"]["quote"] = "Another older quote"
+        chosen = current["quality_report"]["findings"]
+        result = feedback.plan(ledger, chapter, current, chosen)
+        self.assertEqual(result["audit"]["severity_scores_old_to_new"], [3, 6, 3])
+        self.assertEqual(result["audit"]["recurring_anchored_findings"], 0)
+        self.assertTrue(result["audit"]["nonimproving_reviews"])
+        self.assertEqual(result["audit"]["strategy"], "replan_anchored_clause")
+        self.assertIn("ONLY allowed replacement locations", result["prompt"])
+        self.assertNotIn("PASS", str(result["audit"]))
+
     def test_stale_accepted_review_and_unrecognized_finding_refused(self):
         ledger, chapter, current = self.fixture()
         chapter["translation_acceptance"]["translation_sha256"] = "z" * 64

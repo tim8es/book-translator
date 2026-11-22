@@ -113,8 +113,10 @@ def plan(ledger: dict, chapter: dict, record: dict, selected: list[dict],
         else 0
     )
     scores = [_score(_open(r)) for r in reversed(previous)] + [_score(_open(record))]
-    nonimproving = (len(scores) >= 3
-                    and scores[-1] >= scores[-2] >= scores[-3])
+    # Compare net quality over two different accepted translations rather
+    # than requiring a monotone score. Oscillation (8 -> 16 -> 13) still
+    # means the latest attempt is worse than the first observed one.
+    nonimproving = (len(scores) >= 3 and scores[-1] >= scores[-3])
     # Whole-chapter rewrites are intentionally NOT a strategy: the pinned
     # correction contract permits only the reviewer's exact target anchors.
     strategy = ("replan_anchored_clause"
