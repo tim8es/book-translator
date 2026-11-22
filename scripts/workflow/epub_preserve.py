@@ -690,8 +690,15 @@ def needs_preserved_xhtml(source: Path) -> bool:
                 # Let the existing extractor report malformed content; never
                 # infer a safe target from an unparseable XHTML document.
                 continue
+            # EPUB navigation is handled by the existing TOC verifier;
+            # it must not change extraction mode for otherwise plain prose.
+            nav_links = {
+                id(link)
+                for nav in root.iter() if _local(nav.tag) == "nav"
+                for link in nav.iter()
+            }
             for node in root.iter():
-                if _local(node.tag) != "a":
+                if _local(node.tag) != "a" or id(node) in nav_links:
                     continue
                 href = node.get("href", "")
                 if not re.fullmatch(
@@ -699,8 +706,8 @@ def needs_preserved_xhtml(source: Path) -> bool:
                     href,
                 ):
                     continue
-                target, separator, fragment = href.partition("#")
-                if target != posixpath.basename(name) or not separator:
+                target = href.partition("#")[0]
+                if target != posixpath.basename(name):
                     return True
     return False
 
