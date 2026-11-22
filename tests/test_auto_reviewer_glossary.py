@@ -216,6 +216,41 @@ class ReviewerGlossaryTests(unittest.TestCase):
                 self.assertFalse(runner.glossary_only_recheck_needed(
                     "synthetic", chapter, record))
 
+    def test_new_review_retires_only_bound_stale_correction_stage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            chapter = {"unit_id": "chapter-000001", "number": 1}
+            old = "a" * 32
+            fresh = "b" * 32
+            review = {"record_id": fresh, "outcome": "CORRECTIONS_REQUIRED",
+                      "source_sha256": "1" * 64,
+                      "translation_sha256": "2" * 64}
+            status = {"workflow_revision": "3" * 40,
+                      "correction_batch_progress": {"old": True}}
+            staged = {"schema_version": 1, "unit_id": chapter["unit_id"],
+                      "review_record_id": old,
+                      "source_sha256": review["source_sha256"],
+                      "translation_sha256": review["translation_sha256"],
+                      "workflow_revision": status["workflow_revision"],
+                      "patches": [], "glossary": [], "style_guide": []}
+            with patch.object(runner, "ROOT", root):
+                path = runner.correction_stage_path("synthetic", chapter["unit_id"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(staged), "utf-8")
+                resolved, expected = runner.load_correction_stage(
+                    "synthetic", chapter, review, status, "", "", [])
+                self.assertEqual(resolved, path)
+                self.assertFalse(path.exists())
+                self.assertEqual(expected["review_record_id"], fresh)
+                self.assertEqual(status["stale_correction_stage_retired"][
+                    "prior_review_record_id"], old)
+                path.write_text(json.dumps({
+                    **staged, "translation_sha256": "4" * 64}), "utf-8")
+                with self.assertRaises(runner.JobError):
+                    runner.load_correction_stage(
+                        "synthetic", chapter, review, status, "", "", [])
+                self.assertTrue(path.exists())
+
     def test_missing_or_ungrounded_reviewer_proposal_does_not_corrupt_memory(self):
         row = name("Mara", "Мара")
         accepted, dropped = runner.filter_ungrounded_glossary_proposals(
