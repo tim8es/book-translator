@@ -2446,7 +2446,8 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     # targeting the prior rejected record. Reuse only if the immutable source,
     # translation, workflow and unit identities still match; other mismatches
     # remain blocking rather than silently discarding untrusted state.
-    if (isinstance(stage, dict)
+    if (status.get("glossary_recheck_unit") == chapter["unit_id"]
+            and isinstance(stage, dict)
             and stage.get("review_record_id") != record["record_id"]
             and all(stage.get(key) == expected[key] for key in (
                 "schema_version", "unit_id", "source_sha256",
