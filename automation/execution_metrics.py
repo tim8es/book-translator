@@ -46,6 +46,80 @@ def accepted(status: dict, role: str, outcome: str | None = None) -> None:
     if role == "reviewer" and outcome == "PASS":
         accepted(status, "promote")
 
+
+def quality_started(status: dict, unit_id: str, source_sha256: str,
+                    model_calls: int, at: str) -> None:
+    """Record an immutable baseline at the first *observed* translator acceptance.
+
+    Existing ChatOps work without such a baseline deliberately has no measured
+    end-to-end duration; do not infer it from a later correction timestamp.
+    """
+    if (not isinstance(unit_id, str) or not unit_id
+            or not isinstance(source_sha256, str) or len(source_sha256) != 64
+            or type(model_calls) is not int or model_calls < 0):
+        raise ValueError("invalid quality baseline")
+    timestamp = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("quality baseline requires timezone")
+    starts = status.setdefault("quality_baselines", {})
+    if not isinstance(starts, dict):
+        raise ValueError("invalid quality baselines")
+    old = starts.get(unit_id)
+    if isinstance(old, dict) and old.get("source_sha256") == source_sha256:
+        return
+    starts[unit_id] = {
+        "source_sha256": source_sha256,
+        "first_translated_at": at,
+        "model_calls_at_first_translation": model_calls,
+    }
+
+
+def quality_passed(status: dict, unit_id: str, source_sha256: str,
+                   translation_sha256: str, model_calls: int,
+                   prior_rejections: int, correction_rounds: int, at: str) -> dict:
+    """Count independently accepted results, never manufacture a PASS."""
+    if (not isinstance(unit_id, str) or not unit_id
+            or any(not isinstance(v, str) or len(v) != 64
+                   for v in (source_sha256, translation_sha256))
+            or any(type(v) is not int or v < 0 for v in (
+                model_calls, prior_rejections, correction_rounds))):
+        raise ValueError("invalid quality completion")
+    now = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    if now.tzinfo is None:
+        raise ValueError("quality completion requires timezone")
+    baseline = status.get("quality_baselines", {}).get(unit_id)
+    seconds = None
+    calls = None
+    if isinstance(baseline, dict) and baseline.get("source_sha256") == source_sha256:
+        before = datetime.fromisoformat(
+            baseline["first_translated_at"].replace("Z", "+00:00"))
+        start_calls = baseline.get("model_calls_at_first_translation")
+        if before.tzinfo is None or type(start_calls) is not int:
+            raise ValueError("invalid stored quality baseline")
+        if now < before or model_calls < start_calls:
+            raise ValueError("quality completion precedes its baseline")
+        seconds = round((now - before).total_seconds())
+        calls = model_calls - start_calls
+    entry = {
+        "unit_id": unit_id, "source_sha256": source_sha256,
+        "translation_sha256": translation_sha256,
+        "independent_pass_at": at,
+        "seconds_from_first_observed_translation": seconds,
+        "model_calls_after_first_observed_translation": calls,
+        "prior_rejected_reviews": prior_rejections,
+        "correction_rounds": correction_rounds,
+    }
+    history = status.setdefault("quality_pass_metrics", [])
+    if not isinstance(history, list):
+        raise ValueError("invalid quality pass history")
+    if not any(isinstance(row, dict)
+               and all(row.get(key) == entry[key] for key in (
+                   "unit_id", "source_sha256", "translation_sha256"))
+               for row in history):
+        history.append(entry)
+        status["quality_pass_metrics"] = history[-100:]
+    return entry
+
 def queue_snapshot(chapters: list[dict], ledger: dict) -> dict:
     """Read-only raw lifecycle/evidence counts; attention is not an acceptance."""
     result = {"extracted": 0, "reviewed": 0, "awaiting_review": 0,
