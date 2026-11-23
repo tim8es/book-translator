@@ -16,6 +16,28 @@ XHTML_NS = "http://www.w3.org/1999/xhtml"
 
 
 class EpubLayoutRegressionTests(unittest.TestCase):
+    def test_model_generated_html_breaks_are_not_rendered_as_visible_prose(self):
+        with self.assertRaisesRegex(ValueError, "unsupported raw HTML <br>"):
+            render_markdown_xhtml(
+                "Chapter 12",
+                "Кровь отливает от лица.<br><br>\n— Реплика.",
+                language="ru",
+            )
+
+    def test_native_markdown_and_literal_code_remain_supported(self):
+        xml = render_markdown_xhtml(
+            "Code examples",
+            "Первая строка.\n\nВторая строка с " + chr(96) + "<br>" + chr(96)
+            + ".\n\n" + "<!-- bt-scene-break -->" + "\n\n"
+            + "<!-- bt-anchor:part_2 -->" + "\n\n"
+            + chr(96) * 3 + "html\n<br>\n" + chr(96) * 3,
+            language="ru",
+        )
+        root = ET.fromstring(xml)
+        self.assertTrue(root.findall(f".//{{{XHTML_NS}}}hr"))
+        self.assertIn("<br>", "".join(root.itertext()))
+
+
     def test_plain_russian_heading_and_notes_are_structured(self):
         content = (
             "Глава 7. Дом в ритме твоего сердца\n\n"
