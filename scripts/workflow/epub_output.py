@@ -10,6 +10,7 @@ import re
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from html import escape as html_escape
+from .markdown_integrity import TranslationMarkupError, reject_raw_html
 from pathlib import PurePosixPath
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -171,6 +172,10 @@ def build_input_snapshot(
             f"chapter {number} translation_path",
         )
         translation = _read_bytes(artifact_reader, translation_path, kind="translation artifact")
+        try:
+            reject_raw_html(translation.decode("utf-8"))
+        except (UnicodeDecodeError, TranslationMarkupError) as exc:
+            raise EpubOutputError(f"chapter {number}: {exc}") from exc
         status = _nonempty_string(chapter.get("status"), f"chapter {number} status")
         unit = {
             "unit_id": unit_id_for_chapter(chapter),
@@ -406,6 +411,10 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
     language = _nonempty_string(language, "chapter language")
     if not isinstance(markdown, str):
         raise EpubOutputError("chapter markdown must be text")
+    try:
+        reject_raw_html(markdown)
+    except TranslationMarkupError as exc:
+        raise EpubOutputError(f"chapter {title}: {exc}") from exc
     normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
     if not normalized.strip():
         raise EpubOutputError("chapter markdown must not be empty")

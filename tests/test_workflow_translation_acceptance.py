@@ -162,6 +162,37 @@ class WorkflowTranslationAcceptanceReliabilityTests(unittest.TestCase):
         self.assertEqual(evidence["claim_revision"], corrected_claim["revision"])
         self.assertEqual(evidence["session_id"], "translator-b")
 
+    def test_raw_html_is_rejected_before_acceptance_and_can_be_corrected(self):
+        self.claim("translator", "translator-markup")
+        translation = self.translation_path()
+        translation.parent.mkdir(parents=True, exist_ok=True)
+        translation.write_text(
+            "# Один\n\nКровь отливает от лица.<br><br>\n— Реплика.\n",
+            encoding="utf-8",
+        )
+        rejected = self.run_cli(
+            "accept-translation",
+            "sample",
+            "1",
+            "--session-id",
+            "translator-markup",
+            "--json",
+            expect=1,
+        )
+        self.assertIn("unsupported raw HTML <br>", rejected.stdout + rejected.stderr)
+        chapter = self.progress()["chapters"][0]
+        self.assertEqual(chapter["status"], "extracted")
+        self.assertNotIn("translation_acceptance", chapter)
+
+        translation.write_text(
+            "# Один\n\nКровь отливает от лица.\n\n— Реплика.\n",
+            encoding="utf-8",
+        )
+        accepted = self.accept_translation("translator-markup")
+        self.assertTrue(accepted["changed"])
+        self.assertEqual(self.progress()["chapters"][0]["status"], "translated")
+
+
     def test_validate_rejects_translation_tamper_after_machine_acceptance(self):
         self.establish_initial_accepted_translation()
         translation = self.translation_path()

@@ -64,6 +64,9 @@ During the draft:
 - keep `<!-- bt-anchor:... -->` marker lines and `](#fragment)` link destinations
   intact and in the correct positions when present in extracted EPUB Markdown;
   translate only the visible linked label, never the anchor identifiers;
+- use native Markdown paragraph breaks (blank lines) and emphasis, never raw HTML
+  formatting such as <br>, <p>, or <span>; the EPUB renderer displays raw HTML
+  literally, so these tokens must not appear in translated prose;
 - do not skip difficult passages;
 - do not replace uncertainty with guesswork;
 - do not summarize;

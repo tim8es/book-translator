@@ -172,6 +172,16 @@ class WorkflowEpubOutputIdentityTests(unittest.TestCase):
         self.assertEqual(snapshot["units"][0]["status"], "translated")
         self.assertNotIn("review", snapshot["units"][0])
 
+    def test_snapshot_rejects_raw_html_in_previously_reviewed_translation(self):
+        self.artifacts["translated/001-one.md"] = (
+            "# Один\n\nПервый абзац.<br><br>\nСледующий.\n".encode("utf-8")
+        )
+        with self.assertRaisesRegex(
+            epub_output.EpubOutputError, "chapter 1: unsupported raw HTML <br>"
+        ):
+            self.snapshot()
+
+
     def test_fingerprint_is_canonical_json_sha256(self):
         snapshot = self.snapshot()
         expected = hashlib.sha256(
