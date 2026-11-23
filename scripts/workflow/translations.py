@@ -338,7 +338,7 @@ class TranslationAcceptanceManager:
                 kind="translation",
             )
             validate_scene_breaks(source, translation)
-        validate_translated_markup(translation, chapter_number=chapter_number)
+            validate_translated_markup(translation, chapter_number=chapter_number)
             if metadata.get("layout_mode") == "original_xhtml_v1":
                 from .epub_preserve import PreservedEpubError, parse_blocks, _MARKER
                 try:
