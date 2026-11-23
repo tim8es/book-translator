@@ -9,7 +9,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from workflow.epub_output import build_epub_bytes, render_markdown_xhtml
+from workflow.epub_output import EpubOutputError, build_epub_bytes, render_markdown_xhtml
 
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -17,7 +17,7 @@ XHTML_NS = "http://www.w3.org/1999/xhtml"
 
 class EpubLayoutRegressionTests(unittest.TestCase):
     def test_model_generated_html_breaks_are_not_rendered_as_visible_prose(self):
-        with self.assertRaisesRegex(ValueError, "unsupported raw HTML <br>"):
+        with self.assertRaisesRegex(EpubOutputError, "unsupported raw HTML <br>"):
             render_markdown_xhtml(
                 "Chapter 12",
                 "Кровь отливает от лица.<br><br>\n— Реплика.",
