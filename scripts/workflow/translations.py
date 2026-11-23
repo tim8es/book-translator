@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .claims import unit_id_for_chapter
+from .markdown_integrity import TranslationMarkupError, reject_raw_html
 from .coordination import BookCoordinationManager, CoordinationError
 from .repository import LoadedDocument, RepositoryError, WorkflowStateRepository
 from .schemas import SchemaError, SchemaKind
@@ -22,6 +23,13 @@ TRANSLATION_ACCEPTANCE_LEASE_SECONDS = 900
 
 class TranslationAcceptanceError(RuntimeError):
     """A Translator result cannot be accepted safely."""
+
+
+def validate_translated_markup(translation: bytes, *, chapter_number: int) -> None:
+    try:
+        reject_raw_html(translation.decode("utf-8"))
+    except (UnicodeDecodeError, TranslationMarkupError) as exc:
+        raise TranslationAcceptanceError(f"chapter {chapter_number}: {exc}") from exc
 
 
 def validate_scene_breaks(source: bytes, translation: bytes) -> None:
@@ -221,6 +229,7 @@ class TranslationAcceptanceManager:
         source = self._artifact(chapter.get("source_path"), kind="source")
         translation = self._artifact(chapter.get("translation_path"), kind="translation")
         validate_scene_breaks(source, translation)
+        validate_translated_markup(translation, chapter_number=chapter_number)
         source_sha256 = _sha256(source)
         translation_sha256 = _sha256(translation)
         if evidence.get("source_sha256") != source_sha256:
@@ -329,6 +338,7 @@ class TranslationAcceptanceManager:
                 kind="translation",
             )
             validate_scene_breaks(source, translation)
+        validate_translated_markup(translation, chapter_number=chapter_number)
             if metadata.get("layout_mode") == "original_xhtml_v1":
                 from .epub_preserve import PreservedEpubError, parse_blocks, _MARKER
                 try:
