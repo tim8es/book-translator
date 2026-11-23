@@ -84,7 +84,7 @@ class WorkflowEpubPackageTests(unittest.TestCase):
     def test_html_tags_in_prose_are_rejected_not_interpreted_or_shown(self):
         render = self.api("render_markdown_xhtml")
         with self.assertRaisesRegex(epub_output.EpubOutputError, "unsupported raw HTML <script>"):
-            render("Глава", "# Заголовок\\n\\nТекст <script>alert(1)</script>.\\n", language="ru")
+            render("Глава", "# Заголовок\n\nТекст <script>alert(1)</script>.\n", language="ru")
 
     def test_epub_bytes_are_deterministic_and_have_required_order_metadata_nav_and_spine(self):
         first = self.build()
