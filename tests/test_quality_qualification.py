@@ -30,6 +30,12 @@ class QualificationFixtureTests(unittest.TestCase):
                 self.assertIn("Nobody answered.", z.read("OEBPS/c2.xhtml").decode())
 
     def test_real_pinned_cli_initializes_and_seeds_disposable_epub_without_models(self):
+        self.assert_canonical_seed("smoke", 2, {1})
+
+    def test_extended_fixture_initializes_and_seeds_three_units_without_models(self):
+        self.assert_canonical_seed("extended", 6, {1, 3, 5})
+
+    def assert_canonical_seed(self, profile, total, seed_numbers):
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)
             root = parent / "state"
@@ -51,7 +57,7 @@ class QualificationFixtureTests(unittest.TestCase):
             qual.git(engine, "commit", "-m", "Test canonical engine")
             revision = qual.git(engine, "rev-parse", "HEAD")
             job = "a" * 32
-            qual.create_state(root, remote, revision, job)
+            qual.create_state(root, remote, revision, job, profile)
             self.assertTrue((root / "books").is_dir())
             def install(requested):
                 self.assertEqual(requested, revision)
@@ -75,11 +81,13 @@ class QualificationFixtureTests(unittest.TestCase):
                 book_runner.checkpoint(job, status, slug)
                 self.assertEqual(status["phase"], "initialized")
                 with patch.object(book_runner, "install_engine", side_effect=install):
-                    seeded = qual.seed(root, job, status, revision)
+                    seeded = qual.seed(root, job, status, revision, profile)
                 _, _, chapters = book_runner.chapter_data(slug)
-                self.assertEqual(seeded, chapters[0]["unit_id"])
-                self.assertEqual(chapters[0]["status"], "translated")
-                self.assertEqual(chapters[1]["status"], "extracted")
+                self.assertEqual(len(chapters), total)
+                seeded_ids = [seeded] if isinstance(seeded, str) else seeded
+                self.assertEqual(seeded_ids, [ch["unit_id"] for ch in chapters if ch["number"] in seed_numbers])
+                for ch in chapters:
+                    self.assertEqual(ch["status"], "translated" if ch["number"] in seed_numbers else "extracted")
                 self.assertEqual(status.get("model_calls_started", 0), 0)
                 self.assertEqual(qual.git(root, "rev-parse", "HEAD"), qual.git(root, "rev-parse", "origin/main"))
 
