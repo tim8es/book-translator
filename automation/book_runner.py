@@ -111,6 +111,10 @@ class BookIdentityError(JobError):
     pass
 
 
+class QualityRecoveryExhausted(ModelError):
+    """Finite candidate recovery exhausted; never a literary PASS."""
+
+
 def clock() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -3016,7 +3020,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
-    continue_batches = execution_scheduler.continue_corrections()
+    continue_batches = (execution_scheduler.continue_corrections()
+                        or quality_controller.supported(engine))
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
                 if continue_batches else set())
     initially_pending = [
@@ -3216,6 +3221,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                     regressed.append(patch["finding_id"])
                     continue
                 raise ModelError("corrector repeated an unchanged rejected regression patch")
+            if (quality_controller.supported(engine) and patch["operation"] == "replace"
+                    and patch["replacement"] == patch["target_anchor"]["quote"]):
+                record_quality_patch_rejection(status, chapter, record, patch, "no-effect")
+                regressed.append(patch["finding_id"])
+                continue
             try:
                 candidate = apply_correction_patches(translation, combined + [patch])
                 check_markers(source, candidate)
@@ -3226,6 +3236,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 }:
                     raise
                 # Never loosen anchors or technical markers.
+                if quality_controller.supported(engine) and not combined:
+                    record_quality_patch_rejection(status, chapter, record, patch, "unsafe-anchor")
                 conflicting.append(patch["finding_id"])
                 continue
             try:
@@ -3314,8 +3326,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         # Keep the live claim. Next bounded Action continues the same stage.
         return None
     if not covered:
-        # A fresh bounded attempt must try a different candidate, not re-read
-        # an all-isolated empty stage. Keep hashed unsafe-patch rejections.
+        # Do not let an empty stage prevent source-first reconstruction.
+        if quality_controller.supported(engine):
+            retire_empty_quality_candidate(job_id, slug, status, chapter, record,
+                                           stage_path, reason="all-unsafe")
+            return None
         status.pop("correction_isolation", None)
         raise ModelError("all correction candidates were unsafe; no accepted patch")
     translated = apply_correction_patches(translation, stage["patches"])
@@ -5238,6 +5253,32 @@ def verified_editorial_candidate(slug: str, chapter: dict) -> str | None:
         raise JobError("cannot safely admit operator-approved editorial candidate") from exc
 
 
+def record_quality_patch_rejection(status, chapter, record, patch, reason):
+    audit = status.setdefault("correction_regression_rejections", [])
+    if not isinstance(audit, list):
+        raise JobError("invalid candidate regression audit")
+    audit.append({"unit_id": chapter["unit_id"], "review_record_id": record["record_id"],
+                  "finding_id": patch["finding_id"],
+                  "patch_sha256": correction_regression.patch_fingerprint(patch),
+                  "reason": reason, "at": clock()})
+    status["correction_regression_rejections"] = audit[-64:]
+
+
+def retire_empty_quality_candidate(job_id, slug, status, chapter, record, stage_path, *, reason):
+    """Retire an unusable group, preserving the current artifact and bounded retry state."""
+    stage_path.unlink(missing_ok=True)
+    for key in ("correction_isolation", "quality_candidate_gate", "correction_batch_progress"):
+        status.pop(key, None)
+    try:
+        count = quality_controller.note_empty_candidate(status, chapter, record, reason)
+    except ValueError as exc:
+        raise JobError("invalid quality recovery counter") from exc
+    status["phase"] = "quality-recovery-strategy-change"
+    checkpoint(job_id, status, slug)
+    if count >= quality_controller.MAX_EMPTY_CANDIDATES:
+        raise QualityRecoveryExhausted("independent quality recovery exhausted for current review")
+
+
 def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
                              source, translation, patches, stage_path):
     """One bounded independent correction gate per checkpoint, with durable receipts."""
@@ -5312,22 +5353,32 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
     except candidate_review.CandidateReviewError as exc:
         raise ModelError("quality candidate check returned invalid evidence") from exc
     if rejected:
-        audit = status.setdefault("correction_regression_rejections", [])
-        if not isinstance(audit, list):
-            raise JobError("invalid candidate regression audit")
-        # A local veto of the combined candidate does not certify the other patches.
-        # Retain exact rejected patch fingerprints; leave the accepted text unchanged.
         for patch in selected:
             if patch["finding_id"] in rejected:
-                audit.append({"unit_id": chapter["unit_id"], "review_record_id": record["record_id"],
-                    "finding_id": patch["finding_id"],
-                    "patch_sha256": correction_regression.patch_fingerprint(patch),
-                    "reason": "quality-candidate-veto", "at": clock()})
-        status["correction_regression_rejections"] = audit[-64:]
+                record_quality_patch_rejection(status, chapter, record, patch, "quality-candidate-veto")
+        # All receipts bind the old combined candidate. Even the siblings that
+        # passed must be independently checked again against the reduced set.
         status.pop("quality_candidate_gate", None)
-        stage_path.unlink(missing_ok=True)
+        remaining = [p for p in patches if p["finding_id"] not in rejected]
+        if not remaining:
+            retire_empty_quality_candidate(job_id, slug, status, chapter, record,
+                                           stage_path, reason="independent-veto")
+            return False
+        stage, validated = load_correction_stage(slug, chapter, record, status,
+                                                 source, translation, findings)
+        if stage != stage_path or validated["patches"] != patches:
+            raise JobError("candidate veto stage identity changed")
+        isolated = execution_scheduler.isolated_findings(status, chapter, record, findings)
+        execution_scheduler.record_isolated(status, chapter, record, isolated | set(rejected))
+        # Memory proposals from the original group are not per-patch bound.
+        validated.update(patches=remaining, glossary=[], style_guide=[])
+        store_json(stage_path, validated)
+        status["correction_batch_progress"] = {"unit_id": chapter["unit_id"],
+            "review_record_id": record["record_id"], "completed": len(remaining),
+            "total": len(findings)}
+        status["phase"] = "quality-candidate-reduced"
         checkpoint(job_id, status, slug)
-        raise ModelError("independent quality candidate check vetoed correction")
+        return False
     cache["approved"] = approved + [p["finding_id"] for p in selected]
     status["quality_candidate_gate"] = cache
     status["phase"] = "quality-candidate-check-staged"
@@ -5783,7 +5834,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
         status["last_error"] = str(exc)[:350]
         status["blocked_unit_id"] = unit_id
         recoverable_code = None
-        if (role == "corrector" and patch_mode and correction_feedback.enabled()
+        if role == "corrector" and isinstance(exc, QualityRecoveryExhausted):
+            recoverable_code = "quality-recovery-exhausted"
+        elif (role == "corrector" and patch_mode and correction_feedback.enabled()
                 and str(exc) == "corrector returned unchanged translation and memory"):
             key = {"unit_id": unit_id,
                    "review_record_id": previous_record.get("record_id"),
@@ -5854,7 +5907,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                       and not bounded_no_effect else recoverable_code)
         if (role == "corrector" and defer_protocol_failed_unit(
                 slug, chapter, previous_record, status, defer_code,
-                minimum_failures=2 if bounded_no_effect else MAX_FAILURES)):
+                minimum_failures=(1 if isinstance(exc, QualityRecoveryExhausted)
+                                  else 2 if bounded_no_effect else MAX_FAILURES))):
             # The correction-only deferral requires an exact, *current*
             # rejected review. A reviewer still checking a new translation
             # must never pass an older rejected report into this route.
@@ -5969,6 +6023,7 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                 quality_block_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
             status.pop("quality_candidate_gate", None)
+            status.get("quality_empty_candidates", {}).pop(unit_id, None)
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)
