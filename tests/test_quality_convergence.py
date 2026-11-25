@@ -189,6 +189,11 @@ class QualityEvidenceTests(unittest.TestCase):
 
 
 class QualityRuntimeTests(unittest.TestCase):
+    def test_unbound_budget_preserves_legacy_limits(self):
+        self.assertFalse(runner.quality_budget_enabled({}, {"unit_id": UNIT}))
+        self.assertFalse(runner.quality_budget_enabled({"workflow_revision": "f" * 40}, {"unit_id": UNIT}))
+        self.assertFalse(runner.quality_budget_enabled({}, {"translation_acceptance": {"source_sha256": S}}))
+
     def test_durable_arbitration_resume_does_not_recontact_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

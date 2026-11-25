@@ -3551,9 +3551,20 @@ def operator_unit_limit(status: dict, kind: str, unit_id: str, default: int) -> 
     return limits.get(unit_id, default)
 
 
+def quality_budget_enabled(status, chapter):
+    """Never grant recovery credits without an exact pinned source identity."""
+    accepted = chapter.get("translation_acceptance")
+    revision = status.get("workflow_revision")
+    return (isinstance(revision, str) and SHA.fullmatch(revision) is not None
+            and isinstance(accepted, dict)
+            and isinstance(accepted.get("source_sha256"), str)
+            and HEX64.fullmatch(accepted["source_sha256"]) is not None
+            and quality_controller.supported(pinned_scripts_dir().parent))
+
+
 def quality_review_limit(status, ledger, chapter):
     base = operator_unit_limit(status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
-    if not quality_controller.supported(pinned_scripts_dir().parent):
+    if not quality_budget_enabled(status, chapter):
         return base
     credits = quality_controller.progress_credits(ledger, chapter["unit_id"],
         chapter["translation_acceptance"]["source_sha256"], status["workflow_revision"])
@@ -3574,7 +3585,7 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
         raise JobError("invalid durable correction counter")
     extra_limit = operator_unit_limit(
         status, "correction", chapter["unit_id"], MAX_CORRECTIONS)
-    if quality_controller.supported(pinned_scripts_dir().parent):
+    if quality_budget_enabled(status, chapter):
         quality_review_limit(status, ledger, chapter)
         return rounds < status["quality_progress_budget"]["correction_limit"]
     if extra_limit > MAX_CORRECTIONS:
@@ -3650,7 +3661,7 @@ def defer_stalled_review(slug: str, status: dict, ledger: dict,
             or operator_unit_limit(status, "correction", unit_id, MAX_CORRECTIONS)
             > MAX_CORRECTIONS):
         return False
-    if quality_controller.supported(pinned_scripts_dir().parent):
+    if quality_budget_enabled(status, chapter):
         current = latest_record(ledger, chapter)
         if current and (current.get("quality_report") or {}).get("evidence_version") == 2:
             open_items = [f for f in current["quality_report"]["findings"] if not f["resolved"]]
