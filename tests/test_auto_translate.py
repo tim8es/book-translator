@@ -148,6 +148,31 @@ class AutomatedBookTests(unittest.TestCase):
                 self.assertEqual(worker.ready_jobs(), [
                     {"job_id": earlier, "book_key": slug}])
 
+    def test_discovery_skips_drifted_pin_without_changing_book_or_admitting_duplicate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stale, duplicate, unrelated = "a" * 32, "b" * 32, "c" * 32
+            for job, slug in ((stale, "old-book"), (duplicate, "old-book"), (unrelated, "other-book")):
+                incoming = root / "intake/auto" / job
+                incoming.mkdir(parents=True)
+                worker.store_json(incoming / "request.json", {"job_id": job,
+                    "source_sha256": job * 2, "target_language": "ru"})
+                worker.store_json(root / "automation/status" / (job + ".json"), {
+                    "job_id": job, "book_slug": slug, "workflow_revision": "d" * 40 if job == stale else "e" * 40,
+                    "state": "blocked" if job == stale else "running", "phase": "model-blocked",
+                    "active": None, "updated_at": "2026-11-10T10:00:00+00:00"})
+                worker.store_json(root / "books" / slug / "metadata.json",
+                                  {"workflow": {"resolved_revision": "e" * 40}})
+                worker.store_json(root / "books" / slug / ".workflow/auto-control.json", {
+                    "schema_version": 1, "mode": "auto", "updated_at": "2026-11-10T10:01:00+00:00"})
+            before = {p: p.read_bytes() for p in root.rglob("*.json")}
+            with patch.object(worker, "ROOT", root):
+                self.assertTrue(worker.workflow_pin_drift(worker.read_json(worker.status_path(stale))))
+                self.assertEqual(worker.ready_jobs(), [{"job_id": unrelated, "book_key": "other-book"}])
+                self.assertEqual(worker.select(None), unrelated)
+                self.assertEqual(worker.select(stale), stale)  # explicit gate still checks drift
+            self.assertEqual({p: p.read_bytes() for p in root.rglob("*.json")}, before)
+
     def test_newer_resume_auto_signal_unblocks_only_supported_model_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

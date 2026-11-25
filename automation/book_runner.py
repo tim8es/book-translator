@@ -1408,6 +1408,20 @@ def superseded_editorial_upgrade_job(job_id: str, status: dict) -> bool:
     )
 
 
+def workflow_pin_drift(status: dict) -> bool:
+    """Read-only discovery guard, never authority to rewrite a book or job pin."""
+    slug, recorded = status.get("book_slug"), status.get("workflow_revision")
+    if not safe_book_slug(slug) or not isinstance(recorded, str) or not SHA.fullmatch(recorded):
+        return False
+    path = ROOT / "books" / slug / "metadata.json"
+    if not path.is_file():
+        return False
+    metadata = read_json(path)
+    workflow = metadata.get("workflow")
+    actual = workflow.get("resolved_revision") if isinstance(workflow, dict) else None
+    return isinstance(actual, str) and SHA.fullmatch(actual) is not None and actual != recorded
+
+
 def ready_jobs(limit: int = 6) -> list[dict]:
     """Admit at most six books per wake, fairly favoring least-recently served.
 
@@ -1446,6 +1460,11 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         # duplicate cannot bypass its existing review/recovery policy.
         keys.add(key)
         try:
+            if state and workflow_pin_drift(state):
+                # Keep the book lane reserved. A stale resume signal must not
+                # repeatedly consume an Actions slot or admit a duplicate.
+                print(f"Skipping job {job_id}: workflow revision drift requires operator reconciliation", file=sys.stderr)
+                continue
             if (state and state.get("state") in FINAL
                     and not auto_resume_requested(state)
                     and not recoverable_epub_preflight(state)
@@ -1496,7 +1515,7 @@ def provider_retry_signal(job_id: str, expected_not_before: str, *,
     if executor not in {"auto", "pi"}:
         raise JobError("unsupported provider retry executor")
     slug = status.get("book_slug")
-    if selection_executor(job_id, slug) != executor:
+    if selection_executor(job_id, slug) != executor or workflow_pin_drift(status):
         return stale
     if safe_book_slug(slug) and auto_mode(slug) != "auto":
         return stale
@@ -1528,6 +1547,7 @@ def select(explicit: str | None) -> str:
     if explicit:
         safe_id(explicit)
         return explicit
+    drifted_books = set()
     for path in sorted((ROOT / "intake" / "auto").glob("*/request.json")):
         job_id = path.parent.name
         if not ID.fullmatch(job_id):
@@ -1539,6 +1559,13 @@ def select(explicit: str | None) -> str:
                 continue
             if recorded is None:
                 return job_id
+            slug = recorded.get("book_slug")
+            if safe_book_slug(slug) and slug in drifted_books:
+                continue
+            if workflow_pin_drift(recorded):
+                drifted_books.add(slug)
+                print(f"Skipping job {job_id}: workflow revision drift requires operator reconciliation", file=sys.stderr)
+                continue
         except (OSError, ValueError, JobError):
             # An invalid status must not be overwritten or starve other jobs.
             # Recovery of this job requires explicit operator intervention.
