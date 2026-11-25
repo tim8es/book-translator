@@ -170,7 +170,8 @@ EVERY unresolved prior finding in a new v2 report. Each recheck has its own id a
 resolves: {"record_id": "<prior-32-hex-record-id>", "finding_id": "modality-1"}.
 To mark a recheck resolved, source/translation anchors must match current artifacts
 and the translation SHA-256 must differ from the earlier rejected version.
-Otherwise keep the issue unresolved with outcome CORRECTIONS_REQUIRED.
+Otherwise keep the issue unresolved with outcome CORRECTIONS_REQUIRED, except for
+an explicitly adjudicated acceptable editorial variant under QUALITY_CONVERGENCE.md.
 
 This is citation and correction-lineage verification, not automated literary judgment.
 An independent Reviewer must still compare meaning, style and every relevant passage.
@@ -242,3 +243,11 @@ meaning errors, omissions, additions, structure, style, or other issues; each
 still needs independently validated correction evidence. Do not invent a
 changed artifact or use this exception simply to obtain PASS. The check is
 language-agnostic and does not enforce literal target spellings.
+
+## Independent editorial arbitration
+
+Apply the routed `docs/QUALITY_CONVERGENCE.md` contract. Do not report equally
+faithful, idiomatic alternatives as defects. Preserve genuine minor errors as
+mandatory work. An independently adjudicated acceptable variant is closed only
+with the original finding and the canonical `adjudications` evidence; it is
+not a claim that the text was changed. Never invent an adjudicator session.

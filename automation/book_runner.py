@@ -43,6 +43,8 @@ import execution_scheduler
 import execution_metrics
 import agent_orchestrator
 import review_convergence
+import quality_controller
+import quality_block_repair
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
@@ -244,6 +246,9 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
     if ((repeated_provider or attempts >= FALLBACK_AFTER_TRANSIENTS)
             and os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()):
         route = role + "_FALLBACK"
+    if quality_controller.escalation_route(status, role, current_unit, os.environ):
+        route = role + "_FALLBACK"
+        status["quality_escalation_used"] = dict(status["quality_model_escalation"])
     # A route name, not model ID or credential, is safe in metadata.
     status["provider_model_route"] = "fallback" if route != role else "primary"
     status.pop("model_response_diagnostics", None)
@@ -2100,8 +2105,7 @@ def allow_review_bound_protocol_retry(status: dict, ledger: dict, chapters: list
 
 def prepare_correction_limit_resume(status: dict, ledger: dict, chapter: dict) -> None:
     unit_id = chapter["unit_id"]
-    if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
+    if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter):
         defer_review_unit(status, unit_id)
         return
     # Existing books on historical immutable workflow revisions cannot be
@@ -2684,6 +2688,9 @@ def verify_semantic_correction_candidate(job_id: str, slug: str, status: dict,
         active = candidate_review.enabled()
     except candidate_review.CandidateReviewError as exc:
         raise JobError(str(exc)) from exc
+    if quality_controller.supported(engine):
+        return verify_quality_candidate(job_id, slug, status, engine, chapter,
+                                        record, source, translation, patches, stage_path)
     if not active:
         return True
     if not patches:
@@ -2804,6 +2811,163 @@ def correction_orchestrator_strategy(job_id: str, slug: str, status: dict,
     return strategy
 
 
+def quality_block_stage_path(slug, unit_id):
+    if not safe_book_slug(slug) or not re.fullmatch(r"chapter-[0-9]{6}", unit_id):
+        raise JobError("unsafe quality block stage identity")
+    return ROOT / "books" / slug / ".workflow" / "quality-block-repair" / (unit_id + ".json")
+
+
+def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
+                                 ledger, source, translation, unresolved):
+    """One source-owned reconstruction and independent veto, durably checkpointed.
+
+    This is an alternative strategy, not a way to waive prior review lineage.
+    Unsupported cases fall back to normal exact-anchor repair.
+    """
+    unit = chapter["unit_id"]
+    stage_path = quality_block_stage_path(slug, unit)
+    stage = read_json(stage_path) if stage_path.is_file() else None
+    attempts = status.setdefault("quality_block_attempts", [])
+    if not isinstance(attempts, list):
+        raise JobError("invalid block recovery attempts")
+    strategy = quality_controller.strategy(ledger, chapter, record, unresolved,
+                                            status.get("correction_regression_rejections", []))
+    binding = {"unit_id": unit, "record_id": record["record_id"],
+               "source_sha256": record["source_sha256"],
+               "translation_sha256": record["translation_sha256"],
+               "workflow_revision": status["workflow_revision"],
+               "session_id": status["active"]["session_id"]}
+    def retire(reason):
+        if stage is not None:
+            plan_hash = quality_controller.digest(stage["plan"])
+            for item in reversed(attempts):
+                if item.get("plan_sha256") == plan_hash and item.get("unit_id") == unit:
+                    item["outcome"] = reason
+                    break
+        stage_path.unlink(missing_ok=True)
+        status["phase"] = "quality-block-recovery-retired"
+        checkpoint(job_id, status, slug)
+    if stage is not None:
+        if (set(stage) != {"binding", "plan", "state", "replacement"}
+                or stage["state"] not in {"reserved", "candidate", "checking", "approved"}):
+            raise JobError("invalid durable quality block recovery stage")
+        if stage["binding"] != binding or stage["state"] in {"reserved", "checking"}:
+            # A stale or interrupted provider reservation is not a successful edit.
+            retire("interrupted-or-stale")
+            return False, None
+        plan = stage["plan"]
+    else:
+        try:
+            plan = quality_block_repair.select(source, translation, record, strategy,
+                [a for a in attempts if a.get("unit_id") == unit], position=_anchor_position)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise JobError("invalid block reconstruction evidence") from exc
+        if plan is None:
+            return False, None
+    book = ROOT / "books" / slug
+    def candidate(replacement):
+        value = quality_block_repair.apply(plan, source, translation, record,
+                                            replacement, position=_anchor_position)
+        check_markers(source, value)
+        correction_regression.require_no_new_repetitions(translation, value)
+        return value
+    def reserve(phase, role, system, user):
+        count = status.get("model_calls_started", 0)
+        if type(count) is not int or count < 0:
+            raise JobError("invalid model counter")
+        if count >= model_call_limit():
+            return False
+        status["model_calls_started"] = count + 1
+        status["phase"] = phase
+        binding_for_call = quality_controller.escalation_binding(status, role.upper(), unit,
+            level=max(strategy[fid]["level"] for fid in plan["finding_ids"]), reason="block-reconstruction")
+        if binding_for_call:
+            status["quality_model_escalation"] = binding_for_call
+        status["prompt_context"] = {"role": role, "execution_mode": phase,
+            "workflow_revision": status["workflow_revision"],
+            "unit_id": unit, "block_id": plan["block_id"],
+            "source_sha256": binding["source_sha256"],
+            "translation_sha256": binding["translation_sha256"],
+            "system_chars": len(system), "user_chars": len(user)}
+        checkpoint(job_id, status, slug)
+        return True
+    if stage is None:
+        instructions, _ = role_contracts(engine, "translator")
+        try:
+            system, user = quality_block_repair.prompt(plan, source, translation, record,
+                instructions, (book / "glossary.md").read_text("utf-8"),
+                (book / "style-guide.md").read_text("utf-8"))
+        except ValueError:
+            return False, None
+        if status.get("model_calls_started", 0) >= model_call_limit():
+            return False, None
+        stage = {"binding": binding, "plan": plan, "state": "reserved", "replacement": None}
+        attempts.append({"unit_id": unit, "source_sha256": binding["source_sha256"],
+            "translation_sha256": binding["translation_sha256"],
+            "record_id": record["record_id"], "block_id": plan["block_id"],
+            "issue_ids": [strategy[fid]["issue_id"] for fid in plan["finding_ids"]],
+            "plan_sha256": quality_controller.digest(plan), "outcome": "reserved"})
+        status["quality_block_attempts"] = attempts
+        store_json(stage_path, stage)
+        if not reserve("quality-block-translation-reserved", "translator", system, user):
+            retire("budget-exhausted")
+            return False, None
+        try:
+            answer = complete_for_job(status, "TRANSLATOR", system, user)
+            replacement = quality_block_repair.parse(answer)
+            candidate(replacement)
+        except TransientModelError:
+            raise
+        except (ModelError, ValueError, JobError, correction_regression.CorrectionRegression):
+            retire("unsafe-or-invalid-candidate")
+            return True, None
+        stage.update(state="candidate", replacement=replacement)
+        store_json(stage_path, stage)
+        status["phase"] = "quality-block-candidate-staged"
+        checkpoint(job_id, status, slug)
+        return True, None
+    value = candidate(stage["replacement"])
+    if stage["state"] == "approved":
+        return True, (value, [], [])
+    instructions, _ = role_contracts(engine, "reviewer")
+    try:
+        cases = [quality_block_repair.review_case(plan, source, translation, record,
+                                                   stage["replacement"])]
+        system, user = candidate_review.build_prompt(cases, instructions, require_resolution=True)
+    except (ValueError, candidate_review.CandidateReviewError):
+        retire("review-context-too-large")
+        return True, None
+    if status.get("model_calls_started", 0) >= model_call_limit():
+        retire("budget-exhausted")
+        return False, None
+    stage["state"] = "checking"
+    store_json(stage_path, stage)
+    if not reserve("quality-block-review-reserved", "reviewer", system, user):
+        retire("budget-exhausted")
+        return False, None
+    try:
+        answer = complete_for_job(status, "REVIEWER", system, user)
+        rejected = candidate_review.parse_verdict(answer, ["block-reconstruction"])
+    except TransientModelError:
+        raise
+    except (ModelError, ValueError, candidate_review.CandidateReviewError):
+        retire("invalid-independent-review")
+        return True, None
+    if rejected:
+        retire("independent-veto")
+        return True, None
+    stage["state"] = "approved"
+    store_json(stage_path, stage)
+    for item in reversed(attempts):
+        if item.get("plan_sha256") == quality_controller.digest(plan):
+            item["outcome"] = "candidate-approved"
+            item["candidate_sha256"] = hashlib.sha256(value.encode("utf-8")).hexdigest()
+            break
+    status["phase"] = "quality-block-candidate-approved"
+    checkpoint(job_id, status, slug)
+    return True, (value, [], [])
+
+
 def process_correction_batches(job_id: str, slug: str, status: dict, engine: Path,
                                chapter: dict, record: dict) -> tuple[str, list, list] | None:
     """Stage at most two small LLM calls per Actions checkpoint.
@@ -2839,10 +3003,18 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         "review_record_id": record["record_id"],
         "counts": correction_regression.triage_counts(unresolved),
     }
+    feedback_enabled = correction_feedback.enabled()
+    historical_ledger = (chapter_data(slug)[1]
+                         if feedback_enabled or quality_controller.supported(engine) else None)
+    if (quality_controller.supported(engine)
+            and (engine / "automation/quality_block_repair.py").is_file()
+            and not correction_stage_path(slug, chapter["unit_id"]).exists()):
+        handled, result = process_quality_block_repair(job_id, slug, status, engine,
+            chapter, record, historical_ledger, source, translation, unresolved)
+        if handled:
+            return result
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
-    feedback_enabled = correction_feedback.enabled()
-    historical_ledger = chapter_data(slug)[1] if feedback_enabled else None
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
@@ -2914,6 +3086,16 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 and overlap.get("review_record_id") == record["record_id"]):
             earlier += [fid for fid in overlap.get("unapplied_finding_ids", [])
                         if fid in {item["id"] for item in selected}]
+        if quality_controller.supported(engine):
+            try:
+                recovery_plan = quality_controller.strategy(
+                    historical_ledger, chapter, record, selected,
+                    status.get("correction_regression_rejections", []))
+            except ValueError as exc:
+                raise JobError("invalid stable quality recovery lineage") from exc
+            user += quality_controller.strategy_prompt(recovery_plan)
+            status["quality_recovery_strategy"] = {"unit_id": chapter["unit_id"],
+                "record_id": record["record_id"], "findings": recovery_plan}
         if feedback_enabled:
             try:
                 feedback = correction_feedback.plan(
@@ -2958,6 +3140,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         status.update({"model_calls_started": count + 1,
                        "phase": "model-call-reserved",
                        "prompt_context": prompt_context})
+        if quality_controller.supported(engine):
+            binding = quality_controller.escalation_binding(status, "CORRECTOR", chapter["unit_id"],
+                level=max(v["level"] for v in recovery_plan.values()), reason="recurrent-confirmed-defect")
+            if binding:
+                status["quality_model_escalation"] = binding
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "CORRECTOR", system, user)
         try:
@@ -3376,6 +3563,31 @@ def operator_unit_limit(status: dict, kind: str, unit_id: str, default: int) -> 
     return limits.get(unit_id, default)
 
 
+def quality_budget_enabled(status, chapter):
+    """Never grant recovery credits without an exact pinned source identity."""
+    accepted = chapter.get("translation_acceptance")
+    revision = status.get("workflow_revision")
+    return (isinstance(revision, str) and SHA.fullmatch(revision) is not None
+            and isinstance(accepted, dict)
+            and isinstance(accepted.get("source_sha256"), str)
+            and HEX64.fullmatch(accepted["source_sha256"]) is not None
+            and quality_controller.supported(pinned_scripts_dir().parent))
+
+
+def quality_review_limit(status, ledger, chapter):
+    base = operator_unit_limit(status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
+    if not quality_budget_enabled(status, chapter):
+        return base
+    credits = quality_controller.progress_credits(ledger, chapter["unit_id"],
+        chapter["translation_acceptance"]["source_sha256"], status["workflow_revision"])
+    effective = max(base, MAX_ACCEPTED_REVIEWS_PER_UNIT + len(credits))
+    status["quality_progress_budget"] = {"unit_id": chapter["unit_id"], "credit_records": credits,
+        "review_limit": effective, "correction_limit": max(
+            operator_unit_limit(status, "correction", chapter["unit_id"], MAX_CORRECTIONS),
+            MAX_CORRECTIONS + len(credits))}
+    return effective
+
+
 def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
     counters = status.get("correction_rounds", {})
     if not isinstance(counters, dict):
@@ -3385,6 +3597,9 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
         raise JobError("invalid durable correction counter")
     extra_limit = operator_unit_limit(
         status, "correction", chapter["unit_id"], MAX_CORRECTIONS)
+    if quality_budget_enabled(status, chapter):
+        quality_review_limit(status, ledger, chapter)
+        return rounds < status["quality_progress_budget"]["correction_limit"]
     if extra_limit > MAX_CORRECTIONS:
         return rounds < extra_limit
     if rounds < MAX_CORRECTIONS:
@@ -3458,6 +3673,19 @@ def defer_stalled_review(slug: str, status: dict, ledger: dict,
             or operator_unit_limit(status, "correction", unit_id, MAX_CORRECTIONS)
             > MAX_CORRECTIONS):
         return False
+    if quality_budget_enabled(status, chapter):
+        current = latest_record(ledger, chapter)
+        if current and (current.get("quality_report") or {}).get("evidence_version") == 2:
+            open_items = [f for f in current["quality_report"]["findings"] if not f["resolved"]]
+            if open_items:
+                plan = quality_controller.strategy(ledger, chapter, current, open_items,
+                    status.get("correction_regression_rejections", []))
+                old = status.get("quality_recovery_strategy", {}).get("findings", {})
+                previous_levels = {v["issue_id"]: v["level"] for v in old.values()}
+                if any(v["level"] > previous_levels.get(v["issue_id"], -1) for v in plan.values()):
+                    # Give a genuinely different bounded strategy its chance;
+                    # the hard review and global model budgets still apply.
+                    return False
     report = review_convergence.stalled_rejected_reviews(ledger, chapter)
     if (report is None
             and os.environ.get("BOOK_TRANSLATOR_QUEUE_BUDGET") == "on"
@@ -3591,8 +3819,7 @@ def next_operation(slug: str, status: dict) -> tuple[str, dict | None]:
                     and report.get("evidence_version") != 2):
                 return "reviewer", chapter
             if correction_findings_missing(record):
-                if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
+                if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter):
                     defer_review_unit(status, chapter["unit_id"])
                     deferred.add(chapter["unit_id"])
                     continue
@@ -3801,13 +4028,11 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             if (status.get("memory_recheck_unit") != chapter["unit_id"]
                     and defer_stalled_review(slug, status, ledger, chapter)):
                 continue
-            if (accepted_review_count(ledger, chapter) < operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
+            if (accepted_review_count(ledger, chapter) < quality_review_limit(status, ledger, chapter)
                     and correction_allowed(status, ledger, chapter)):
                 break
             reason = ("review-round-limit"
-                      if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
+                      if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter)
                       else "correction-limit")
             cli("defer-review", slug, str(chapter["number"]), "--reason", reason)
         else:
@@ -3842,8 +4067,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
         return "reviewer", chapter
     if operation == "correct_translation":
         if (glossary_only_recheck_needed(slug, chapter, record)
-                and accepted_review_count(ledger, chapter) < operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)):
+                and accepted_review_count(ledger, chapter) < quality_review_limit(status, ledger, chapter)):
             # The source/translation is unchanged; only a new glossary
             # decision can be checked against the old terminology findings.
             # Never infer PASS or silently increase the reviewer budget.
@@ -3853,8 +4077,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
                 and not (pinned_scripts_dir() / "workflow" / "attention.py").exists()
                 and defer_stalled_review(slug, status, ledger, chapter)):
             return next_operation(slug, status)
-        if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
+        if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter):
             if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
                 raise JobError("canonical attention selection left an over-budget unit")
             defer_review_unit(status, unit_id)
@@ -5015,6 +5238,231 @@ def verified_editorial_candidate(slug: str, chapter: dict) -> str | None:
         raise JobError("cannot safely admit operator-approved editorial candidate") from exc
 
 
+def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
+                             source, translation, patches, stage_path):
+    """One bounded independent correction gate per checkpoint, with durable receipts."""
+    if not patches:
+        raise JobError("quality candidate preflight requires patches")
+    proposed = apply_correction_patches(translation, patches)
+    candidate_sha = hashlib.sha256(proposed.encode("utf-8")).hexdigest()
+    binding = {"unit_id": chapter["unit_id"], "record_id": record["record_id"],
+               "source_sha256": record["source_sha256"],
+               "translation_sha256": record["translation_sha256"],
+               "candidate_sha256": candidate_sha,
+               "patches_sha256": quality_controller.digest(patches),
+               "workflow_revision": status["workflow_revision"],
+               "session_id": status["active"]["session_id"],
+               "glossary_sha256": fingerprint(ROOT / "books" / slug / "glossary.md"),
+               "style_guide_sha256": fingerprint(ROOT / "books" / slug / "style-guide.md")}
+    cache = status.get("quality_candidate_gate")
+    if not isinstance(cache, dict) or cache.get("binding") != binding:
+        cache = {"binding": binding, "approved": []}
+    approved = cache["approved"]
+    ids = [p["finding_id"] for p in patches]
+    if (not isinstance(approved, list) or len(set(approved)) != len(approved)
+            or not set(approved) <= set(ids)):
+        raise JobError("invalid candidate gate receipts")
+    if set(approved) == set(ids):
+        return True
+    # Check the combined candidate, not independent edits in isolation.
+    selected = [p for p in patches if p["finding_id"] not in approved][:4]
+    findings = [f for f in record["quality_report"]["findings"] if not f["resolved"]]
+    instructions, paths = role_contracts(engine, "reviewer")
+    while selected:
+        try:
+            cases = candidate_review.cases(source, translation, selected, findings,
+                                           position=_anchor_position, combined_patches=patches)
+            system, user = candidate_review.build_prompt(cases, instructions,
+                                                          require_resolution=True)
+            break
+        except candidate_review.CandidateReviewError as exc:
+            if len(selected) == 1:
+                raise ModelError("quality candidate check exceeds safe scope or is invalid") from exc
+            selected = selected[:max(1, len(selected) // 2)]
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0:
+        raise JobError("invalid model counter")
+    if count >= model_call_limit():
+        cli("release", slug, str(chapter["number"]),
+            "--session-id", status["active"]["session_id"])
+        status["active"] = None
+        status.update(state="blocked", phase="model-call-limit-reached",
+                      last_error="quality candidate check budget reached")
+        checkpoint(job_id, status, slug)
+        return False
+    status["quality_candidate_gate"] = cache
+    status["model_calls_started"] = count + 1
+    status["phase"] = "quality-candidate-check-reserved"
+    plan = status.get("quality_recovery_strategy", {})
+    if plan.get("unit_id") == chapter["unit_id"] and plan.get("record_id") == record["record_id"]:
+        level = max((v["level"] for v in plan.get("findings", {}).values()), default=0)
+        escalation = quality_controller.escalation_binding(status, "REVIEWER", chapter["unit_id"],
+            level=level, reason="independent-candidate-check")
+        if escalation:
+            status["quality_model_escalation"] = escalation
+    status["prompt_context"] = {"role": "reviewer", "execution_mode": "quality-candidate-check",
+        "workflow_revision": status["workflow_revision"], "loaded_contracts": paths,
+        "case_count": len(cases), "source_sha256": binding["source_sha256"],
+        "translation_sha256": binding["translation_sha256"],
+        "candidate_sha256": candidate_sha, "system_chars": len(system), "user_chars": len(user)}
+    checkpoint(job_id, status, slug)
+    answer = complete_for_job(status, "REVIEWER", system, user)
+    try:
+        rejected = candidate_review.parse_verdict(answer, [p["finding_id"] for p in selected])
+    except candidate_review.CandidateReviewError as exc:
+        raise ModelError("quality candidate check returned invalid evidence") from exc
+    if rejected:
+        audit = status.setdefault("correction_regression_rejections", [])
+        if not isinstance(audit, list):
+            raise JobError("invalid candidate regression audit")
+        # A local veto of the combined candidate does not certify the other patches.
+        # Retain exact rejected patch fingerprints; leave the accepted text unchanged.
+        for patch in selected:
+            if patch["finding_id"] in rejected:
+                audit.append({"unit_id": chapter["unit_id"], "review_record_id": record["record_id"],
+                    "finding_id": patch["finding_id"],
+                    "patch_sha256": correction_regression.patch_fingerprint(patch),
+                    "reason": "quality-candidate-veto", "at": clock()})
+        status["correction_regression_rejections"] = audit[-64:]
+        status.pop("quality_candidate_gate", None)
+        stage_path.unlink(missing_ok=True)
+        checkpoint(job_id, status, slug)
+        raise ModelError("independent quality candidate check vetoed correction")
+    cache["approved"] = approved + [p["finding_id"] for p in selected]
+    status["quality_candidate_gate"] = cache
+    status["phase"] = "quality-candidate-check-staged"
+    checkpoint(job_id, status, slug)
+    return set(cache["approved"]) == set(ids)
+
+
+def quality_stage_path(slug, unit_id):
+    if not safe_book_slug(slug) or not re.fullmatch(r"chapter-[0-9]{6}", unit_id):
+        raise JobError("unsafe quality arbitration stage identity")
+    return ROOT / "books" / slug / ".workflow" / "quality-arbitration" / (unit_id + ".json")
+
+
+def quality_review_binding(chapter, owned, previous, status):
+    acceptance = chapter["translation_acceptance"]
+    return {"unit_id": chapter["unit_id"], "source_sha256": acceptance["source_sha256"],
+            "translation_sha256": acceptance["translation_sha256"],
+            "workflow_revision": status["workflow_revision"], "session_id": owned["session_id"],
+            "shared_state_revisions": owned.get("shared_state_revisions"),
+            "previous_record_id": previous["record_id"] if previous else None}
+
+
+def read_quality_stage(slug, chapter, owned, previous, status, source, target):
+    path = quality_stage_path(slug, chapter["unit_id"])
+    if not path.is_file():
+        return None
+    stage = read_json(path)
+    binding = quality_review_binding(chapter, owned, previous, status)
+    if stage.get("binding") != binding:
+        return None
+    if (set(stage) != {"binding", "state", "outcome", "report", "style", "glossary"}
+            or stage["state"] not in {"reserved", "completed"}
+            or stage["outcome"] not in {"PASS", "CORRECTIONS_REQUIRED"}
+            or not isinstance(stage["style"], list) or not isinstance(stage["glossary"], list)):
+        raise JobError("invalid durable quality arbitration stage")
+    validate_quality_stage(stage, source, target, previous, chapter, owned)
+    return stage
+
+
+def validate_quality_stage(stage, source, target, previous, chapter, owned):
+    from workflow.review_quality import validate_quality_report
+    from workflow.review_anchors import verify_evidence_anchors, verify_correction_lineage
+    from workflow.review_adjudication import verify_sessions
+    try:
+        if (hashlib.sha256(source.encode("utf-8")).hexdigest() != stage["binding"]["source_sha256"]
+                or hashlib.sha256(target.encode("utf-8")).hexdigest() != stage["binding"]["translation_sha256"]):
+            raise ValueError("arbitration artifact changed")
+        report = validate_quality_report(stage["report"], outcome=stage["outcome"])
+        if report.get("evidence_version") != 2:
+            raise ValueError("quality arbitration needs anchored review")
+        verify_evidence_anchors(report, source.encode("utf-8"), target.encode("utf-8"))
+        verify_correction_lineage(report, previous=previous,
+            source_sha256=stage["binding"]["source_sha256"],
+            translation_sha256=stage["binding"]["translation_sha256"],
+            outcome=stage["outcome"], **reviewer_lineage_options(verify_correction_lineage, owned))
+        verify_sessions(report, owned["session_id"], chapter["translation_acceptance"].get("session_id"))
+        if stage["outcome"] == "PASS" and any(not f["resolved"] for f in report["findings"]):
+            raise ValueError("quality PASS contains unresolved defects")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise JobError("invalid source-bound arbitration evidence") from exc
+
+
+def arbitrate_quality_review(job_id, slug, status, engine, chapter, owned, previous,
+                             source, target, outcome, report, style, glossary, existing=None):
+    """Preserve the original report before the independent call; fail conservatively."""
+    if existing is not None:
+        # An interrupted reserved call is charged once; never repeat it blindly.
+        # The already valid original review can proceed without dismissing defects.
+        return existing["outcome"], existing["report"]
+    if any(not f["resolved"] for f in report["findings"]):
+        outcome = "CORRECTIONS_REQUIRED"
+    if outcome != "CORRECTIONS_REQUIRED" or report["context"] != "independent_session":
+        return outcome, report
+    if "adjudications" in report:
+        raise JobError("initial reviewer cannot fabricate arbitration evidence")
+    candidates = quality_controller.cases(report, source, target, previous)
+    if not candidates:
+        return outcome, report
+    book = ROOT / "books" / slug
+    instructions, paths = role_contracts(engine, "reviewer")
+    while candidates:
+        try:
+            system, user = quality_controller.prompt(instructions, candidates,
+                (book / "style-guide.md").read_text("utf-8"),
+                (book / "glossary.md").read_text("utf-8"))
+            break
+        except ValueError:
+            candidates = candidates[:len(candidates) // 2]
+    if not candidates:
+        return outcome, report
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0:
+        raise JobError("invalid model counter")
+    if count >= model_call_limit():
+        return outcome, report
+    stage = {"binding": quality_review_binding(chapter, owned, previous, status),
+             "state": "reserved", "outcome": outcome, "report": report,
+             "style": style, "glossary": glossary}
+    validate_quality_stage(stage, source, target, previous, chapter, owned)
+    path = quality_stage_path(slug, chapter["unit_id"])
+    store_json(path, stage)
+    status["model_calls_started"] = count + 1
+    status["phase"] = "editorial-arbitration-reserved"
+    status["prompt_context"] = {"role": "reviewer", "execution_mode": "editorial-arbitration",
+        "workflow_revision": status["workflow_revision"], "loaded_contracts": paths,
+        "case_count": len(candidates), "source_sha256": stage["binding"]["source_sha256"],
+        "translation_sha256": stage["binding"]["translation_sha256"],
+        "system_chars": len(system), "user_chars": len(user)}
+    checkpoint(job_id, status, slug)
+    try:
+        answer = complete_for_job(status, "REVIEWER", system, user)
+        decisions = quality_controller.parse(answer, candidates)
+        new_outcome, new_report = quality_controller.adjudicate(report, decisions, candidates,
+            source=source, translation=target, reviewer_session=owned["session_id"],
+            adjudicator_session="arbiter-" + uuid4().hex)
+    except (ModelError, ValueError, KeyError, TypeError):
+        # Supplemental arbitration cannot discard a valid independent review.
+        # Keep all findings, count the call, and let canonical correction proceed.
+        new_outcome, new_report = outcome, report
+        decision = "unavailable-kept-all"
+    else:
+        decision = "evaluated"
+    stage.update(state="completed", outcome=new_outcome, report=new_report)
+    validate_quality_stage(stage, source, target, previous, chapter, owned)
+    store_json(path, stage)
+    status["quality_arbitration"] = {"unit_id": chapter["unit_id"],
+        "source_sha256": stage["binding"]["source_sha256"],
+        "translation_sha256": stage["binding"]["translation_sha256"],
+        "considered": len(candidates), "closed": len(new_report.get("adjudications", [])),
+        "decision": decision}
+    status["phase"] = "editorial-arbitration-staged"
+    checkpoint(job_id, status, slug)
+    return new_outcome, new_report
+
+
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     active = status["active"]
     _, _, chapters = chapter_data(slug)
@@ -5182,7 +5630,17 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             prompt_context["correction_mode"] = "anchored-patches"
         preserve_links = (role in {"translator", "corrector"} and not patch_mode
                           and external_link_only(source))
-        if editorial_candidate is not None:
+        quality_stage = None
+        quality_target = None
+        if role == "reviewer" and quality_controller.supported(engine):
+            quality_target = (ROOT / "books" / slug / chapter["translation_path"]).read_text("utf-8")
+            quality_stage = read_quality_stage(slug, chapter, owned, previous_record,
+                                               status, source, quality_target)
+        if quality_stage is not None:
+            outcome, report = quality_stage["outcome"], quality_stage["report"]
+            reviewed_style, reviewed_glossary = quality_stage["style"], quality_stage["glossary"]
+            prompt_context["execution_mode"] = "resume-editorial-arbitration"
+        elif editorial_candidate is not None:
             prompt_context["execution_mode"] = "verified_operator_editorial_candidate"
             translated, proposed_glossary, proposed_style = editorial_candidate, [], []
         elif patch_mode:
@@ -5263,6 +5721,10 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                     reviewed_glossary = reviewer_glossary_proposals(repaired)
             else:
                 translated, proposed_glossary, proposed_style = parse_translation(answer)
+        if role == "reviewer" and quality_controller.supported(engine):
+            outcome, report = arbitrate_quality_review(job_id, slug, status, engine,
+                chapter, owned, previous_record, source, quality_target, outcome, report,
+                reviewed_style, reviewed_glossary, existing=quality_stage)
         if role != "reviewer":
             if (not preserve_links and not patch_mode and structural_plan is None
                     and editorial_candidate is None):
@@ -5415,6 +5877,16 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             quality_report.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
             cli("review-record", slug, str(chapter["number"]), "--outcome", outcome,
                 "--session-id", active["session_id"], "--quality-report", str(quality_report))
+        if quality_controller.supported(engine):
+            quality_stage_path(slug, unit_id).unlink(missing_ok=True)
+            _, current_ledger, _ = chapter_data(slug)
+            issues = quality_controller.projection(current_ledger, unit_id,
+                chapter["translation_acceptance"]["source_sha256"])
+            status["quality_issue_summary"] = {"unit_id": unit_id,
+                "total": len(issues),
+                "open": sum(v["state"] == "open" for v in issues.values()),
+                "verified_repair": sum(v["state"] == "verified-repair" for v in issues.values()),
+                "adjudicated": sum(v["state"] == "adjudicated" for v in issues.values())}
         status.pop("memory_recheck_unit", None)
         if status.get("force_full_review_unit") == unit_id:
             status.pop("force_full_review_unit", None)
@@ -5493,7 +5965,10 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # Remove staging ONLY after canonical translation acceptance and
             # claim-bound glossary reconciliation have succeeded.
             correction_stage_path(slug, unit_id).unlink(missing_ok=True)
+            if quality_controller.supported(engine):
+                quality_block_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
+            status.pop("quality_candidate_gate", None)
             status.pop("correction_isolation", None)
             status.pop("correction_orchestrator_decision", None)
             status.pop("last_patch_anchor_mismatch", None)

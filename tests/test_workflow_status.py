@@ -247,7 +247,7 @@ class WorkflowStatusTests(unittest.TestCase):
         self.assertEqual(resume["context"]["workflow_revision"], "rev-1")
         self.assertEqual(
             resume["context"]["contracts"],
-            ["AGENTS.md", "docs/TRANSLATION.md", "docs/REVIEWER.md"],
+            ["AGENTS.md", "docs/TRANSLATION.md", "docs/REVIEWER.md", "docs/QUALITY_CONVERGENCE.md"],
         )
         self.assertEqual(
             resume["context"]["files"],
@@ -301,7 +301,7 @@ class WorkflowStatusTests(unittest.TestCase):
         self.assertEqual(resume["context"]["profile"], "orchestrator")
         self.assertEqual(
             resume["context"]["contracts"],
-            ["AGENTS.md", "docs/ORCHESTRATION.md"],
+            ["AGENTS.md", "docs/ORCHESTRATION.md", "docs/QUALITY_CONVERGENCE.md"],
         )
         self.assertEqual(
             resume["context"]["files"],

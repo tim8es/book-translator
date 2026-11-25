@@ -80,7 +80,7 @@ class WaveRoleContextTests(unittest.TestCase):
         ])
         self.assertEqual(reviewer["instruction_paths"], [
             "AGENTS.md", "docs/TRANSLATION.md", "docs/REVIEWER.md",
-            "docs/WAVE_WORKER.md",
+            "docs/QUALITY_CONVERGENCE.md", "docs/WAVE_WORKER.md",
         ])
         self.assertNotIn("docs/TRANSLATOR.md", reviewer["instruction_paths"])
         # Role routing has no retained state from the previous role.
@@ -113,7 +113,7 @@ class WaveRoleContextTests(unittest.TestCase):
 
     def test_orchestrator_overlays_load_only_when_requested(self):
         base = contract_paths(self.routing, "orchestrator")
-        self.assertEqual(base, ["AGENTS.md", "docs/ORCHESTRATION.md"])
+        self.assertEqual(base, ["AGENTS.md", "docs/ORCHESTRATION.md", "docs/QUALITY_CONVERGENCE.md"])
         self.assertEqual(
             contract_paths(self.routing, "orchestrator", overlays=("source_update",)),
             base + ["docs/SOURCE_UPDATES.md"],

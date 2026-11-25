@@ -129,6 +129,9 @@ def verify_evidence_anchors(report: Mapping[str, Any], source: bytes, translatio
         _check_anchor(finding["source_anchor"], original, f"findings[{i}].source_anchor")
         if finding["translation_anchor"] is not None:
             _check_anchor(finding["translation_anchor"], target, f"findings[{i}].translation_anchor")
+    if "adjudications" in report:
+        from .review_adjudication import verify_artifacts
+        verify_artifacts(report, source, translation)
 
 
 def verify_correction_lineage(
@@ -141,12 +144,19 @@ def verify_correction_lineage(
     current_shared_state_revisions: Mapping[str, Any] | None = None,
 ) -> None:
     """Protect correction lineage while permitting audited lexical rechecks."""
+    adjudicated = {e["finding_id"] for e in (report or {}).get("adjudications", [])}
     if previous is None or previous.get("source_sha256") != source_sha256:
+        if any(f["id"] in adjudicated and f["resolves"] is not None
+               for f in (report or {}).get("findings", [])):
+            raise EvidenceAnchorError("adjudicated recheck lacks same-source prior review")
         return
     prior_report = previous.get("quality_report")
     if (not isinstance(prior_report, Mapping)
             or prior_report.get("evidence_version") != 2
             or previous.get("outcome") != "CORRECTIONS_REQUIRED"):
+        if any(f["id"] in adjudicated and f["resolves"] is not None
+               for f in (report or {}).get("findings", [])):
+            raise EvidenceAnchorError("adjudicated recheck requires a prior rejected anchored review")
         return
     unresolved = {
         finding["id"]: finding for finding in prior_report["findings"]
@@ -160,6 +170,8 @@ def verify_correction_lineage(
     for current in report["findings"]:
         ref = current["resolves"]
         if ref is None or ref["record_id"] != previous["record_id"]:
+            if ref is not None and current["id"] in adjudicated:
+                raise EvidenceAnchorError("adjudication refers to stale prior review")
             continue
         old_id = ref["finding_id"]
         if old_id not in unresolved:
@@ -169,6 +181,17 @@ def verify_correction_lineage(
         references[old_id] = current
         unchanged_translation = translation_sha256 == previous["translation_sha256"]
         has_reconciliation = "recheck_reason" in ref
+        if current["id"] in adjudicated:
+            from .review_adjudication import eligible, permits_unchanged
+            prior = unresolved[old_id]
+            if (has_reconciliation or not eligible(prior) or not eligible(current)
+                    or current["category"] != prior["category"]
+                    or current["source_anchor"] != prior["source_anchor"]):
+                raise EvidenceAnchorError("adjudication cannot relabel a prior substantive finding")
+            if unchanged_translation and not permits_unchanged(
+                    report, current, prior, source_sha256, translation_sha256):
+                raise EvidenceAnchorError("unchanged editorial dispute has mismatched evidence")
+            continue
         if has_reconciliation and not current["resolved"]:
             raise EvidenceAnchorError("glossary reconciliation must resolve a rechecked finding")
         if has_reconciliation and not unchanged_translation:
