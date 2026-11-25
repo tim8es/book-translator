@@ -10,6 +10,9 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
+import urllib.parse
+import xml.etree.ElementTree as ET
 import re
 import subprocess
 import sys
@@ -173,6 +176,51 @@ def admit(root: Path, slug: str) -> dict:
     return {"ref": pin, "unit_count": len(chapters)}
 
 
+def _archive_member(base: str, reference: str, names: set[str]) -> str:
+    parsed = urllib.parse.urlsplit(reference)
+    path = urllib.parse.unquote(parsed.path)
+    _require(bool(path) and not parsed.scheme and not parsed.netloc
+             and not parsed.query and not parsed.fragment and not path.startswith("/")
+             and "\\" not in path and "\x00" not in path,
+             "Unsafe EPUB package or spine path")
+    member = posixpath.normpath(posixpath.join(base, path))
+    _require(member not in ("", ".", "..") and not member.startswith("../")
+             and member in names, "EPUB package or spine document missing or unsafe")
+    return member
+
+
+def _verify_spine(epub: zipfile.ZipFile, unit_count: int) -> None:
+    """Validate actual OPF reading order, not an arbitrary filename suffix."""
+    names = set(epub.namelist())
+    _require(len(names) == len(epub.namelist()), "Duplicate EPUB archive members")
+    container_ns = "{urn:oasis:names:tc:opendocument:xmlns:container}"
+    opf_ns = "{http://www.idpf.org/2007/opf}"
+    container = ET.fromstring(epub.read("META-INF/container.xml"))
+    rootfile = container.find(".//" + container_ns + "rootfile")
+    _require(rootfile is not None and bool(rootfile.get("full-path")),
+             "EPUB container lacks an OPF rootfile")
+    package_path = _archive_member("", rootfile.get("full-path"), names)
+    package = ET.fromstring(epub.read(package_path))
+    manifest = package.find(opf_ns + "manifest")
+    spine = package.find(opf_ns + "spine")
+    _require(manifest is not None and spine is not None, "EPUB OPF manifest or spine missing")
+    entries = manifest.findall(opf_ns + "item")
+    items = {item.get("id"): item for item in entries}
+    _require(None not in items and "" not in items and len(items) == len(entries),
+             "EPUB OPF manifest contains duplicate or missing IDs")
+    documents = set()
+    for ref in spine.findall(opf_ns + "itemref"):
+        item = items.get(ref.get("idref"))
+        _require(item is not None, "EPUB spine references an absent manifest item")
+        member = _archive_member(posixpath.dirname(package_path), item.get("href") or "", names)
+        if item.get("media-type") == "application/xhtml+xml":
+            document = ET.fromstring(epub.read(member))
+            _require(document.tag == "{http://www.w3.org/1999/xhtml}html",
+                     "EPUB spine item is not an XHTML document")
+            documents.add(member)
+    _require(len(documents) >= unit_count, "EPUB OPF XHTML spine chapter count mismatch")
+
+
 def verify(root: Path, slug: str) -> dict:
     """Validate actual final EPUB bytes and supporting reports."""
     book = _book(root.resolve(), slug)
@@ -204,9 +252,8 @@ def verify(root: Path, slug: str) -> dict:
                      "Invalid EPUB mimetype")
             _require(epub.testzip() is None, "Corrupt EPUB member")
             _require("META-INF/container.xml" in names, "Missing EPUB container")
-            _require(sum(name.endswith(".xhtml") for name in names) >= len(chapters),
-                     "EPUB XHTML chapter count mismatch")
-    except (OSError, zipfile.BadZipFile, KeyError) as exc:
+            _verify_spine(epub, len(chapters))
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as exc:
         raise FinalBuildError("EPUB ZIP cannot be verified") from exc
     for report in ("FINAL_QUALITY_GATES.md", "REVIEW_REPORT.md"):
         _require((book / report).is_file(), "Missing final report: " + report)

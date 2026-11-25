@@ -76,14 +76,23 @@ class FinalBuildGateTests(unittest.TestCase):
     def read(self, path: str) -> dict:
         return json.loads((self.book / path).read_text())
 
-    def build_epub(self) -> None:
+    def build_epub(self, *, href='one.xhtml', spine=True, content=None) -> None:
         epub = self.book / "output" / "sample-book.epub"
         epub.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(epub, "w") as archive:
             archive.writestr("mimetype", b"application/epub+zip",
                              compress_type=zipfile.ZIP_STORED)
-            archive.writestr("META-INF/container.xml", "<container/>")
-            archive.writestr("OPS/one.xhtml", "<html/>")
+            archive.writestr("META-INF/container.xml",
+                '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                '<rootfiles><rootfile full-path="OPS/package.opf"/></rootfiles></container>')
+            archive.writestr("OPS/package.opf",
+                '<package xmlns="http://www.idpf.org/2007/opf"><manifest>'
+                f'<item id="one" href="{href}" media-type="application/xhtml+xml"/>'
+                '</manifest><spine>' + ('<itemref idref="one"/>' if spine else '')
+                + '</spine></package>')
+            archive.writestr("OPS/" + href,
+                content if content is not None else '<html xmlns="http://www.w3.org/1999/xhtml"/>')
+            archive.writestr("OPS/decoy.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"/>')
         self.write("output/manifest.json", {
             "format": "epub", "preview": False, "unit_count": 1,
             "artifact_path": "output/sample-book.epub",
@@ -170,6 +179,23 @@ class FinalBuildGateTests(unittest.TestCase):
         manifest["preview"] = True
         self.write("output/manifest.json", manifest)
         with self.assertRaisesRegex(gates.FinalBuildError, "reviewed EPUB"):
+            gates.verify(self.root, self.slug)
+
+    def test_html_suffix_is_valid_when_opf_declares_xhtml(self):
+        self.build_epub(href="one.html")
+        self.assertEqual(gates.verify(self.root, self.slug)["unit_count"], 1)
+
+    def test_unreferenced_xhtml_does_not_satisfy_spine_count(self):
+        self.build_epub(spine=False)
+        with self.assertRaisesRegex(gates.FinalBuildError, "spine chapter count"):
+            gates.verify(self.root, self.slug)
+
+    def test_spine_rejects_nonlocal_href_and_malformed_document(self):
+        self.build_epub(href="https://example.invalid/one.html")
+        with self.assertRaisesRegex(gates.FinalBuildError, "Unsafe"):
+            gates.verify(self.root, self.slug)
+        self.build_epub(content="<html")
+        with self.assertRaisesRegex(gates.FinalBuildError, "cannot be verified"):
             gates.verify(self.root, self.slug)
 
     def test_verify_rejects_artifact_path_escape(self):
