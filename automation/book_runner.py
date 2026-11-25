@@ -2910,6 +2910,8 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
             answer = complete_for_job(status, "TRANSLATOR", system, user)
             replacement = quality_block_repair.parse(answer)
             candidate(replacement)
+        except TransientModelError:
+            raise
         except (ModelError, ValueError, JobError, correction_regression.CorrectionRegression):
             retire("unsafe-or-invalid-candidate")
             return True, None
@@ -2940,6 +2942,8 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
     try:
         answer = complete_for_job(status, "REVIEWER", system, user)
         rejected = candidate_review.parse_verdict(answer, ["block-reconstruction"])
+    except TransientModelError:
+        raise
     except (ModelError, ValueError, candidate_review.CandidateReviewError):
         retire("invalid-independent-review")
         return True, None
@@ -5278,6 +5282,8 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
 
 
 def quality_stage_path(slug, unit_id):
+    if not safe_book_slug(slug) or not re.fullmatch(r"chapter-[0-9]{6}", unit_id):
+        raise JobError("unsafe quality arbitration stage identity")
     return ROOT / "books" / slug / ".workflow" / "quality-arbitration" / (unit_id + ".json")
 
 

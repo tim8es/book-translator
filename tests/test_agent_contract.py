@@ -44,6 +44,7 @@ class AgentContractTests(unittest.TestCase):
                 "translation": "docs/TRANSLATION.md",
                 "translator": "docs/TRANSLATOR.md",
                 "reviewer": "docs/REVIEWER.md",
+                "quality_convergence": "docs/QUALITY_CONVERGENCE.md",
                 "wave_worker": "docs/WAVE_WORKER.md",
                 "waves": "docs/WAVES.md",
             },
@@ -64,10 +65,10 @@ class AgentContractTests(unittest.TestCase):
         self.assertEqual(manifest["context_profiles"]["bootstrap"], ["global", "setup"])
         self.assertEqual(
             manifest["context_profiles"]["orchestrator"],
-            ["global", "orchestration"],
+            ["global", "orchestration", "quality_convergence"],
         )
         self.assertEqual(manifest["context_profiles"]["translator"], ["global", "translation", "translator"])
-        self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation", "reviewer"])
+        self.assertEqual(manifest["context_profiles"]["reviewer"], ["global", "translation", "reviewer", "quality_convergence"])
         self.assertNotIn("contract_read_order", manifest)
 
     def test_source_update_contract_preserves_revision_guarantees(self):

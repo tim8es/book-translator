@@ -179,7 +179,7 @@ class QualityRuntimeTests(unittest.TestCase):
             (book / "style-guide.md").write_text("Style", "utf-8")
             chapter = {"unit_id": UNIT, "number": 1, "translation_acceptance": {
                 "source_sha256": S, "translation_sha256": T, "session_id": "translator-1"}}
-            owned = {"session_id": "reviewer-1", "shared_state_revisions": {}}
+            owned = {"session_id": "reviewer-1", "shared_state_revisions": {"glossary": "a" * 64, "style_guide": "b" * 64}}
             status = {"workflow_revision": "f" * 40, "model_calls_started": 0}
             with patch.object(runner, "ROOT", root), \
                  patch.object(runner, "checkpoint"), \
@@ -207,7 +207,7 @@ class QualityRuntimeTests(unittest.TestCase):
             (book / "style-guide.md").write_text("Style", "utf-8")
             chapter = {"unit_id": UNIT, "number": 1, "translation_acceptance": {
                 "source_sha256": S, "translation_sha256": T, "session_id": "translator-1"}}
-            owned = {"session_id": "reviewer-1", "shared_state_revisions": {}}
+            owned = {"session_id": "reviewer-1", "shared_state_revisions": {"glossary": "a" * 64, "style_guide": "b" * 64}}
             status = {"workflow_revision": "f" * 40, "model_calls_started": 0}
             with patch.object(runner, "ROOT", root), \
                  patch.object(runner, "checkpoint"), \

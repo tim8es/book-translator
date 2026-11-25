@@ -68,13 +68,20 @@ def plan_for(source, target, record, block_id, *, position):
 def select(source, target, record, strategy, attempts, *, position):
     tried = {issue for a in attempts if a.get("source_sha256") == record["source_sha256"]
              for issue in a.get("issue_ids", [])}
+    eligible = {fid for fid, item in strategy.items()
+                if item.get("level", 0) >= 1 and item["issue_id"] not in tried}
+    if not eligible:
+        return None
     left = block_ranges(source)
-    for bid in left:
+    relevant = [position(source, f["source_anchor"]) for f in record["quality_report"]["findings"]
+                if f["id"] in eligible and not f["resolved"]]
+    for bid, (lo, hi) in left.items():
+        if not any(lo <= a < z <= hi for a, z in relevant):
+            continue
         plan = plan_for(source, target, record, bid, position=position)
         if plan is None:
             continue
-        if any(strategy.get(fid, {}).get("level", 0) >= 1
-               and strategy[fid]["issue_id"] not in tried for fid in plan["finding_ids"]):
+        if eligible.intersection(plan["finding_ids"]):
             # One reconstruction per stable defect per source revision.
             return plan
     return None
