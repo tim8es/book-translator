@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 
 ELIGIBLE = {"style", "register", "voice"}
-MAX_CASES = 16
+MAX_CASES = 8
 MAX_CHARS = 48_000
 STRATEGIES = ("direct-anchored-repair", "source-first-clause-reconstruction",
               "contrast-source-faithful-renderings")

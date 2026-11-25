@@ -35,7 +35,7 @@ def _excerpt(text: str, start: int, end: int, radius: int = 650) -> str:
 
 
 def cases(source: str, translation: str, patches: list[dict],
-          findings: list[dict], *, position) -> list[dict]:
+          findings: list[dict], *, position, combined_patches=None) -> list[dict]:
     """Include exact source evidence, old and candidate text for each patch.
 
     The caller provides its canonical anchor resolver. We never guess a
@@ -48,6 +48,14 @@ def cases(source: str, translation: str, patches: list[dict],
         raise CandidateReviewError("candidate preflight finding IDs are not unique")
     result = []
     seen = set()
+    edits = []
+    for patch in combined_patches or []:
+        start, end = position(translation, patch["target_anchor"])
+        if patch["operation"] == "insert_before":
+            end = start
+        elif patch["operation"] == "insert_after":
+            start = end
+        edits.append((start, end, patch["replacement"]))
     for patch in patches:
         fid = patch.get("finding_id")
         if not isinstance(fid, str) or fid in seen or fid not in by_id:
@@ -67,8 +75,22 @@ def cases(source: str, translation: str, patches: list[dict],
             raise CandidateReviewError("candidate preflight replacement is empty")
         source_start, source_end = position(source, item["source_anchor"])
         left, right = max(0, start - 650), min(len(translation), end + 650)
-        old_text = translation[left:right]
-        proposed_text = translation[left:start] + replacement + translation[end:right]
+        if edits:
+            # Include any adjacent edits crossing the original context boundary.
+            while True:
+                intersecting = [(a, b, r) for a, b, r in edits if a <= right and b >= left]
+                bounds = (min([left] + [a for a, _, _ in intersecting]),
+                          max([right] + [b for _, b, _ in intersecting]))
+                if bounds == (left, right):
+                    break
+                left, right = bounds
+            old_text = translation[left:right]
+            proposed_text = old_text
+            for a, b, r in sorted(intersecting, key=lambda edit: edit[0], reverse=True):
+                proposed_text = proposed_text[:a-left] + r + proposed_text[b-left:]
+        else:
+            old_text = translation[left:right]
+            proposed_text = translation[left:start] + replacement + translation[end:right]
         result.append({
             "finding_id": fid,
             "category": item.get("category"),
@@ -81,7 +103,7 @@ def cases(source: str, translation: str, patches: list[dict],
     return result
 
 
-def build_prompt(candidates: list[dict], reviewer_contract: str) -> tuple[str, str]:
+def build_prompt(candidates: list[dict], reviewer_contract: str, *, require_resolution=False) -> tuple[str, str]:
     if not isinstance(reviewer_contract, str) or not reviewer_contract.strip():
         raise CandidateReviewError("missing pinned independent reviewer contract")
     system = (
@@ -114,6 +136,10 @@ def build_prompt(candidates: list[dict], reviewer_contract: str) -> tuple[str, s
         "dialogue, names, structure, omission, other. "
         "The result is ONLY a pre-acceptance veto, never chapter PASS evidence."
     )
+    if require_resolution:
+        user += (" Additionally approve only if the proposed combined text actually resolves "
+                 "the cited defect, not merely if it avoids regressions. Reject no-effect edits "
+                 "and interactions with adjacent patches using risk=other if necessary.")
     if len(system) + len(user) > MAX_PROMPT_CHARS:
         raise CandidateReviewError("candidate preflight context exceeds safe limit")
     return system, user
