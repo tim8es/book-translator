@@ -3007,6 +3007,15 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         "review_record_id": record["record_id"],
         "counts": correction_regression.triage_counts(unresolved),
     }
+    if quality_controller.supported(engine):
+        try:
+            exhausted = quality_controller.empty_candidate_count(status, chapter, record)
+        except ValueError as exc:
+            raise JobError("invalid quality recovery counter") from exc
+        if exhausted >= quality_controller.MAX_EMPTY_CANDIDATES:
+            # A process can stop after the last durable veto but before
+            # canonical deferral. Never spend another call in that case.
+            raise QualityRecoveryExhausted("independent quality recovery exhausted for current review")
     feedback_enabled = correction_feedback.enabled()
     historical_ledger = (chapter_data(slug)[1]
                          if feedback_enabled or quality_controller.supported(engine) else None)

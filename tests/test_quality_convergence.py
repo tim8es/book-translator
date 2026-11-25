@@ -266,6 +266,7 @@ class QualityRuntimeTests(unittest.TestCase):
                                                           path, reason="all-unsafe")
                 self.assertFalse(path.exists())
                 self.assertEqual(status["quality_empty_candidates"][UNIT]["count"], 3)
+                self.assertEqual(quality.empty_candidate_count(status, chapter, current), 3)
                 with self.assertRaises(ValueError):
                     quality.note_empty_candidate(status, chapter, current, "all-unsafe")
                 new = record(RID2, report(finding()), target="e" * 64)
