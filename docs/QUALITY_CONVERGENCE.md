@@ -45,3 +45,13 @@ part of this contract.
 Before default rollout, compare identical source books against ChatOps and
 measure cost, completion and independent literary quality. A test-suite pass
 alone is not evidence of autonomous literary completion.
+
+## Evidence-earned recovery budget
+
+Do not extend a chapter just because a reviewer rejected it. The automatic
+runner grants at most four additional cycles, each earned by a distinct
+current-revision artifact with a verified prior defect closure, lower total
+unresolved severity, and no newly reported serious defect. Adjudication alone,
+identical/recycled artifacts and new serious defects earn no credit. The total
+model budget still bounds all calls. A genuinely different recovery strategy
+may run before stagnation deferral, but cannot override the hard cap.

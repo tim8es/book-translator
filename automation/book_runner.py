@@ -2102,8 +2102,7 @@ def allow_review_bound_protocol_retry(status: dict, ledger: dict, chapters: list
 
 def prepare_correction_limit_resume(status: dict, ledger: dict, chapter: dict) -> None:
     unit_id = chapter["unit_id"]
-    if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
+    if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter):
         defer_review_unit(status, unit_id)
         return
     # Existing books on historical immutable workflow revisions cannot be
@@ -3552,6 +3551,20 @@ def operator_unit_limit(status: dict, kind: str, unit_id: str, default: int) -> 
     return limits.get(unit_id, default)
 
 
+def quality_review_limit(status, ledger, chapter):
+    base = operator_unit_limit(status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
+    if not quality_controller.supported(pinned_scripts_dir().parent):
+        return base
+    credits = quality_controller.progress_credits(ledger, chapter["unit_id"],
+        chapter["translation_acceptance"]["source_sha256"], status["workflow_revision"])
+    effective = max(base, MAX_ACCEPTED_REVIEWS_PER_UNIT + len(credits))
+    status["quality_progress_budget"] = {"unit_id": chapter["unit_id"], "credit_records": credits,
+        "review_limit": effective, "correction_limit": max(
+            operator_unit_limit(status, "correction", chapter["unit_id"], MAX_CORRECTIONS),
+            MAX_CORRECTIONS + len(credits))}
+    return effective
+
+
 def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
     counters = status.get("correction_rounds", {})
     if not isinstance(counters, dict):
@@ -3561,6 +3574,9 @@ def correction_allowed(status: dict, ledger: dict, chapter: dict) -> bool:
         raise JobError("invalid durable correction counter")
     extra_limit = operator_unit_limit(
         status, "correction", chapter["unit_id"], MAX_CORRECTIONS)
+    if quality_controller.supported(pinned_scripts_dir().parent):
+        quality_review_limit(status, ledger, chapter)
+        return rounds < status["quality_progress_budget"]["correction_limit"]
     if extra_limit > MAX_CORRECTIONS:
         return rounds < extra_limit
     if rounds < MAX_CORRECTIONS:
@@ -3634,6 +3650,19 @@ def defer_stalled_review(slug: str, status: dict, ledger: dict,
             or operator_unit_limit(status, "correction", unit_id, MAX_CORRECTIONS)
             > MAX_CORRECTIONS):
         return False
+    if quality_controller.supported(pinned_scripts_dir().parent):
+        current = latest_record(ledger, chapter)
+        if current and (current.get("quality_report") or {}).get("evidence_version") == 2:
+            open_items = [f for f in current["quality_report"]["findings"] if not f["resolved"]]
+            if open_items:
+                plan = quality_controller.strategy(ledger, chapter, current, open_items,
+                    status.get("correction_regression_rejections", []))
+                old = status.get("quality_recovery_strategy", {}).get("findings", {})
+                previous_levels = {v["issue_id"]: v["level"] for v in old.values()}
+                if any(v["level"] > previous_levels.get(v["issue_id"], -1) for v in plan.values()):
+                    # Give a genuinely different bounded strategy its chance;
+                    # the hard review and global model budgets still apply.
+                    return False
     report = review_convergence.stalled_rejected_reviews(ledger, chapter)
     if (report is None
             and os.environ.get("BOOK_TRANSLATOR_QUEUE_BUDGET") == "on"
@@ -3767,8 +3796,7 @@ def next_operation(slug: str, status: dict) -> tuple[str, dict | None]:
                     and report.get("evidence_version") != 2):
                 return "reviewer", chapter
             if correction_findings_missing(record):
-                if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
+                if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter):
                     defer_review_unit(status, chapter["unit_id"])
                     deferred.add(chapter["unit_id"])
                     continue
@@ -3977,13 +4005,11 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
             if (status.get("memory_recheck_unit") != chapter["unit_id"]
                     and defer_stalled_review(slug, status, ledger, chapter)):
                 continue
-            if (accepted_review_count(ledger, chapter) < operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
+            if (accepted_review_count(ledger, chapter) < quality_review_limit(status, ledger, chapter)
                     and correction_allowed(status, ledger, chapter)):
                 break
             reason = ("review-round-limit"
-                      if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)
+                      if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter)
                       else "correction-limit")
             cli("defer-review", slug, str(chapter["number"]), "--reason", reason)
         else:
@@ -4018,8 +4044,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
         return "reviewer", chapter
     if operation == "correct_translation":
         if (glossary_only_recheck_needed(slug, chapter, record)
-                and accepted_review_count(ledger, chapter) < operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT)):
+                and accepted_review_count(ledger, chapter) < quality_review_limit(status, ledger, chapter)):
             # The source/translation is unchanged; only a new glossary
             # decision can be checked against the old terminology findings.
             # Never infer PASS or silently increase the reviewer budget.
@@ -4029,8 +4054,7 @@ def canonical_dispatch(slug: str, status: dict) -> tuple[str, dict | None]:
                 and not (pinned_scripts_dir() / "workflow" / "attention.py").exists()
                 and defer_stalled_review(slug, status, ledger, chapter)):
             return next_operation(slug, status)
-        if accepted_review_count(ledger, chapter) >= operator_unit_limit(
-                    status, "review", chapter["unit_id"], MAX_ACCEPTED_REVIEWS_PER_UNIT):
+        if accepted_review_count(ledger, chapter) >= quality_review_limit(status, ledger, chapter):
             if (pinned_scripts_dir() / "workflow" / "attention.py").exists():
                 raise JobError("canonical attention selection left an over-budget unit")
             defer_review_unit(status, unit_id)

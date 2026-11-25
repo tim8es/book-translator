@@ -174,3 +174,46 @@ def adjudicate(report, decisions, candidates, *, source, translation, reviewer_s
         result["adjudications"] = evidence
     outcome = "CORRECTIONS_REQUIRED" if any(not f["resolved"] for f in result["findings"]) else "PASS"
     return outcome, result
+
+MAX_PROGRESS_CREDITS = 4
+WEIGHTS = {"minor": 1, "major": 3, "critical": 5}
+
+
+def progress_credits(ledger, unit_id, source_sha256, workflow_revision):
+    """Grant one bounded extra cycle for a verified net repair, never a preference.
+
+    Distinct current-revision artifacts, explicit closure lineage and lower
+    unresolved severity are required. Same bytes, adjudication-only changes,
+    repeated artifacts and newly introduced serious defects earn no credit.
+    """
+    history = [r for r in ledger.get("records", [])
+               if r.get("unit_id") == unit_id and r.get("source_sha256") == source_sha256
+               and r.get("workflow_revision") == workflow_revision
+               and r.get("outcome") in {"PASS", "CORRECTIONS_REQUIRED"}
+               and (r.get("quality_report") or {}).get("evidence_version") == 2]
+    credits, seen = [], set()
+    for i, current in enumerate(history):
+        artifact = current["translation_sha256"]
+        fresh = artifact not in seen
+        seen.add(artifact)
+        if i == 0 or not fresh or current["outcome"] != "CORRECTIONS_REQUIRED":
+            continue
+        previous = history[i - 1]
+        if previous["outcome"] != "CORRECTIONS_REQUIRED":
+            continue
+        before = {f["id"]: f for f in previous["quality_report"]["findings"] if not f["resolved"]}
+        after = current["quality_report"]["findings"]
+        disputed = {e["finding_id"] for e in current["quality_report"].get("adjudications", [])}
+        closed = [f for f in after if f["resolved"] and f["id"] not in disputed
+                  and f.get("resolves") and f["resolves"]["record_id"] == previous["record_id"]
+                  and f["resolves"]["finding_id"] in before]
+        open_now = [f for f in after if not f["resolved"]]
+        new_serious = any(f["severity"] in {"major", "critical"} and
+                          (not f.get("resolves") or f["resolves"]["record_id"] != previous["record_id"]
+                           or f["resolves"]["finding_id"] not in before)
+                          for f in open_now)
+        if (closed and not new_serious and
+                sum(WEIGHTS[f["severity"]] for f in open_now) <
+                sum(WEIGHTS[f["severity"]] for f in before.values())):
+            credits.append(current["record_id"])
+    return credits[:MAX_PROGRESS_CREDITS]

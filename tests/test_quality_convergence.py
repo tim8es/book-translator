@@ -154,6 +154,25 @@ class QualityEvidenceTests(unittest.TestCase):
         plan = quality.strategy(ledger, chapter, newer, newer["quality_report"]["findings"], [veto])
         self.assertEqual(plan["again"]["level"], 2)
 
+    def test_progress_credits_require_real_net_repairs(self):
+        old = record(RID, report(finding("a"), finding("b", "meaning", "major")))
+        new = record(RID2, report(
+            finding("a-fixed", resolved=True, ref={"record_id": RID, "finding_id": "a"}),
+            finding("b-open", "meaning", "major", ref={"record_id": RID, "finding_id": "b"})),
+            target="c" * 64)
+        for r in (old, new):
+            r["workflow_revision"] = "f" * 40
+        ledger = {"records": [old, new]}
+        self.assertEqual(quality.progress_credits(ledger, UNIT, S, "f" * 40), [RID2])
+        new["translation_sha256"] = T
+        self.assertEqual(quality.progress_credits(ledger, UNIT, S, "f" * 40), [])
+        new["translation_sha256"] = "c" * 64
+        new["quality_report"]["adjudications"] = [{"finding_id": "a-fixed"}]
+        self.assertEqual(quality.progress_credits(ledger, UNIT, S, "f" * 40), [])
+        new["quality_report"].pop("adjudications")
+        new["quality_report"]["findings"].append(finding("new-critical", "omission", "critical"))
+        self.assertEqual(quality.progress_credits(ledger, UNIT, S, "f" * 40), [])
+
     def test_combined_candidate_includes_adjacent_patches(self):
         first, second = finding("first"), finding("second")
         second["source_anchor"] = {"quote": "key might be", "occurrence": 0}
