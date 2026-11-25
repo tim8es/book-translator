@@ -2846,7 +2846,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
                                               source, translation, unresolved)
     feedback_enabled = correction_feedback.enabled()
-    historical_ledger = chapter_data(slug)[1] if feedback_enabled else None
+    historical_ledger = (chapter_data(slug)[1]
+                         if feedback_enabled or quality_controller.supported(engine) else None)
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
@@ -5040,7 +5041,11 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
                "source_sha256": record["source_sha256"],
                "translation_sha256": record["translation_sha256"],
                "candidate_sha256": candidate_sha,
-               "patches_sha256": quality_controller.digest(patches)}
+               "patches_sha256": quality_controller.digest(patches),
+               "workflow_revision": status["workflow_revision"],
+               "session_id": status["active"]["session_id"],
+               "glossary_sha256": fingerprint(ROOT / "books" / slug / "glossary.md"),
+               "style_guide_sha256": fingerprint(ROOT / "books" / slug / "style-guide.md")}
     cache = status.get("quality_candidate_gate")
     if not isinstance(cache, dict) or cache.get("binding") != binding:
         cache = {"binding": binding, "approved": []}

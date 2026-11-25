@@ -154,6 +154,9 @@ def verify_correction_lineage(
     if (not isinstance(prior_report, Mapping)
             or prior_report.get("evidence_version") != 2
             or previous.get("outcome") != "CORRECTIONS_REQUIRED"):
+        if any(f["id"] in adjudicated and f["resolves"] is not None
+               for f in (report or {}).get("findings", [])):
+            raise EvidenceAnchorError("adjudicated recheck requires a prior rejected anchored review")
         return
     unresolved = {
         finding["id"]: finding for finding in prior_report["findings"]

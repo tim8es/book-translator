@@ -90,7 +90,8 @@ def _context(text, anchor):
 
 
 def cases(report, source, translation, previous):
-    prior = {f["id"]: f for f in ((previous or {}).get("quality_report") or {}).get("findings", [])}
+    prior = {f["id"]: f for f in ((previous or {}).get("quality_report") or {}).get("findings", [])
+             if isinstance(f, dict) and isinstance(f.get("id"), str)}
     result = []
     for f in report["findings"]:
         if (f["resolved"] or f["severity"] != "minor"
@@ -99,7 +100,8 @@ def cases(report, source, translation, previous):
         ref = f["resolves"]
         if ref:
             old = prior.get(ref["finding_id"])
-            if (not old or old["category"] != f["category"] or old["severity"] != "minor"
+            if (not previous or ref["record_id"] != previous["record_id"]
+                    or not old or old["category"] != f["category"] or old["severity"] != "minor"
                     or old["source_anchor"] != f["source_anchor"]):
                 continue
             if (previous.get("translation_sha256") == hashlib.sha256(translation.encode()).hexdigest()
