@@ -58,3 +58,15 @@ unresolved severity, and no newly reported serious defect. Adjudication alone,
 identical/recycled artifacts and new serious defects earn no credit. The total
 model budget still bounds all calls. A genuinely different recovery strategy
 may run before stagnation deferral, but cannot override the hard cap.
+
+## Candidate veto recovery
+
+An independent veto is a quality decision, not a provider error. Remove only
+vetoed patches from a mixed group, discard all old candidate approvals and
+unbound literary-memory proposals, and independently verify the reduced group.
+No remaining finding is resolved by this operation. A completely unsafe or
+vetoed group is retired without mutating the accepted translation, so the next
+checkpoint may use source-first reconstruction. At most three completely
+unusable groups per exact source/target/review identity are admitted. If that
+bound is exhausted, defer through the canonical attention queue, without PASS.
+Partial groups shrink strictly; the overall model budget remains mandatory.

@@ -208,6 +208,70 @@ class QualityRuntimeTests(unittest.TestCase):
         self.assertFalse(runner.quality_budget_enabled({"workflow_revision": "f" * 40}, {"unit_id": UNIT}))
         self.assertFalse(runner.quality_budget_enabled({}, {"translation_acceptance": {"source_sha256": S}}))
 
+    def test_partial_candidate_veto_preserves_sibling_and_rechecks_reduced_set(self):
+        first, second = finding("first"), finding("second")
+        second["source_anchor"] = {"quote": "key might be", "occurrence": 0}
+        second["translation_anchor"] = {"quote": "может быть", "occurrence": 0}
+        edits = [{"finding_id": v["id"], "operation": "replace", "target_anchor": v["translation_anchor"],
+                  "replacement": replacement}
+                 for v, replacement in ((first, "затворила старую дверь"), (second, "возможно, лежит"))]
+        current = record(RID, report(first, second))
+        chapter = {"unit_id": UNIT, "number": 1}
+        status = {"workflow_revision": "f" * 40, "model_calls_started": 0,
+                  "active": {"session_id": "corrector-1"}}
+        def verdict(approve, reject=()):
+            return json.dumps({"schema_version": 1, "checks": dict.fromkeys(candidate_review.CHECKS, True),
+                "decisions": [{"finding_id": fid, "verdict": "approve", "risk": "none"} for fid in approve]
+                + [{"finding_id": fid, "verdict": "reject", "risk": "meaning"} for fid in reject]})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = root / "books" / "test"
+            book.mkdir(parents=True)
+            (book / "glossary.md").write_text("Glossary", "utf-8")
+            (book / "style-guide.md").write_text("Style", "utf-8")
+            with patch.object(runner, "ROOT", root), patch.object(runner, "checkpoint"), \
+                 patch.object(runner, "model_call_limit", return_value=100), \
+                 patch.object(runner, "role_contracts", return_value=("Independent reviewer", ["doc"])), \
+                 patch.object(runner, "complete_for_job", side_effect=[
+                     verdict(["first"], ["second"]), verdict(["first"])]) as provider:
+                path, stage = runner.load_correction_stage("test", chapter, current, status,
+                                                           SOURCE, TARGET, [first, second])
+                stage.update(patches=edits, glossary=[], style_guide=[])
+                runner.store_json(path, stage)
+                self.assertFalse(runner.verify_quality_candidate("job", "test", status, ROOT,
+                    chapter, current, SOURCE, TARGET, edits, path))
+                self.assertEqual(runner.read_json(path)["patches"], edits[:1])
+                self.assertNotIn("quality_candidate_gate", status)
+                self.assertEqual(status["correction_isolation"]["finding_ids"], ["second"])
+                self.assertTrue(runner.verify_quality_candidate("job", "test", status, ROOT,
+                    chapter, current, SOURCE, TARGET, edits[:1], path))
+                self.assertEqual(provider.call_count, 2)
+                self.assertEqual(status["model_calls_started"], 2)
+
+    def test_empty_candidates_are_bounded_and_reopen_only_on_new_evidence(self):
+        current = record(RID, report(finding()))
+        chapter = {"unit_id": UNIT}
+        status = {"workflow_revision": "f" * 40}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stage.json"
+            with patch.object(runner, "checkpoint"):
+                for _ in range(quality.MAX_EMPTY_CANDIDATES - 1):
+                    path.write_text("{}")
+                    runner.retire_empty_quality_candidate("job", "test", status, chapter, current,
+                                                          path, reason="independent-veto")
+                    self.assertFalse(path.exists())
+                path.write_text("{}")
+                with self.assertRaises(runner.QualityRecoveryExhausted):
+                    runner.retire_empty_quality_candidate("job", "test", status, chapter, current,
+                                                          path, reason="all-unsafe")
+                self.assertFalse(path.exists())
+                self.assertEqual(status["quality_empty_candidates"][UNIT]["count"], 3)
+                self.assertEqual(quality.empty_candidate_count(status, chapter, current), 3)
+                with self.assertRaises(ValueError):
+                    quality.note_empty_candidate(status, chapter, current, "all-unsafe")
+                new = record(RID2, report(finding()), target="e" * 64)
+                self.assertEqual(quality.note_empty_candidate(status, chapter, new, "all-unsafe"), 1)
+
     def test_durable_arbitration_resume_does_not_recontact_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

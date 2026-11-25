@@ -237,3 +237,40 @@ def escalation_route(status, role, unit_id, env):
     primary = env.get(f"OMNIROUTE_{role}_MODEL", "").strip()
     fallback = env.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()
     return bool(primary and fallback and primary != fallback)
+
+
+MAX_EMPTY_CANDIDATES = 3
+
+
+def _empty_candidate_state(status, chapter, record):
+    unit = chapter["unit_id"]
+    binding = {"record_id": record["record_id"], "source_sha256": record["source_sha256"],
+               "translation_sha256": record["translation_sha256"],
+               "workflow_revision": status["workflow_revision"]}
+    state = status.get("quality_empty_candidates", {})
+    if not isinstance(state, dict):
+        raise ValueError("invalid quality recovery state")
+    old = state.get(unit, {})
+    if not isinstance(old, dict):
+        raise ValueError("invalid quality recovery entry")
+    count = old.get("count", 0) if old.get("binding") == binding else 0
+    if type(count) is not int or not 0 <= count <= MAX_EMPTY_CANDIDATES:
+        raise ValueError("quality recovery count malformed")
+    return binding, count
+
+
+def empty_candidate_count(status, chapter, record):
+    return _empty_candidate_state(status, chapter, record)[1]
+
+
+def note_empty_candidate(status, chapter, record, reason):
+    """Finite attempts bound to exact immutable evidence, not general API errors."""
+    if reason not in {"all-unsafe", "independent-veto"}:
+        raise ValueError("unsupported quality recovery reason")
+    binding, count = _empty_candidate_state(status, chapter, record)
+    if count >= MAX_EMPTY_CANDIDATES:
+        raise ValueError("quality recovery count exhausted")
+    count += 1
+    status.setdefault("quality_empty_candidates", {})[chapter["unit_id"]] = {
+        "binding": binding, "count": count, "reason": reason}
+    return count
