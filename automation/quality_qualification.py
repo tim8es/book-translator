@@ -107,6 +107,52 @@ def seed(root, job, status, revision):
         os.environ.pop("BOOK_TRANSLATOR_PINNED_REVISION", None)
 
 
+def create_state(root, remote, revision, job):
+    """Create exactly the state topology required by the immutable CLI."""
+    root.mkdir()
+    git(root.parent, "init", "--bare", str(remote))
+    git(root, "init", "-b", "main")
+    git(root, "config", "user.name", "Qualification")
+    git(root, "config", "user.email", "qualification@example.invalid")
+    git(root, "remote", "add", "origin", str(remote))
+    # pinned_runtime.prepare requires a real books directory, including on
+    # the very first extraction. Track its empty placeholder just like the
+    # production state repository.
+    (root / "books").mkdir()
+    (root / "books/.gitkeep").touch()
+    incoming = root / "intake/auto" / job
+    incoming.mkdir(parents=True)
+    (root / "automation/status").mkdir(parents=True)
+    (root / "automation/status/.gitkeep").touch()
+    source = incoming / "source.epub"
+    fixture(source)
+    (incoming / "request.json").write_text(json.dumps({"schema_version": 1,
+        "job_id": job, "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "target_language": "ru", "workflow_revision": revision}), "utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "Isolated qualification fixture")
+    git(root, "push", "origin", "main")
+
+
+def diagnostic(status):
+    """Report only small, non-content coordination fields from synthetic state."""
+    if not isinstance(status, dict):
+        return {}
+    result = {k: status[k] for k in ("state", "phase", "model_calls_started",
+        "last_error_code", "blocked_unit_id") if k in status}
+    # Initialization is before any model call. Preserve its canonical error,
+    # but redact all provider configuration and URLs even in this fixture.
+    if status.get("model_calls_started", 0) == 0 and isinstance(status.get("last_error"), str):
+        message = status["last_error"]
+        for k in ("OMNIROUTE_API_KEY", "OMNIROUTE_BASE_URL"):
+            value = os.environ.get(k)
+            if value:
+                message = message.replace(value, "[redacted]")
+        message = re.sub(r"https?://\S+", "[redacted-url]", message)
+        result["initialization_error"] = message[:400]
+    return result
+
+
 def qualify(revision, output):
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or git(PUBLIC, "rev-parse", "HEAD") != revision:
         raise RuntimeError("qualification requires exact checked-out revision")
@@ -120,33 +166,19 @@ def qualify(revision, output):
     try:
         with tempfile.TemporaryDirectory(prefix="quality-pilot-") as tmp:
             root = Path(tmp) / "state"
-            root.mkdir()
             remote = Path(tmp) / "remote.git"
-            git(Path(tmp), "init", "--bare", str(remote))
-            git(root, "init", "-b", "main")
-            git(root, "config", "user.name", "Qualification")
-            git(root, "config", "user.email", "qualification@example.invalid")
-            git(root, "remote", "add", "origin", str(remote))
             job = uuid4().hex
-            incoming = root / "intake/auto" / job
-            incoming.mkdir(parents=True)
-            (root / "automation/status").mkdir(parents=True)
-            (root / "automation/status/.gitkeep").touch()
-            source = incoming / "source.epub"
-            fixture(source)
-            (incoming / "request.json").write_text(json.dumps({"schema_version": 1,
-                "job_id": job, "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                "target_language": "ru", "workflow_revision": revision}), "utf-8")
-            git(root, "add", "-A")
-            git(root, "commit", "-m", "Isolated qualification fixture")
-            git(root, "push", "origin", "main")
+            create_state(root, remote, revision, job)
             step(root, job, "--admit-pi")
             status = step(root, job)
+            report["initialization"] = diagnostic(status)
             if not status or status.get("phase") != "initialized":
                 raise RuntimeError("fixture initialization failed")
             seeded = seed(root, job, status, revision)
-            for _ in range(120):
+            for checkpoint in range(120):
                 status = step(root, job)
+                report["checkpoint_count"] = checkpoint + 1
+                report["last_checkpoint"] = diagnostic(status)
                 report.update(state=status["state"], phase=status["phase"],
                               model_calls=status.get("model_calls_started", 0))
                 if status["state"] != "running" or status["phase"] == "provider-backoff":
@@ -188,6 +220,7 @@ def qualify(revision, output):
         report["duration_seconds"] = round(time.monotonic() - start, 1)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", "utf-8")
+        print(json.dumps(report, ensure_ascii=False))
     return 0 if report["qualification"] == "passed" else 1
 
 
