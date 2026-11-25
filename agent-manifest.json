@@ -18,7 +18,8 @@
     "wave_worker": "docs/WAVE_WORKER.md",
     "waves": "docs/WAVES.md",
     "translator": "docs/TRANSLATOR.md",
-    "reviewer": "docs/REVIEWER.md"
+    "reviewer": "docs/REVIEWER.md",
+    "quality_convergence": "docs/QUALITY_CONVERGENCE.md"
   },
   "context_profiles": {
     "bootstrap": [
@@ -27,7 +28,8 @@
     ],
     "orchestrator": [
       "global",
-      "orchestration"
+      "orchestration",
+      "quality_convergence"
     ],
     "translator": [
       "global",
@@ -37,7 +39,8 @@
     "reviewer": [
       "global",
       "translation",
-      "reviewer"
+      "reviewer",
+      "quality_convergence"
     ]
   },
   "version_policy": {

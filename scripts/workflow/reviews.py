@@ -445,6 +445,10 @@ class ReviewLedgerManager:
                         "source or translation changed while validating anchored review; retry from current state"
                     )
                 verify_evidence_anchors(validated_quality, source_bytes, translation_bytes)
+                if "adjudications" in validated_quality:
+                    from .review_adjudication import verify_sessions
+                    verify_sessions(validated_quality, reviewer_session_id,
+                                    (chapter.get("translation_acceptance") or {}).get("session_id"))
             verify_correction_lineage(
                 validated_quality, previous=history[-1] if history else None,
                 source_sha256=source_sha256, translation_sha256=translation_sha256,

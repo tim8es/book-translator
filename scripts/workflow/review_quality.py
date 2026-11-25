@@ -24,6 +24,9 @@ def validate_quality_report(report: Any, *, outcome: str) -> dict[str, Any]:
     required = {"context", "checks", "findings"}
     if anchored:
         required.add("evidence_version")
+    has_adjudications = anchored and "adjudications" in report
+    if has_adjudications:
+        required.add("adjudications")
     if set(report) != required:
         raise ReviewQualityError("quality report needs exactly context, checks, findings and optional evidence_version=2")
     context = report["context"]
@@ -70,4 +73,12 @@ def validate_quality_report(report: Any, *, outcome: str) -> dict[str, Any]:
     result = {"context": context, "checks": dict(checks), "findings": normalized}
     if anchored:
         result = {"evidence_version": 2, **result}
+    if has_adjudications:
+        from .review_adjudication import validate
+        if context != "independent_session" or (outcome == "PASS" and open_findings):
+            raise ReviewQualityError("adjudicated PASS requires independent review and no open defects")
+        try:
+            result["adjudications"] = validate(report["adjudications"], normalized)
+        except EvidenceAnchorError as exc:
+            raise ReviewQualityError(str(exc)) from exc
     return result
