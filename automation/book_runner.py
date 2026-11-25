@@ -44,6 +44,7 @@ import execution_metrics
 import agent_orchestrator
 import review_convergence
 import quality_controller
+import quality_block_repair
 from review_diagnostics import (review_advisories, reviewer_failure_detail,
                                 should_chunk_review)
 from literary_context import (fingerprint, full_shared_context, parse_literary_review,
@@ -2808,6 +2809,155 @@ def correction_orchestrator_strategy(job_id: str, slug: str, status: dict,
     return strategy
 
 
+def quality_block_stage_path(slug, unit_id):
+    if not safe_book_slug(slug) or not re.fullmatch(r"chapter-[0-9]{6}", unit_id):
+        raise JobError("unsafe quality block stage identity")
+    return ROOT / "books" / slug / ".workflow" / "quality-block-repair" / (unit_id + ".json")
+
+
+def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
+                                 ledger, source, translation, unresolved):
+    """One source-owned reconstruction and independent veto, durably checkpointed.
+
+    This is an alternative strategy, not a way to waive prior review lineage.
+    Unsupported cases fall back to normal exact-anchor repair.
+    """
+    unit = chapter["unit_id"]
+    stage_path = quality_block_stage_path(slug, unit)
+    stage = read_json(stage_path) if stage_path.is_file() else None
+    attempts = status.setdefault("quality_block_attempts", [])
+    if not isinstance(attempts, list):
+        raise JobError("invalid block recovery attempts")
+    strategy = quality_controller.strategy(ledger, chapter, record, unresolved,
+                                            status.get("correction_regression_rejections", []))
+    binding = {"unit_id": unit, "record_id": record["record_id"],
+               "source_sha256": record["source_sha256"],
+               "translation_sha256": record["translation_sha256"],
+               "workflow_revision": status["workflow_revision"],
+               "session_id": status["active"]["session_id"]}
+    def retire(reason):
+        if stage is not None:
+            plan_hash = quality_controller.digest(stage["plan"])
+            for item in reversed(attempts):
+                if item.get("plan_sha256") == plan_hash and item.get("unit_id") == unit:
+                    item["outcome"] = reason
+                    break
+        stage_path.unlink(missing_ok=True)
+        status["phase"] = "quality-block-recovery-retired"
+        checkpoint(job_id, status, slug)
+    if stage is not None:
+        if (set(stage) != {"binding", "plan", "state", "replacement"}
+                or stage["state"] not in {"reserved", "candidate", "checking", "approved"}):
+            raise JobError("invalid durable quality block recovery stage")
+        if stage["binding"] != binding or stage["state"] in {"reserved", "checking"}:
+            # A stale or interrupted provider reservation is not a successful edit.
+            retire("interrupted-or-stale")
+            return False, None
+        plan = stage["plan"]
+    else:
+        try:
+            plan = quality_block_repair.select(source, translation, record, strategy,
+                [a for a in attempts if a.get("unit_id") == unit], position=_anchor_position)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise JobError("invalid block reconstruction evidence") from exc
+        if plan is None:
+            return False, None
+    book = ROOT / "books" / slug
+    def candidate(replacement):
+        value = quality_block_repair.apply(plan, source, translation, record,
+                                            replacement, position=_anchor_position)
+        check_markers(source, value)
+        correction_regression.require_no_new_repetitions(translation, value)
+        return value
+    def reserve(phase, role, system, user):
+        count = status.get("model_calls_started", 0)
+        if type(count) is not int or count < 0:
+            raise JobError("invalid model counter")
+        if count >= model_call_limit():
+            return False
+        status["model_calls_started"] = count + 1
+        status["phase"] = phase
+        status["prompt_context"] = {"role": role, "execution_mode": phase,
+            "workflow_revision": status["workflow_revision"],
+            "unit_id": unit, "block_id": plan["block_id"],
+            "source_sha256": binding["source_sha256"],
+            "translation_sha256": binding["translation_sha256"],
+            "system_chars": len(system), "user_chars": len(user)}
+        checkpoint(job_id, status, slug)
+        return True
+    if stage is None:
+        instructions, _ = role_contracts(engine, "translator")
+        try:
+            system, user = quality_block_repair.prompt(plan, source, translation, record,
+                instructions, (book / "glossary.md").read_text("utf-8"),
+                (book / "style-guide.md").read_text("utf-8"))
+        except ValueError:
+            return False, None
+        if status.get("model_calls_started", 0) >= model_call_limit():
+            return False, None
+        stage = {"binding": binding, "plan": plan, "state": "reserved", "replacement": None}
+        attempts.append({"unit_id": unit, "source_sha256": binding["source_sha256"],
+            "translation_sha256": binding["translation_sha256"],
+            "record_id": record["record_id"], "block_id": plan["block_id"],
+            "issue_ids": [strategy[fid]["issue_id"] for fid in plan["finding_ids"]],
+            "plan_sha256": quality_controller.digest(plan), "outcome": "reserved"})
+        status["quality_block_attempts"] = attempts
+        store_json(stage_path, stage)
+        if not reserve("quality-block-translation-reserved", "translator", system, user):
+            retire("budget-exhausted")
+            return False, None
+        try:
+            answer = complete_for_job(status, "TRANSLATOR", system, user)
+            replacement = quality_block_repair.parse(answer)
+            candidate(replacement)
+        except (ModelError, ValueError, JobError, correction_regression.CorrectionRegression):
+            retire("unsafe-or-invalid-candidate")
+            return True, None
+        stage.update(state="candidate", replacement=replacement)
+        store_json(stage_path, stage)
+        status["phase"] = "quality-block-candidate-staged"
+        checkpoint(job_id, status, slug)
+        return True, None
+    value = candidate(stage["replacement"])
+    if stage["state"] == "approved":
+        return True, (value, [], [])
+    instructions, _ = role_contracts(engine, "reviewer")
+    try:
+        cases = [quality_block_repair.review_case(plan, source, translation, record,
+                                                   stage["replacement"])]
+        system, user = candidate_review.build_prompt(cases, instructions, require_resolution=True)
+    except (ValueError, candidate_review.CandidateReviewError):
+        retire("review-context-too-large")
+        return True, None
+    if status.get("model_calls_started", 0) >= model_call_limit():
+        retire("budget-exhausted")
+        return False, None
+    stage["state"] = "checking"
+    store_json(stage_path, stage)
+    if not reserve("quality-block-review-reserved", "reviewer", system, user):
+        retire("budget-exhausted")
+        return False, None
+    try:
+        answer = complete_for_job(status, "REVIEWER", system, user)
+        rejected = candidate_review.parse_verdict(answer, ["block-reconstruction"])
+    except (ModelError, ValueError, candidate_review.CandidateReviewError):
+        retire("invalid-independent-review")
+        return True, None
+    if rejected:
+        retire("independent-veto")
+        return True, None
+    stage["state"] = "approved"
+    store_json(stage_path, stage)
+    for item in reversed(attempts):
+        if item.get("plan_sha256") == quality_controller.digest(plan):
+            item["outcome"] = "candidate-approved"
+            item["candidate_sha256"] = hashlib.sha256(value.encode("utf-8")).hexdigest()
+            break
+    status["phase"] = "quality-block-candidate-approved"
+    checkpoint(job_id, status, slug)
+    return True, (value, [], [])
+
+
 def process_correction_batches(job_id: str, slug: str, status: dict, engine: Path,
                                chapter: dict, record: dict) -> tuple[str, list, list] | None:
     """Stage at most two small LLM calls per Actions checkpoint.
@@ -2843,11 +2993,18 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         "review_record_id": record["record_id"],
         "counts": correction_regression.triage_counts(unresolved),
     }
-    stage_path, stage = load_correction_stage(slug, chapter, record, status,
-                                              source, translation, unresolved)
     feedback_enabled = correction_feedback.enabled()
     historical_ledger = (chapter_data(slug)[1]
                          if feedback_enabled or quality_controller.supported(engine) else None)
+    if (quality_controller.supported(engine)
+            and (engine / "automation/quality_block_repair.py").is_file()
+            and not correction_stage_path(slug, chapter["unit_id"]).exists()):
+        handled, result = process_quality_block_repair(job_id, slug, status, engine,
+            chapter, record, historical_ledger, source, translation, unresolved)
+        if handled:
+            return result
+    stage_path, stage = load_correction_stage(slug, chapter, record, status,
+                                              source, translation, unresolved)
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = execution_scheduler.continue_corrections()
     isolated = (execution_scheduler.isolated_findings(status, chapter, record, unresolved)
@@ -5748,6 +5905,8 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             # Remove staging ONLY after canonical translation acceptance and
             # claim-bound glossary reconciliation have succeeded.
             correction_stage_path(slug, unit_id).unlink(missing_ok=True)
+            if quality_controller.supported(engine):
+                quality_block_stage_path(slug, unit_id).unlink(missing_ok=True)
             status.pop("correction_batch_progress", None)
             status.pop("quality_candidate_gate", None)
             status.pop("correction_isolation", None)

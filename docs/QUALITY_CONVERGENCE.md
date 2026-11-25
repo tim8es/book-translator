@@ -32,8 +32,15 @@ The overall model-call cap, provider backoff, claim rules, and hard chapter
 review/correction budgets still apply. No identical known-rejected patch may
 be reapplied. If evidence is missing, exhausted or contradictory, preserve the
 last accepted artifact and report a blocked result rather than certify a defective
-translation. This first stage does not yet implement broader paragraph
-replacement, persistent tool-using agent sessions or cross-model escalation.
+translation. For a recurring defect, a single source-owned EPUB paragraph may
+be reconstructed from the original under the active corrector claim. Both
+source and target anchors must belong to the same unique preserved block;
+no cross-block finding, embedded protected marker or link may be altered.
+Each stable defect gets at most one such recovery attempt per source revision.
+Persist the exact plan and candidate separately before the independent veto.
+Never infer PASS from candidate approval; re-review the accepted artifact.
+Persistent tool-using agent sessions and cross-model escalation are not yet
+part of this contract.
 
 Before default rollout, compare identical source books against ChatOps and
 measure cost, completion and independent literary quality. A test-suite pass
