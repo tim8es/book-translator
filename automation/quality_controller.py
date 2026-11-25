@@ -217,3 +217,23 @@ def progress_credits(ledger, unit_id, source_sha256, workflow_revision):
                 sum(WEIGHTS[f["severity"]] for f in before.values())):
             credits.append(current["record_id"])
     return credits[:MAX_PROGRESS_CREDITS]
+
+
+def escalation_binding(status, role, unit_id, *, level, reason):
+    """A one-call reservation for a distinct configured model after recurrence."""
+    if role not in {"TRANSLATOR", "CORRECTOR", "REVIEWER"} or level < 2:
+        return None
+    return {"role": role, "unit_id": unit_id, "model_call": status["model_calls_started"],
+            "workflow_revision": status["workflow_revision"], "reason": reason}
+
+
+def escalation_route(status, role, unit_id, env):
+    binding = status.get("quality_model_escalation")
+    if (not isinstance(binding, dict) or binding.get("role") != role
+            or binding.get("unit_id") != unit_id
+            or binding.get("model_call") != status.get("model_calls_started")
+            or binding.get("workflow_revision") != status.get("workflow_revision")):
+        return False
+    primary = env.get(f"OMNIROUTE_{role}_MODEL", "").strip()
+    fallback = env.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()
+    return bool(primary and fallback and primary != fallback)

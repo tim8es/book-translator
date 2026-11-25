@@ -39,8 +39,11 @@ no cross-block finding, embedded protected marker or link may be altered.
 Each stable defect gets at most one such recovery attempt per source revision.
 Persist the exact plan and candidate separately before the independent veto.
 Never infer PASS from candidate approval; re-review the accepted artifact.
-Persistent tool-using agent sessions and cross-model escalation are not yet
-part of this contract.
+For recurrent defects at the highest recovery level, use a distinct configured
+role fallback model where available. Bind the escalation to one exact model
+call, role, unit and workflow revision. Without a distinct configured fallback,
+continue with the normal route. Persistent unrestricted tool-using sessions
+are not part of this contract.
 
 Before default rollout, compare identical source books against ChatOps and
 measure cost, completion and independent literary quality. A test-suite pass

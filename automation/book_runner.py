@@ -246,6 +246,9 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
     if ((repeated_provider or attempts >= FALLBACK_AFTER_TRANSIENTS)
             and os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()):
         route = role + "_FALLBACK"
+    if quality_controller.escalation_route(status, role, current_unit, os.environ):
+        route = role + "_FALLBACK"
+        status["quality_escalation_used"] = dict(status["quality_model_escalation"])
     # A route name, not model ID or credential, is safe in metadata.
     status["provider_model_route"] = "fallback" if route != role else "primary"
     status.pop("model_response_diagnostics", None)
@@ -2876,6 +2879,10 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
             return False
         status["model_calls_started"] = count + 1
         status["phase"] = phase
+        binding_for_call = quality_controller.escalation_binding(status, role.upper(), unit,
+            level=max(strategy[fid]["level"] for fid in plan["finding_ids"]), reason="block-reconstruction")
+        if binding_for_call:
+            status["quality_model_escalation"] = binding_for_call
         status["prompt_context"] = {"role": role, "execution_mode": phase,
             "workflow_revision": status["workflow_revision"],
             "unit_id": unit, "block_id": plan["block_id"],
@@ -3133,6 +3140,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
         status.update({"model_calls_started": count + 1,
                        "phase": "model-call-reserved",
                        "prompt_context": prompt_context})
+        if quality_controller.supported(engine):
+            binding = quality_controller.escalation_binding(status, "CORRECTOR", chapter["unit_id"],
+                level=max(v["level"] for v in recovery_plan.values()), reason="recurrent-confirmed-defect")
+            if binding:
+                status["quality_model_escalation"] = binding
         checkpoint(job_id, status, slug)
         answer = complete_for_job(status, "CORRECTOR", system, user)
         try:
@@ -5281,6 +5293,13 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
     status["quality_candidate_gate"] = cache
     status["model_calls_started"] = count + 1
     status["phase"] = "quality-candidate-check-reserved"
+    plan = status.get("quality_recovery_strategy", {})
+    if plan.get("unit_id") == chapter["unit_id"] and plan.get("record_id") == record["record_id"]:
+        level = max((v["level"] for v in plan.get("findings", {}).values()), default=0)
+        escalation = quality_controller.escalation_binding(status, "REVIEWER", chapter["unit_id"],
+            level=level, reason="independent-candidate-check")
+        if escalation:
+            status["quality_model_escalation"] = escalation
     status["prompt_context"] = {"role": "reviewer", "execution_mode": "quality-candidate-check",
         "workflow_revision": status["workflow_revision"], "loaded_contracts": paths,
         "case_count": len(cases), "source_sha256": binding["source_sha256"],

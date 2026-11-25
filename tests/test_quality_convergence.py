@@ -154,6 +154,20 @@ class QualityEvidenceTests(unittest.TestCase):
         plan = quality.strategy(ledger, chapter, newer, newer["quality_report"]["findings"], [veto])
         self.assertEqual(plan["again"]["level"], 2)
 
+    def test_escalation_is_bound_to_exact_call_role_and_distinct_model(self):
+        status = {"workflow_revision": "f" * 40, "model_calls_started": 7}
+        self.assertIsNone(quality.escalation_binding(status, "CORRECTOR", UNIT, level=1, reason="test"))
+        status["quality_model_escalation"] = quality.escalation_binding(
+            status, "CORRECTOR", UNIT, level=2, reason="test")
+        env = {"OMNIROUTE_CORRECTOR_MODEL": "primary", "OMNIROUTE_CORRECTOR_FALLBACK_MODEL": "fallback"}
+        self.assertTrue(quality.escalation_route(status, "CORRECTOR", UNIT, env))
+        self.assertFalse(quality.escalation_route(status, "REVIEWER", UNIT, env))
+        self.assertFalse(quality.escalation_route(status, "CORRECTOR", "other", env))
+        self.assertFalse(quality.escalation_route(status, "CORRECTOR", UNIT,
+            {**env, "OMNIROUTE_CORRECTOR_FALLBACK_MODEL": "primary"}))
+        status["model_calls_started"] += 1
+        self.assertFalse(quality.escalation_route(status, "CORRECTOR", UNIT, env))
+
     def test_progress_credits_require_real_net_repairs(self):
         old = record(RID, report(finding("a"), finding("b", "meaning", "major")))
         new = record(RID2, report(
