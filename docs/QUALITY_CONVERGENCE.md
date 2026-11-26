@@ -122,3 +122,12 @@ fixture in the private qualification report. No production book text is
 exported by this change. This intentionally changes the earlier synthetic
 report content policy to permit debugging that fixture. Production remains
 default-off; long-unit confirmation and live quality must be qualified separately.
+
+
+## Candidate preflight context budget
+
+The previous combined 38,000-character limit left insufficient evidence
+capacity alongside the growing pinned reviewer contract. Preserve the full
+role contract; bound evidence/user prompt to 38,000 characters and the
+combined request to 80,000 characters. Existing batch reduction remains
+mandatory. Never truncate evidence, skip the veto or grant PASS.

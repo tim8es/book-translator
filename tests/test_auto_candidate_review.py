@@ -240,3 +240,27 @@ class CandidateReviewRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CandidateContextBudgetTests(unittest.TestCase):
+    def test_actual_pinned_reviewer_contract_fits_short_candidate(self):
+        root = Path(__file__).resolve().parents[1]
+        contract, paths = auto.role_contracts(root, "reviewer")
+        self.assertIn("docs/REVIEWER.md", paths)
+        self.assertIn("docs/QUALITY_CONVERGENCE.md", paths)
+        case = {"finding_id": "one", "category": "meaning", "severity": "major",
+                "reviewer_claim": "Preserve the number of coins.",
+                "original_excerpt": "Seven coins, not nine. " * 20,
+                "current_translation_excerpt": "Девять монет, а не семь. " * 20,
+                "candidate_translation_excerpt": "Семь монет, а не девять. " * 20}
+        system, user = candidate_review.build_prompt([case], contract, require_resolution=True)
+        self.assertTrue(system.startswith(contract))
+        self.assertGreater(len(system) + len(user), 38_000)
+        self.assertLessEqual(len(system) + len(user), candidate_review.MAX_PROMPT_CHARS)
+
+    def test_evidence_and_total_limits_remain_independent(self):
+        case = {"finding_id": "one", "original_excerpt": "a" * candidate_review.MAX_EVIDENCE_CHARS}
+        with self.assertRaises(candidate_review.CandidateReviewError):
+            candidate_review.build_prompt([case], "Reviewer")
+        with self.assertRaises(candidate_review.CandidateReviewError):
+            candidate_review.build_prompt([{"finding_id": "one"}], "a" * 80_000)

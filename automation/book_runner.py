@@ -5353,7 +5353,7 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
             break
         except candidate_review.CandidateReviewError as exc:
             if len(selected) == 1:
-                raise ModelError("quality candidate check exceeds safe scope or is invalid") from exc
+                raise ModelError("quality candidate check rejected: " + str(exc)) from exc
             selected = selected[:max(1, len(selected) // 2)]
     count = status.get("model_calls_started", 0)
     if type(count) is not int or count < 0:
