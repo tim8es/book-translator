@@ -62,6 +62,8 @@ def provider(status: dict, metric: dict) -> None:
             value = metric.get(field)
             if type(value) is int and value >= 0:
                 add(field, value)
+                if field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    add(field + "_observations", 1)
 
 
 def accepted(status: dict, role: str, outcome: str | None = None) -> None:
@@ -178,3 +180,69 @@ def queue_snapshot(chapters: list[dict], ledger: dict) -> dict:
                     continue
             result["awaiting_review"] += 1
     return result
+
+
+TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+USAGE_ROLES = ("translator", "reviewer", "corrector", "orchestrator")
+
+
+def qualification_usage(status: dict) -> dict:
+    """Read only numeric evidence from a fresh isolated qualification run.
+
+    A reserved call may not have a recorded completion. Historical counters
+    without observation counts are not complete usage. Zero tokens are valid
+    only when explicitly observed. Never infer a bill from tokens or calls.
+    """
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+
+    reserved = count(status.get("model_calls_started", 0))
+    metrics = status.get("execution_metrics", {})
+    api = metrics.get("api", {}) if isinstance(metrics, dict) else {}
+    rows = {}
+    completed = 0
+    valid = isinstance(api, dict) and isinstance(metrics, dict)
+    for role in USAGE_ROLES:
+        row = api.get(role, {}) if isinstance(api, dict) else {}
+        if not isinstance(row, dict):
+            valid = False
+            row = {}
+        calls = count(row.get("completed_calls", 0))
+        if calls is None:
+            valid = False
+            calls = 0
+        completed += calls
+        if not calls:
+            continue
+        observed = {}
+        tokens = {}
+        for field in TOKEN_FIELDS:
+            n = count(row.get(field + "_observations", 0))
+            total = count(row.get(field))
+            if n is None or n > calls or (n and total is None):
+                valid = False
+                n = 0
+            observed[field] = n
+            # No partial totals: older aggregates might include uncounted samples.
+            tokens[field] = total if n == calls else None
+        rows[role] = {"completed_calls": calls, "token_observations": observed,
+                      "tokens_if_complete": tokens}
+    matched = valid and reserved is not None and completed == reserved
+    complete = bool(matched and completed and all(
+        row["token_observations"][field] == row["completed_calls"]
+        and row["tokens_if_complete"][field] is not None
+        for row in rows.values() for field in TOKEN_FIELDS))
+    return {
+        "schema_version": 1,
+        "reserved_calls": reserved,
+        "recorded_completions": completed,
+        "all_reserved_calls_recorded": matched,
+        "token_usage_complete": complete,
+        "tokens_if_complete": {
+            field: sum(row["tokens_if_complete"][field] for row in rows.values())
+            if complete else None for field in TOKEN_FIELDS
+        },
+        "roles": rows,
+        "billed_cost": None,
+        "scope": "runner_only_excludes_judges_and_audits",
+    }

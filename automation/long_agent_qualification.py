@@ -147,6 +147,8 @@ def qualify_long(revision, output):
                 print(json.dumps({"checkpoint": i+1, **qual.diagnostic(status)}), flush=True)
                 if status["state"] != "running" or status["phase"] == "provider-backoff":
                     break
+            from execution_metrics import qualification_usage
+            report["runner_usage"] = qualification_usage(status)
             ch = json.loads((book / "progress.json").read_text("utf-8"))["chapters"][0]
             if status["state"] != "done" or ch["status"] != "reviewed" or not 0 <= report["model_calls"] <= CALL_CAP:
                 raise RuntimeError("long runner did not finish")
