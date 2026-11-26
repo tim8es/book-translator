@@ -252,6 +252,8 @@ def run(args, report):
             if status["state"] != "running" or status["phase"] == "provider-backoff":
                 break
         report["auto_duration_seconds"] = round(time.monotonic() - started, 1)
+        from execution_metrics import qualification_usage
+        report["auto_usage"] = qualification_usage(status)
         if status["state"] != "done" or not 0 <= report["auto_model_calls"] <= AUTO_CAP:
             try:
                 failed_auto_evidence(root, status, report)
