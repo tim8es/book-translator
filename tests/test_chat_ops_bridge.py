@@ -397,6 +397,31 @@ class RequestTests(unittest.TestCase):
                                             "HEAD:.book-translator-install.json").stdout)[
                 "resolved_revision"], global_pin)
 
+            # Exercise the actual exporter against the completed canonical
+            # state, not a fabricated status payload. The fixture PASS is
+            # mechanical test data, not real literary review evidence.
+            sys.path.insert(0, str(public / "automation"))
+            try:
+                import blind_quality_export as export
+                import paired_quality_qualification as paired
+                snapshot = export.checked_snapshot(work, "novel",
+                                                   export.canonical_preflight)
+                self.assertEqual(snapshot["workflow_revision"], rev)
+                self.assertEqual(len(snapshot["units"]), 1)
+                self.assertEqual(snapshot["units"][0]["source"]["sha256"], source_hash)
+                self.assertEqual(snapshot["units"][0]["candidate"]["text"], translated)
+                self.assertEqual(snapshot["commit"], run("-C", str(work),
+                    "rev-parse", "HEAD").stdout.strip())
+                # An ordinary same-chat fallback review is valid canonical
+                # evidence but cannot satisfy the independent paired benchmark.
+                chapters = json.loads((book / "progress.json").read_text("utf-8"))["chapters"]
+                ledger = json.loads((book / "review-ledger.json").read_text("utf-8"))["records"]
+                receipts = list(paired.successful_receipts(work, "novel", rev))
+                with self.assertRaisesRegex(ValueError, "independent ChatOps review context"):
+                    paired.verify_receipts(chapters, ledger, receipts)
+            finally:
+                sys.path.remove(str(public / "automation"))
+
 
 if __name__ == "__main__":
     unittest.main()

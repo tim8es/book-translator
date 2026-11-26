@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -155,7 +156,10 @@ def main():
     auto = checked_snapshot(a, args.auto_slug, canonical_preflight)
     chatops = checked_snapshot(b, args.chatops_slug, canonical_preflight)
     result = paired(auto, chatops)
-    with output.open("x", encoding="utf-8") as f:
+    # The manifest contains the complete literary source and both targets.
+    # Exclusive creation and mode 0600 protect it even under a permissive umask.
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
         f.write("\n")
     # Only non-content provenance goes to stdout; labels are operator-supplied.
