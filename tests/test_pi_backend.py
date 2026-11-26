@@ -118,6 +118,18 @@ class PiBackendTests(unittest.TestCase):
         self.assertNotIn("private-model-sentinel", str(diagnostics))
         self.assertNotIn("secret-prompt", str(diagnostics))
 
+    def test_json_thinking_blocks_are_discarded_like_print_mode(self):
+        events = [json.loads(line) for line in self.event_stream().split("\n") if line]
+        message = next(e["message"] for e in events if e["type"] == "message_end"
+                       and e["message"]["role"] == "assistant")
+        message["content"].insert(0, {"type": "thinking", "thinking": "private-thinking-sentinel"})
+        answer, diagnostics = pi_backend.parse_json_events("\n".join(json.dumps(e) for e in events))
+        self.assertEqual(answer, '{"ok":true}\n')
+        self.assertNotIn("private-thinking-sentinel", str(diagnostics))
+        message["content"].append({"type": "toolCall", "name": "shell", "arguments": {}})
+        with self.assertRaises(pi_backend.PiTransportFailure):
+            pi_backend.parse_json_events("\n".join(json.dumps(e) for e in events))
+
     def test_missing_zero_or_inconsistent_usage_remains_unknown(self):
         for usage in (None, {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
                              "totalTokens": 0},

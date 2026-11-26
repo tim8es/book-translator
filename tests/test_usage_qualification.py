@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "automation"))
 import usage_qualification as usage
-from omniroute import CompletionText
+from omniroute import CompletionText, ModelError
 
 
 class UsageQualificationTests(unittest.TestCase):
@@ -50,3 +50,14 @@ class UsageQualificationTests(unittest.TestCase):
         self.assertFalse(report["all_transports_ready"])
         self.assertEqual(report["qualification"], "failed")
         self.assertNotIn("secret-sentinel", str(report))
+
+
+    def test_failure_codes_allowlist_does_not_copy_arbitrary_messages(self):
+        self.assertEqual(usage.safe_failure_code(ModelError(
+            "Pi backend: pi_invalid_event_stream")), "pi_invalid_event_stream")
+        self.assertEqual(usage.safe_failure_code(ModelError(
+            "OmniRoute HTTPS base URL, key and role model must be configured")), "configuration")
+        self.assertEqual(usage.safe_failure_code(ModelError(
+            "Pi backend: private-secret-sentinel")), "unclassified")
+        self.assertEqual(usage.safe_failure_code(ModelError(
+            "Pi backend: pi_invalid_event_stream private-secret-sentinel")), "unclassified")
