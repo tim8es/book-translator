@@ -185,14 +185,51 @@ def diagnostic(status):
     # Initialization is before any model call. Preserve its canonical error,
     # but redact all provider configuration and URLs even in this fixture.
     if status.get("model_calls_started", 0) == 0 and isinstance(status.get("last_error"), str):
-        message = status["last_error"]
-        for k in ("OMNIROUTE_API_KEY", "OMNIROUTE_BASE_URL"):
-            value = os.environ.get(k)
-            if value:
-                message = message.replace(value, "[redacted]")
-        message = re.sub(r"https?://\S+", "[redacted-url]", message)
-        result["initialization_error"] = message[:400]
+        result["initialization_error"] = redact_fixture_error(status["last_error"], os.environ)
     return result
+
+
+def redact_fixture_error(message, env):
+    """Only synthetic qualification errors; no raw provider responses or traceback."""
+    text = str(message)
+    sensitive = []
+    for key, value in env.items():
+        if value and len(value) >= 4 and (key.startswith("OMNIROUTE_")
+                or any(word in key.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))):
+            sensitive.append(value)
+    # Longest first: overlapping configured values must not expose a suffix.
+    for value in sorted(set(sensitive), key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    text = re.sub(r"https?://\S+", "[redacted-url]", text)
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", text)
+    text = re.sub(r"\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_\-]+", "[redacted-token]", text)
+    return " ".join(text.split())[:350]
+
+
+def collect_fixture_error(report, status, checkpoint):
+    """Preserve the actual failure chain before the temporary state is deleted."""
+    if not isinstance(status, dict) or status.get("phase") not in {
+            "model-retry", "model-blocked", "provider-backoff",
+            "operator-intervention-required", "model-call-limit-reached",
+            "review-deferred"}:
+        return
+    item = {"checkpoint": checkpoint, **diagnostic(status)}
+    # No prompt, model response, source/target passages or provider config.
+    message = status.get("last_error")
+    if isinstance(message, str) and message:
+        item["error"] = redact_fixture_error(message, os.environ)
+    failures = status.get("failures")
+    if type(failures) is int and failures >= 0:
+        item["failures"] = failures
+    context = status.get("prompt_context")
+    if isinstance(context, dict):
+        for key in ("role", "execution_mode", "correction_mode"):
+            value = context.get(key)
+            if isinstance(value, str) and re.fullmatch(r"[a-z0-9_-]{1,80}", value):
+                item[key] = value
+    history = report.setdefault("synthetic_error_history", [])
+    history.append(item)
+    del history[:-12]
 
 
 # Specific fact checks are scoped to the chapter containing their source.
@@ -334,6 +371,7 @@ def qualify(revision, output, profile="smoke"):
                 status = step(root, job)
                 report["checkpoint_count"] = checkpoint + 1
                 report["last_checkpoint"] = diagnostic(status)
+                collect_fixture_error(report, status, checkpoint + 1)
                 print(json.dumps({"checkpoint": checkpoint + 1, **report["last_checkpoint"]}, ensure_ascii=False), flush=True)
                 report.update(state=status["state"], phase=status["phase"],
                               model_calls=status.get("model_calls_started", 0))
