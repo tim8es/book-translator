@@ -86,3 +86,19 @@ target hashes; any failed check keeps qualification failed. Audit model calls
 are reported separately from the bounded runner calls. No source or translated
 passages are added to the qualification report. A configured backup identical
 to the primary route is not a fallback.
+
+## Bounded agent review planning (opt-in)
+
+With BOOK_TRANSLATOR_AGENT_REVIEW_PLANNING=on and incremental review enabled,
+the orchestration model may choose between an admissible direct complete review
+and a prevalidated two-to-four-part aligned complete review. The canonical
+claim, source and target hashes, immutable literary revision and prior review
+record still determine the exact work. Mandatory partitioning, small units,
+existing stages and focused editorial-only checks are not discretionary.
+The runner reserves one counted advice call before invocation, records a
+hash-bound decision, and reuses it after interruption without a second paid
+call. Malformed or unavailable advice falls back to direct review. Existing
+review, correction, attention and promotion gates remain authoritative.
+The agent sees only technical sizes and budgets, never literary passages.
+This capability does not make a model an unrestricted repository operator.
+Keep the option off in production until live qualification on long units.
