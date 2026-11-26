@@ -149,7 +149,7 @@ def seed(root, job, status, revision, profile="smoke"):
         os.environ.pop("BOOK_TRANSLATOR_PINNED_REVISION", None)
 
 
-def create_state(root, remote, revision, job, profile="smoke"):
+def create_state(root, remote, revision, job, profile="smoke", *, source_bytes=None):
     """Create exactly the state topology required by the immutable CLI."""
     root.mkdir()
     git(root.parent, "init", "--bare", str(remote))
@@ -167,7 +167,12 @@ def create_state(root, remote, revision, job, profile="smoke"):
     (root / "automation/status").mkdir(parents=True)
     (root / "automation/status/.gitkeep").touch()
     source = incoming / "source.epub"
-    fixture(source, profile)
+    if source_bytes is None:
+        fixture(source, profile)
+    elif isinstance(source_bytes, bytes) and source_bytes:
+        source.write_bytes(source_bytes)
+    else:
+        raise ValueError("invalid explicit benchmark source")
     (incoming / "request.json").write_text(json.dumps({"schema_version": 1,
         "job_id": job, "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "target_language": "ru", "workflow_revision": revision}), "utf-8")

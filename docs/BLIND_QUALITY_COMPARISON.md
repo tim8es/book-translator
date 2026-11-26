@@ -70,3 +70,30 @@ The input labels still must be verified by the operator: the exporter cannot
 prove the history of literary decisions or the true execution mode. It does not
 create a completed translation or review evidence. Keep the generated manifest
 outside all repositories; only the sanitized comparison report may be published.
+
+## Live paired benchmark from an actual ChatOps snapshot
+
+`paired_quality_qualification.py` requires a completed, clean, committed
+ChatOps state checkout, an explicit state commit, intake job ID and source
+SHA-256. The source must be a two-unit authored synthetic EPUB. The current
+canonical PASS and final translation hashes must match successful ChatOps
+accept-translation and review-record receipts with distinct worker sessions.
+An unfinished ChatOps book is rejected before any paid Auto or judge call.
+
+Use a complete (not shallow) checkout of the public executor object store and
+run from a trusted private environment:
+
+    python automation/paired_quality_qualification.py --executor-revision <executor-sha> --chatops-root /state/chatops --chatops-commit <state-sha> --chatops-job <32-hex-id> --source-sha256 <source-sha256> --output /secure/paired-report.json
+
+The Auto side uses the exact original EPUB bytes, same literary workflow pin
+and target language as the ChatOps side, in a new temporary Git repository
+with a local bare remote. No seeded defects, target text or reviewer feedback
+are copied across. The Auto cap is 36 counted runner calls; the blinded
+comparison uses at most four additional calls and runs only after both sides
+are canonically reviewed. The output stores sanitized provenance, counts,
+hashes and verdicts, not the underlying literary texts. ChatOps model-call
+count is explicitly unavailable; successful queue receipts are not model calls.
+The judge uses a fresh reviewer invocation, not a distinct underlying provider
+unless separately verified. Results from this two-unit pilot are not sufficient
+for production-wide quality equivalence. The CLI does not dispatch an Action;
+a separate explicit private invocation is required after ChatOps completion.
