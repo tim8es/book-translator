@@ -105,3 +105,8 @@ independent_session context. The documented same-chat bounded-context
 fallback is valid for ordinary translation but not this independent-review
 benchmark. Session identifiers and structured reports attest context; they
 cannot prove that the operator actually used a separate conversation.
+
+The local source-bearing manifest is created exclusively with owner-only
+permissions (0600 on POSIX). A canonical bridge integration regression
+also verifies snapshot export after real CLI acceptance and promotion;
+synthetic fixture review records in tests do not constitute literary evidence.
