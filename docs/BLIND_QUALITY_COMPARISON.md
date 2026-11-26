@@ -110,3 +110,11 @@ The local source-bearing manifest is created exclusively with owner-only
 permissions (0600 on POSIX). A canonical bridge integration regression
 also verifies snapshot export after real CLI acceptance and promotion;
 synthetic fixture review records in tests do not constitute literary evidence.
+
+
+The live paired profile is restricted to the exact authored River Gate source
+SHA-256. A blocked Auto run now retains bounded, redacted current-artifact
+findings and candidate rejection categories before its temporary state is
+deleted. No additional calls are spent on diagnostics, and an incomplete
+Auto result still cannot enter blind judging. These diagnostics must not
+be mistaken for independent literary evidence or a production rollout.

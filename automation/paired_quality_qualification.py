@@ -20,6 +20,10 @@ ID = re.compile(r"[0-9a-f]{32}")
 SHA = re.compile(r"[0-9a-f]{40}")
 HASH = re.compile(r"[0-9a-f]{64}")
 AUTO_CAP = 36
+# Exact internally authored River Gate fixture. No arbitrary source can enter
+# this live paid qualification or its content-bearing private diagnostics.
+FIXTURE_SHA256 = "f125a1a02efd128eb2fe7085ed353455504d3cad10cfe406cf618979e50e12d5"
+FIXTURE_TITLE = "The River Gate - Paired Synthetic Benchmark"
 
 
 def successful_receipts(root, slug, revision):
@@ -77,7 +81,7 @@ def verify_receipts(chapters, records, requests):
 
 def admit_chatops(root, commit, job, source_sha):
     if (not SHA.fullmatch(commit) or not ID.fullmatch(job) or not HASH.fullmatch(source_sha)
-            or export.clean_head(root) != commit):
+            or source_sha != FIXTURE_SHA256 or export.clean_head(root) != commit):
         raise ValueError("ChatOps checkout or benchmark identity mismatch")
     intake = "intake/auto/" + job + "/"
     request = export.read_json(root, intake + "request.json")
@@ -92,7 +96,7 @@ def admit_chatops(root, commit, job, source_sha):
         raise ValueError("synthetic source bytes changed")
     from book_runner import epub_identity
     title, author = epub_identity(export.inside(root, intake + "source.epub"))
-    if author != "Synthetic Fixture" or not title.endswith("Paired Synthetic Benchmark"):
+    if author != "Synthetic Fixture" or title != FIXTURE_TITLE:
         raise ValueError("only authored paired synthetic fixtures are admitted")
     status = export.read_json(root, "automation/status/" + job + ".json")
     slug = status.get("book_slug")
@@ -115,6 +119,62 @@ def admit_chatops(root, commit, job, source_sha):
     if export.clean_head(root) != commit:
         raise ValueError("ChatOps state changed")
     return snapshot, source
+
+
+def failed_auto_evidence(root, status, report):
+    """Preserve bounded, source/hash-bound evidence before disposable state vanishes."""
+    slug = status.get("book_slug")
+    if not isinstance(slug, str) or not export.SLUG.fullmatch(slug):
+        return
+    book = root / "books" / slug
+    metadata = export.read_json(book, "metadata.json")
+    if metadata["source"]["sha256"] != FIXTURE_SHA256:
+        raise ValueError("diagnostic fixture identity mismatch")
+    chapters = export.read_json(book, "progress.json")["chapters"]
+    records = export.read_json(book, "review-ledger.json")["records"]
+    report["auto_units"] = []
+    for ch in chapters:
+        row = {"unit_id": ch["unit_id"], "status": ch["status"]}
+        report["auto_units"].append(row)
+        if ch["status"] == "reviewed":
+            continue
+        acceptance = ch.get("translation_acceptance")
+        if not isinstance(acceptance, dict):
+            continue
+        source = export.inside(book, ch["source_path"]).read_bytes()
+        target = export.inside(book, ch["translation_path"]).read_bytes()
+        if (export.sha(source) != acceptance["source_sha256"]
+                or export.sha(target) != acceptance["translation_sha256"]):
+            raise ValueError("diagnostic accepted bytes mismatch")
+        row.update(source_sha256=export.sha(source), translation_sha256=export.sha(target),
+                   translation_excerpt=qualification.redact_fixture_error(
+                       target.decode("utf-8"), os.environ))
+        # Last exact-artifact review only. Historical claims cannot explain a
+        # different accepted translation, and unsupported fields never escape.
+        matching = [r for r in records if r["unit_id"] == ch["unit_id"]
+                    and r["source_sha256"] == row["source_sha256"]
+                    and r["translation_sha256"] == row["translation_sha256"]]
+        if not matching:
+            continue
+        latest = max(matching, key=lambda r: r["sequence"])
+        row.update(review_record_id=latest["record_id"], outcome=latest["outcome"])
+        row["findings"] = [
+            {k: qualification.redact_fixture_error(f[k], os.environ)
+             if k == "detail" else f[k] for k in ("id", "category", "severity", "detail")}
+            for f in latest.get("quality_report", {}).get("findings", [])
+            if not f["resolved"]][:12]
+        ids = {f["id"] for f in row["findings"]}
+        row["candidate_rejections"] = [
+            {k: x[k] for k in ("finding_id", "patch_sha256", "reason", "risk") if k in x}
+            for x in status.get("correction_regression_rejections", [])
+            if x.get("unit_id") == ch["unit_id"]
+            and x.get("review_record_id") == latest["record_id"]
+            and x.get("finding_id") in ids][-12:]
+        recovery = status.get("quality_empty_candidates", {}).get(ch["unit_id"], {})
+        if recovery.get("binding", {}).get("record_id") == latest["record_id"]:
+            row["empty_candidate_count"] = recovery.get("count")
+            row["empty_candidate_reason"] = recovery.get("reason")
+    report["auto_reviewed_units"] = sum(r["status"] == "reviewed" for r in report["auto_units"])
 
 
 def run(args, report):
@@ -151,11 +211,16 @@ def run(args, report):
             status = qualification.step(root, job)
             report.update(auto_checkpoints=i + 1, auto_model_calls=status.get("model_calls_started", 0),
                           auto_state=status["state"], auto_phase=status["phase"])
+            qualification.collect_fixture_error(report, status, i + 1)
             print(json.dumps({"auto_checkpoint": i + 1, **qualification.diagnostic(status)}), flush=True)
             if status["state"] != "running" or status["phase"] == "provider-backoff":
                 break
         report["auto_duration_seconds"] = round(time.monotonic() - started, 1)
         if status["state"] != "done" or not 0 <= report["auto_model_calls"] <= AUTO_CAP:
+            try:
+                failed_auto_evidence(root, status, report)
+            except Exception as exc:
+                report["diagnostic_failure_type"] = type(exc).__name__
             raise RuntimeError("Auto did not complete inside its budget")
         report["stage"] = "paired-preflight"
         auto = export.checked_snapshot(root, status["book_slug"], export.canonical_preflight)

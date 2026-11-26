@@ -72,8 +72,10 @@ def cases(source: str, translation: str, patches: list[dict],
         elif operation != "replace":
             raise CandidateReviewError("candidate preflight operation is unsupported")
         replacement = patch.get("replacement")
-        if not isinstance(replacement, str) or not replacement.strip():
-            raise CandidateReviewError("candidate preflight replacement is empty")
+        if not isinstance(replacement, str) or (operation != "replace" and not replacement.strip()):
+            raise CandidateReviewError("candidate preflight insertion is empty")
+        # Canonical replace permits deleting an unsupported addition. It must
+        # still pass the exact combined candidate and independent semantic veto.
         source_start, source_end = position(source, item["source_anchor"])
         left, right = max(0, start - 650), min(len(translation), end + 650)
         if edits:
@@ -147,6 +149,10 @@ def build_prompt(candidates: list[dict], reviewer_contract: str, *, require_reso
 
 
 def parse_verdict(response: str, expected_ids: list[str]) -> list[str]:
+    return list(parse_rejections(response, expected_ids))
+
+
+def parse_rejections(response: str, expected_ids: list[str]) -> dict[str, str]:
     try:
         decoded = json.loads(response)
     except (TypeError, ValueError) as exc:
@@ -165,7 +171,7 @@ def parse_verdict(response: str, expected_ids: list[str]) -> list[str]:
             or len(set(expected_ids)) != len(expected_ids)):
         raise CandidateReviewError("candidate preflight has incomplete decisions")
     found = set()
-    rejected = []
+    rejected = {}
     for decision in decisions:
         if (not isinstance(decision, dict) or set(decision) != {
                 "finding_id", "verdict", "risk"}):
@@ -179,7 +185,7 @@ def parse_verdict(response: str, expected_ids: list[str]) -> list[str]:
             raise CandidateReviewError("candidate preflight invalid decision")
         found.add(fid)
         if verdict == "reject":
-            rejected.append(fid)
+            rejected[fid] = risk
     if found != set(expected_ids):
         raise CandidateReviewError("candidate preflight missing finding IDs")
     return rejected

@@ -5288,7 +5288,7 @@ def verified_editorial_candidate(slug: str, chapter: dict) -> str | None:
         raise JobError("cannot safely admit operator-approved editorial candidate") from exc
 
 
-def record_quality_patch_rejection(status, chapter, record, patch, reason):
+def record_quality_patch_rejection(status, chapter, record, patch, reason, *, risk=None):
     audit = status.setdefault("correction_regression_rejections", [])
     if not isinstance(audit, list):
         raise JobError("invalid candidate regression audit")
@@ -5296,6 +5296,10 @@ def record_quality_patch_rejection(status, chapter, record, patch, reason):
                   "finding_id": patch["finding_id"],
                   "patch_sha256": correction_regression.patch_fingerprint(patch),
                   "reason": reason, "at": clock()})
+    if risk is not None:
+        if risk not in candidate_review.RISKS - {"none"}:
+            raise JobError("invalid candidate risk")
+        audit[-1]["risk"] = risk
     status["correction_regression_rejections"] = audit[-64:]
 
 
@@ -5384,13 +5388,14 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
     checkpoint(job_id, status, slug)
     answer = complete_for_job(status, "REVIEWER", system, user)
     try:
-        rejected = candidate_review.parse_verdict(answer, [p["finding_id"] for p in selected])
+        rejected = candidate_review.parse_rejections(answer, [p["finding_id"] for p in selected])
     except candidate_review.CandidateReviewError as exc:
         raise ModelError("quality candidate check returned invalid evidence") from exc
     if rejected:
         for patch in selected:
             if patch["finding_id"] in rejected:
-                record_quality_patch_rejection(status, chapter, record, patch, "quality-candidate-veto")
+                record_quality_patch_rejection(status, chapter, record, patch, "quality-candidate-veto",
+                                               risk=rejected[patch["finding_id"]])
         # All receipts bind the old combined candidate. Even the siblings that
         # passed must be independently checked again against the reduced set.
         status.pop("quality_candidate_gate", None)

@@ -264,3 +264,21 @@ class CandidateContextBudgetTests(unittest.TestCase):
             candidate_review.build_prompt([case], "Reviewer")
         with self.assertRaises(candidate_review.CandidateReviewError):
             candidate_review.build_prompt([{"finding_id": "one"}], "a" * 80_000)
+
+
+class CandidateDeletionTests(unittest.TestCase):
+    def test_canonical_deletion_is_independently_checked(self):
+        source, target = "Seven coins.", "Семь монет и письмо."
+        finding = {"id": "extra", "category": "addition", "severity": "major",
+                   "source_anchor": {"quote": "Seven coins.", "occurrence": 0}}
+        p = {"finding_id": "extra", "operation": "replace",
+             "target_anchor": {"quote": " и письмо", "occurrence": 0}, "replacement": ""}
+        cases = candidate_review.cases(source, target, [p], [finding],
+            position=auto._anchor_position, combined_patches=[p])
+        self.assertEqual(cases[0]["candidate_translation_excerpt"], "Семь монет.")
+        self.assertEqual(auto.apply_correction_patches(target, [p]), "Семь монет.")
+        with self.assertRaises(candidate_review.CandidateReviewError):
+            candidate_review.cases(source, target, [dict(p, operation="insert_before")],
+                [finding], position=auto._anchor_position)
+        self.assertEqual(candidate_review.parse_rejections(answer(("extra", "reject")), ["extra"]),
+                         {"extra": "meaning"})
