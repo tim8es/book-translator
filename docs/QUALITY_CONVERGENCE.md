@@ -102,3 +102,15 @@ review, correction, attention and promotion gates remain authoritative.
 The agent sees only technical sizes and budgets, never literary passages.
 This capability does not make a model an unrestricted repository operator.
 Keep the option off in production until live qualification on long units.
+
+## Qualification route configuration evidence
+
+The qualification report records whether each primary role is configured, the
+number of distinct configured primary route strings, and whether each fallback
+is absent, identical to its primary, or separately configured. It never records
+route names, provider URLs or credentials. Distinct aliases alone do not prove
+independent underlying models or successful failover. The existing final audit
+uses the reviewer role in a fresh invocation; the report makes explicit that
+this is not evidence of a different provider. A live fallback exercise is a
+separate requirement. These diagnostics do not change routing, model budgets,
+qualification outcomes, or production configuration.

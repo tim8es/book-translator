@@ -146,3 +146,40 @@ class IndependentAuditTests(unittest.TestCase):
             self.assertEqual(report["unit_audits"][4]["translation_sha256"],
                              hashlib.sha256(b"target 5").hexdigest())
             self.assertNotIn("target 5", json.dumps(report))
+
+
+class RouteConfigurationTests(unittest.TestCase):
+    def test_missing_and_identical_routes_are_not_fallbacks(self):
+        with patch.dict(os.environ, {
+            "OMNIROUTE_TRANSLATOR_MODEL": "private-route-a",
+            "OMNIROUTE_TRANSLATOR_FALLBACK_MODEL": " private-route-a ",
+            "OMNIROUTE_REVIEWER_MODEL": "private-route-a",
+            "OMNIROUTE_CORRECTOR_FALLBACK_MODEL": "private-route-b",
+        }, clear=True):
+            report = qual.route_configuration()
+        self.assertEqual(report["distinct_primary_route_count"], 1)
+        self.assertEqual(report["fallbacks"], {
+            "translator": "same_route", "reviewer": "not_configured",
+            "corrector": "primary_missing"})
+        self.assertTrue(report["audit_uses_same_configured_role"])
+        self.assertFalse(report["provider_independence_verified"])
+        self.assertFalse(report["fallback_live_execution_verified"])
+        self.assertNotIn("private-route", str(report))
+
+    def test_distinct_alias_is_configuration_only(self):
+        with patch.dict(os.environ, {
+            "OMNIROUTE_TRANSLATOR_MODEL": "primary",
+            "OMNIROUTE_TRANSLATOR_FALLBACK_MODEL": "secondary",
+            "OMNIROUTE_REVIEWER_MODEL": "primary",
+            "OMNIROUTE_CORRECTOR_MODEL": "primary",
+            "OMNIROUTE_ORCHESTRATOR_MODEL": "third",
+            "OMNIROUTE_API_KEY": "never-report-this-secret",
+        }, clear=True):
+            report = qual.route_configuration()
+        self.assertEqual(report["distinct_primary_route_count"], 2)
+        self.assertTrue(all(report["primary_configured"].values()))
+        self.assertEqual(report["fallbacks"]["translator"], "distinct_route_configured")
+        self.assertFalse(report["provider_independence_verified"])
+        self.assertFalse(report["fallback_live_execution_verified"])
+        self.assertNotIn("never-report-this-secret", str(report))
+        self.assertNotIn("secondary", str(report))

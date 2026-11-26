@@ -241,6 +241,40 @@ def audit_units(complete, book, chapters, report):
     return all(all(unit["checks"].values()) for unit in report["unit_audits"])
 
 
+def route_configuration():
+    """Report configured route diversity without exposing provider identifiers.
+
+    Distinct aliases do not establish distinct underlying providers/models or
+    successful failover. This is configuration evidence, not a live probe.
+    """
+    roles = ("TRANSLATOR", "REVIEWER", "CORRECTOR", "ORCHESTRATOR")
+    routes = {role: os.environ.get(f"OMNIROUTE_{role}_MODEL", "").strip()
+              for role in roles}
+    configured = {role.lower(): bool(route) for role, route in routes.items()}
+    fallbacks = {}
+    for role in roles[:3]:
+        primary = routes[role]
+        backup = os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()
+        if not primary:
+            state = "primary_missing"
+        elif not backup:
+            state = "not_configured"
+        elif backup == primary:
+            state = "same_route"
+        else:
+            state = "distinct_route_configured"
+        fallbacks[role.lower()] = state
+    return {
+        "primary_configured": configured,
+        "distinct_primary_route_count": len(set(routes.values()) - {""}),
+        "fallbacks": fallbacks,
+        "audit_role": "reviewer",
+        "audit_uses_same_configured_role": True,
+        "provider_independence_verified": False,
+        "fallback_live_execution_verified": False,
+    }
+
+
 def qualify(revision, output, profile="smoke"):
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or git(PUBLIC, "rev-parse", "HEAD") != revision:
         raise RuntimeError("qualification requires exact checked-out revision")
@@ -252,7 +286,8 @@ def qualify(revision, output, profile="smoke"):
         BOOK_TRANSLATOR_CORRECTION_FEEDBACK="on", BOOK_TRANSLATOR_MARKER_ALIGNMENT="on")
     report = {"schema_version": 1, "workflow_revision": revision,
               "fixture": "authored-two-unit-known-defects" if profile == "smoke" else "authored-six-unit-known-defects",
-              "profile": profile, "model_call_limit": call_limit, "qualification": "failed"}
+              "profile": profile, "model_call_limit": call_limit, "qualification": "failed",
+              "route_configuration": route_configuration()}
     start = time.monotonic()
     try:
         with tempfile.TemporaryDirectory(prefix="quality-pilot-") as tmp:
