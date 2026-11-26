@@ -4168,6 +4168,30 @@ GLOSSARY_POLICY = (
 )
 
 
+def dialogue_boundary_guidance(target_language: str) -> str:
+    """Target-language execution guidance; never rewrites an accepted artifact."""
+    if not isinstance(target_language, str) or target_language.strip().lower().split("-")[0] != "ru":
+        return ""
+    return (
+        "\n\nRUSSIAN DIRECT-SPEECH BOUNDARIES: Preserve which words are spoken "
+        "and which belong to the narrator. A dialogue paragraph introduced by "
+        "an em dash must not silently continue into a separate narrator sentence "
+        "after the final spoken sentence. For a source paragraph containing both "
+        "speech and later independent narration, use a correctly closed inline "
+        "Russian quotation («…») if needed to preserve that paragraph. Example "
+        "(illustrative only): «Я приду», — ответил он. Она закрыла окно. "
+        "Alternatively, when paragraph changes are permitted by the pinned "
+        "contract and protected formatting, separate independent narration into "
+        "its own paragraph. Do not split source-owned EPUB blocks, change "
+        "markers, or impose quotation marks on every dialogue paragraph. "
+        "Distinguish speech tags from independent narrator actions. A reviewer "
+        "must report a concrete ambiguous speech/narration boundary as an "
+        "anchored style or structure defect, not PASS or a mere preference. "
+        "A corrector fixes only the implicated boundary without changing meaning, "
+        "speaker, or unrelated text. Preserve intentional source ambiguity."
+    )
+
+
 def context(engine: Path, slug: str, chapter: dict, role: str,
             pending_style: list[dict] | None = None, *,
             force_full_review: bool = False,
@@ -4313,6 +4337,7 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
     book_context = {key: metadata[key] for key in
                     ("title", "author", "source_language", "target_language")
                     if isinstance(metadata.get(key), str)}
+    system += dialogue_boundary_guidance(book_context.get("target_language", ""))
     user = (
         f"TASK SCOPE: This call handles extracted source unit {index + 1} of "
         f"{len(chapters)}. This is an extraction-unit count, not a claim about the "
@@ -4805,6 +4830,7 @@ def review_chunk_prompt(engine: Path, slug: str, chapter: dict, source: str,
         "a concrete unresolved source-grounded concern. "
         "Do not change accepted text or fabricate checks.")
     system += "\n\n" + GLOSSARY_POLICY
+    system += dialogue_boundary_guidance(bibliographic.get("target_language", ""))
     user = (
         "BOUND REVIEW PART " + chunk["id"] + " OF " + str(total) +
         ". Only this source CORE is assigned; the orchestrator verifies exact "
@@ -5348,6 +5374,8 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
     selected = [p for p in patches if p["finding_id"] not in approved][:4]
     findings = [f for f in record["quality_report"]["findings"] if not f["resolved"]]
     instructions, paths = role_contracts(engine, "reviewer")
+    instructions += dialogue_boundary_guidance(
+        read_json(ROOT / "books" / slug / "metadata.json").get("target_language", ""))
     while selected:
         try:
             cases = candidate_review.cases(source, translation, selected, findings,
