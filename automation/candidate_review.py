@@ -14,7 +14,8 @@ CHECKS = ("coverage", "meaning", "modality", "referents",
 RISKS = {"none", "meaning", "ambiguity", "dialogue",
          "names", "structure", "omission", "other"}
 MAX_CASES = 24
-MAX_PROMPT_CHARS = 38_000
+MAX_EVIDENCE_CHARS = 38_000
+MAX_PROMPT_CHARS = 80_000
 
 
 class CandidateReviewError(ValueError):
@@ -140,7 +141,7 @@ def build_prompt(candidates: list[dict], reviewer_contract: str, *, require_reso
         user += (" Additionally approve only if the proposed combined text actually resolves "
                  "the cited defect, not merely if it avoids regressions. Reject no-effect edits "
                  "and interactions with adjacent patches using risk=other if necessary.")
-    if len(system) + len(user) > MAX_PROMPT_CHARS:
+    if len(user) > MAX_EVIDENCE_CHARS or len(system) + len(user) > MAX_PROMPT_CHARS:
         raise CandidateReviewError("candidate preflight context exceeds safe limit")
     return system, user
 
