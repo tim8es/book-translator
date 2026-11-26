@@ -37,3 +37,23 @@ def parse(answer: str, allowed: set[str] = STRATEGIES) -> str:
             or value["strategy"] not in allowed):
         raise ValueError("unsupported orchestrator advice")
     return value["strategy"]
+
+
+REVIEW_STRATEGIES = {"full_direct", "aligned_chunks"}
+
+
+def review_prompt(rules: str, *, source_chars: int, target_chars: int,
+                  chunk_count: int, remaining_calls: int) -> tuple[str, str]:
+    """Only two prevalidated full-coverage strategies; no literary text."""
+    system = rules + (
+        "\nChoose the execution plan for the next independent complete review. "
+        "Both options compare all source and target passages. Prefer direct "
+        "review for coherent manageable units, aligned chunks for long or "
+        "complex units. Never change the review obligation, choose a book, "
+        "modify state, grant PASS or spend extra calls yourself. Return JSON "
+        'with exactly one key "strategy": "full_direct" or "aligned_chunks".')
+    return system, json.dumps({"source_chars": source_chars,
+                               "target_chars": target_chars,
+                               "aligned_chunks": chunk_count,
+                               "remaining_calls": remaining_calls,
+                               "allowed_strategies": sorted(REVIEW_STRATEGIES)})

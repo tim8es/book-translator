@@ -5549,6 +5549,92 @@ def arbitrate_quality_review(job_id, slug, status, engine, chapter, owned, previ
     return new_outcome, new_report
 
 
+def review_orchestrator_strategy(job_id: str, slug: str, status: dict,
+                                 engine: Path, chapter: dict, previous: dict | None,
+                                 source: str, target: str) -> str:
+    """Choose between already admissible full-review plans, once per artifact pair.
+
+    Optional advice is never a promotion, canonical dispatch, or claim authority.
+    A reserved call interrupted before its result is stored falls back to direct
+    review instead of silently spending another model call.
+    """
+    fallback = "full_direct"
+    if (os.environ.get("BOOK_TRANSLATOR_AGENT_REVIEW_PLANNING") != "on"
+            or os.environ.get("BOOK_TRANSLATOR_INCREMENTAL_REVIEW") != "on"
+            or not os.environ.get("OMNIROUTE_ORCHESTRATOR_MODEL", "").strip()):
+        return fallback
+    unit = chapter["unit_id"]
+    if not quality_controller.supported(engine):
+        return fallback
+    binding = {"source_sha256": review_chunks.sha(source),
+               "translation_sha256": review_chunks.sha(target),
+               "workflow_revision": status["workflow_revision"],
+               "previous_record_id": previous["record_id"] if previous else None}
+    accepted = chapter.get("translation_acceptance")
+    if (not isinstance(accepted, dict)
+            or any(accepted.get(k) != binding[k]
+                   for k in ("source_sha256", "translation_sha256"))):
+        return fallback
+    # Small units, mandatory partitioning, and staged review evidence are not
+    # discretionary decisions. Neither a model nor a stale cache can override.
+    if (len(source) < review_chunks.TARGET_CHARS
+            or len(source) > MAX_DIRECT_REVIEW_CHARS
+            or review_chunk_stage_path(slug, unit).exists()
+            or quality_stage_path(slug, unit).exists()):
+        return fallback
+    # An editorial-only focused review has its own explicit canonical rules.
+    if previous and focused_review_context(slug, chapter, previous, source, target) is not None:
+        return fallback
+    try:
+        plan = review_chunks.plan_aligned(source, target, stable=True)
+        review_chunks.validate_plan(plan, source, target)
+    except ValueError:
+        return fallback
+    chunks = len(plan["chunks"])
+    if not 2 <= chunks <= 4:
+        return fallback
+    count = status.get("model_calls_started", 0)
+    if type(count) is not int or count < 0:
+        raise JobError("invalid model counter")
+    decisions = status.setdefault("review_orchestrator_decisions", {})
+    if not isinstance(decisions, dict):
+        raise JobError("invalid review orchestration checkpoint")
+    old = decisions.get(unit)
+    if isinstance(old, dict) and old.get("binding") == binding:
+        strategy = old.get("strategy")
+        if old.get("outcome") == "accepted" and strategy in agent_orchestrator.REVIEW_STRATEGIES:
+            if strategy != "aligned_chunks" or count + chunks <= model_call_limit():
+                return strategy
+        return fallback
+    remaining = model_call_limit() - count
+    if remaining < chunks + 1:
+        return fallback
+    rules, _ = role_contracts(engine, "orchestrator")
+    system, user = agent_orchestrator.review_prompt(rules, source_chars=len(source),
+        target_chars=len(target), chunk_count=chunks, remaining_calls=remaining - 1)
+    entry = {"binding": binding, "strategy": fallback, "outcome": "reserved",
+             "chunk_count": chunks}
+    decisions[unit] = entry
+    status["model_calls_started"] = count + 1
+    status["phase"] = "review-orchestration-reserved"
+    checkpoint(job_id, status, slug)
+    started = time.monotonic()
+    try:
+        answer = complete("ORCHESTRATOR", system, user)
+        strategy = agent_orchestrator.parse(answer, agent_orchestrator.REVIEW_STRATEGIES)
+        outcome = "accepted"
+    except (ModelError, ValueError):
+        strategy, outcome = fallback, "fallback"
+    duration = max(0, round((time.monotonic() - started) * 1000))
+    entry.update(strategy=strategy, outcome=outcome, duration_ms=duration)
+    execution_metrics.provider(status, {"role": "orchestrator",
+        "request_chars": len(system) + len(user), "duration_ms": duration,
+        "outcome": "response" if outcome == "accepted" else "advice_error"})
+    status["phase"] = "review-orchestration-recorded"
+    checkpoint(job_id, status, slug)
+    return strategy
+
+
 def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
     active = status["active"]
     _, _, chapters = chapter_data(slug)
@@ -5691,6 +5777,10 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
                                or (coherent_batches.enabled() and len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS)
                                or (len(source) <= MAX_DIRECT_REVIEW_CHARS
                                    and should_chunk_review(source, candidate_target, scoped_count))))
+            if (not chunked_review and candidate_target is not None
+                    and review_orchestrator_strategy(job_id, slug, status, engine,
+                        chapter, previous_record, source, candidate_target) == "aligned_chunks"):
+                chunked_review = True
         if (role == "reviewer" and not chunked_review
                 and len(source) <= MAX_DIRECT_REVIEW_CHARS
                 and previous_quality.get("evidence_version") == 2 and not force_full_review):
