@@ -93,6 +93,77 @@ def require_no_new_repetitions(before: str, candidate: str) -> None:
             "count": len(evidence), "examples": evidence[:4]})
 
 
+def source_aligned_supported(engine) -> bool:
+    """Only an explicitly opted-in pinned workflow may use this guard."""
+    return (engine / "docs/SOURCE_ALIGNED_REPETITION.md").is_file()
+
+
+def require_source_supported_repetitions(source: str, before: str, candidate: str) -> None:
+    """Permit only source-supported cross-block repeats to reach literary review.
+
+    Exact source-owned block alignment is mandatory. Every new within-block
+    repeat remains blocked. Across blocks, identical candidate phrases may
+    recur once per block only if all corresponding source blocks have a
+    common exact five-word phrase. This is a structural eligibility check,
+    not cross-language semantic proof: independent preflight AND full literary
+    review remain mandatory. No raw source or target phrases enter evidence.
+    """
+    from review_chunks import BLOCK_MARKER
+
+    def split(text):
+        matches = list(BLOCK_MARKER.finditer(text))
+        return ([m.group(1) for m in matches],
+                text[:matches[0].start()] if matches else text,
+                [text[m.end():matches[i + 1].start() if i + 1 < len(matches) else len(text)]
+                 for i, m in enumerate(matches)])
+
+    si, sp, sb = split(source)
+    bi, bp, bb = split(before)
+    ci, cp, cb = split(candidate)
+    if (not 2 <= len(si) <= 128 or si != bi or si != ci or len(si) != len(set(si))
+            or bp != cp or max(len(source), len(before), len(candidate)) > 250_000):
+        require_no_new_repetitions(before, candidate)
+        return
+    # Protected-marker sequence is independently verified by the runner.
+    # Do not count marker identifiers as words, or ngrams crossing blocks.
+    for old, new in zip(bb, cb):
+        require_no_new_repetitions(old, new)
+    source_words = [_tokens(block) for block in sb]
+    old_words = [_tokens(block) for block in bb]
+    new_words = [_tokens(block) for block in cb]
+    source_windows = [set(_windows(words, 5)) for words in source_words]
+    for width in range(5, 13):
+        old_counts = Counter()
+        new_counts = Counter()
+        locations = {}
+        for i, (old, new) in enumerate(zip(old_words, new_words)):
+            old_counts.update(_windows(old, width))
+            counts = _windows(new, width)
+            new_counts.update(counts)
+            for phrase, count in counts.items():
+                locations.setdefault(phrase, []).append((i, count))
+        for phrase, count in new_counts.items():
+            if count < 2 or count <= old_counts[phrase]:
+                continue
+            blocks = locations[phrase]
+            common = set(source_windows[blocks[0][0]])
+            for i, _ in blocks[1:]:
+                common.intersection_update(source_windows[i])
+            if len(blocks) < 2 or any(n != 1 for _, n in blocks) or not common:
+                raise CorrectionRegression("new-duplicated-phrase", {
+                    "count": 1, "examples": [{"tokens": width,
+                        "previous": old_counts[phrase], "candidate": count,
+                        "adjacent": False}]})
+
+
+def require_candidate_repetitions(source: str, before: str, candidate: str, *,
+                                  source_aligned: bool = False) -> None:
+    if source_aligned:
+        require_source_supported_repetitions(source, before, candidate)
+    else:
+        require_no_new_repetitions(before, candidate)
+
+
 def patch_fingerprint(patch: dict) -> str:
     return hashlib.sha256(json.dumps(
         patch, ensure_ascii=False, sort_keys=True,

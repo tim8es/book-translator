@@ -2620,7 +2620,7 @@ def correction_stage_path(slug: str, unit_id: str) -> Path:
 
 def load_correction_stage(slug: str, chapter: dict, record: dict,
                           status: dict, source: str, translation: str,
-                          unresolved: list[dict]) -> tuple[Path, dict]:
+                          unresolved: list[dict], *, source_aligned: bool = False) -> tuple[Path, dict]:
     """Load only a stage bound to unchanged reviewer evidence and exact bytes."""
     path = correction_stage_path(slug, chapter["unit_id"])
     expected = {
@@ -2687,8 +2687,8 @@ def load_correction_stage(slug: str, chapter: dict, record: dict,
     staged_candidate = apply_correction_patches(translation, verified)
     check_markers(source, staged_candidate)
     try:
-        correction_regression.require_no_new_repetitions(
-            translation, staged_candidate)
+        correction_regression.require_candidate_repetitions(
+            source, translation, staged_candidate, source_aligned=source_aligned)
     except correction_regression.CorrectionRegression as exc:
         raise JobError("staged correction has a repeated-text regression") from exc
     return path, stage
@@ -2906,7 +2906,8 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
         value = quality_block_repair.apply(plan, source, translation, record,
                                             replacement, position=_anchor_position)
         check_markers(source, value)
-        correction_regression.require_no_new_repetitions(translation, value)
+        correction_regression.require_candidate_repetitions(source, translation, value,
+            source_aligned=correction_regression.source_aligned_supported(engine) and quality_controller.supported(engine))
         return value
     def reserve(phase, role, system, user):
         count = status.get("model_calls_started", 0)
@@ -3059,8 +3060,11 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             chapter, record, historical_ledger, source, translation, unresolved)
         if handled:
             return result
+    source_aligned = (correction_regression.source_aligned_supported(engine)
+                      and quality_controller.supported(engine))
     stage_path, stage = load_correction_stage(slug, chapter, record, status,
-                                              source, translation, unresolved)
+                                              source, translation, unresolved,
+                                              source_aligned=source_aligned)
     already_staged = {patch["finding_id"] for patch in stage["patches"]}
     continue_batches = (execution_scheduler.continue_corrections()
                         or quality_controller.supported(engine))
@@ -3214,7 +3218,7 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             # of its siblings is responsible. Retrying the first single item
             # returns a useful partial edit; remaining items stay pending.
             focused = (selected[:1] if code in {
-                "invalid_replacement", "empty_insertion", "invalid_fields",
+                "missing_patches", "invalid_replacement", "empty_insertion", "invalid_fields",
                 "wrong_anchor", "invalid_anchor", "wrong_operation"}
                        else selected)
             repair_system, repair_user, _ = context(
@@ -3283,8 +3287,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
                 conflicting.append(patch["finding_id"])
                 continue
             try:
-                correction_regression.require_no_new_repetitions(
-                    translation, candidate)
+                correction_regression.require_candidate_repetitions(
+                    source, translation, candidate, source_aligned=source_aligned)
             except correction_regression.CorrectionRegression as exc:
                 # Do not persist the candidate, its text, or its source excerpt.
                 # Persist a bounded hashed rejection to prevent identical retry.
@@ -3378,7 +3382,8 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
     translated = apply_correction_patches(translation, stage["patches"])
     check_markers(source, translated)
     try:
-        correction_regression.require_no_new_repetitions(translation, translated)
+        correction_regression.require_candidate_repetitions(
+            source, translation, translated, source_aligned=source_aligned)
     except correction_regression.CorrectionRegression as exc:
         # Do not leave a live claim stuck on an uncaught guard exception.
         raise ModelError("final correction candidate introduces duplicated text") from exc
@@ -4525,6 +4530,20 @@ def context(engine: Path, slug: str, chapter: dict, role: str,
             "source-grounded discrepancy with its own precise current anchors, "
             "rather than repeatedly reporting only the first occurrence."
         )
+        if correction_regression.source_aligned_supported(engine) and quality_controller.supported(engine):
+            user += (
+                " ATOMIC CORRECTABLE FINDINGS: Each new finding describes exactly one "
+                "local defect, with source and target anchors containing the actual "
+                "offending words (and only enough nearby words for uniqueness). "
+                "Never anchor an issue to the start of an unrelated sentence or "
+                "group several noncontiguous paragraphs into one finding. For recurring "
+                "defects, use distinct IDs and exact local anchors at each occurrence; "
+                "for a prior grouped finding recheck its exact anchored occurrence "
+                "and record any remaining distinct defects separately. Preserve every "
+                "required prior resolves link. Do not suppress real defects or return "
+                "PASS because a finding is difficult to express. Preserve deliberate "
+                "source repetition; do not mistake it for accidental duplicated text."
+            )
     else:
         if structural_segments is not None:
             user += (
@@ -5441,7 +5460,9 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
                                            stage_path, reason="independent-veto")
             return False
         stage, validated = load_correction_stage(slug, chapter, record, status,
-                                                 source, translation, findings)
+                                                 source, translation, findings,
+                                                 source_aligned=correction_regression.source_aligned_supported(engine)
+                                                 and quality_controller.supported(engine))
         if stage != stage_path or validated["patches"] != patches:
             raise JobError("candidate veto stage identity changed")
         isolated = execution_scheduler.isolated_findings(status, chapter, record, findings)

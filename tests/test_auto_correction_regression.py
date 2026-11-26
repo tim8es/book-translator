@@ -47,6 +47,24 @@ class PureCorrectionRegressionTests(unittest.TestCase):
         guard.require_no_new_repetitions(initial, "Я вижу мост и реку.")
         guard.require_no_new_repetitions("Река шумела.", "Река слегка шумела.")
 
+
+    def test_source_owned_cross_block_repetition_can_reach_independent_review(self):
+        source = "<!-- bt-block:1 -->The light on the water was clear.\n<!-- bt-block:2 -->The light on the water was clear."
+        before = "<!-- bt-block:1 -->Свет на воде был необычайно ясным.\n<!-- bt-block:2 -->Отблеск на реке казался прозрачным."
+        after = before.replace("Отблеск на реке казался прозрачным.", "Свет на воде был необычайно ясным.")
+        with self.assertRaises(guard.CorrectionRegression):
+            guard.require_no_new_repetitions(before, after)
+        guard.require_source_supported_repetitions(source, before, after)
+        with self.assertRaises(guard.CorrectionRegression):
+            guard.require_source_supported_repetitions(
+                source, before, after + " Свет на воде был необычайно ясным.")
+        unsupported = source.replace("<!-- bt-block:2 -->The light on the water was clear.",
+                                     "<!-- bt-block:2 -->She quietly opened a wooden door.")
+        with self.assertRaises(guard.CorrectionRegression):
+            guard.require_source_supported_repetitions(unsupported, before, after)
+        with self.assertRaises(guard.CorrectionRegression):
+            guard.require_source_supported_repetitions(source, before, after.replace("bt-block:2", "bt-block:3"))
+
     def test_stable_patch_fingerprint_is_content_free(self):
         patch_value = {"finding_id": "x", "replacement": "секретный фрагмент"}
         digest = guard.patch_fingerprint(patch_value)
