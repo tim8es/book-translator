@@ -2827,6 +2827,7 @@ def correction_orchestrator_strategy(job_id: str, slug: str, status: dict,
     status["phase"] = "orchestrator-advice-reserved"
     checkpoint(job_id, status, slug)
     started = time.monotonic()
+    answer = None
     try:
         answer = complete("ORCHESTRATOR", system, user)
         strategy = agent_orchestrator.parse(answer)
@@ -2838,7 +2839,10 @@ def correction_orchestrator_strategy(job_id: str, slug: str, status: dict,
         {"strategy": strategy, "outcome": outcome, "duration_ms": duration})
     execution_metrics.provider(status, {"role": "orchestrator",
         "request_chars": len(system) + len(user), "duration_ms": duration,
-        "outcome": "response" if outcome == "accepted" else "advice_error"})
+        "outcome": "response" if outcome == "accepted" else "advice_error",
+        **{field: getattr(answer, "diagnostics", {}).get(field)
+           for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+           if isinstance(getattr(answer, "diagnostics", None), dict)}})
     status["phase"] = "orchestrator-advice-recorded"
     checkpoint(job_id, status, slug)
     return strategy
@@ -3693,6 +3697,7 @@ def queue_orchestrator_strategy(slug: str, status: dict, chapter: dict,
     status["phase"] = "queue-advice-reserved"
     checkpoint(status["job_id"], status, slug)
     started = time.monotonic()
+    answer = None
     try:
         answer = complete("ORCHESTRATOR", system, user)
         strategy = agent_orchestrator.parse(answer, agent_orchestrator.QUEUE_STRATEGIES)
@@ -3703,7 +3708,10 @@ def queue_orchestrator_strategy(slug: str, status: dict, chapter: dict,
     decisions[unit].update({"strategy": strategy, "outcome": outcome, "duration_ms": duration})
     execution_metrics.provider(status, {"role": "orchestrator",
         "request_chars": len(system) + len(user), "duration_ms": duration,
-        "outcome": "response" if outcome == "accepted" else "advice_error"})
+        "outcome": "response" if outcome == "accepted" else "advice_error",
+        **{field: getattr(answer, "diagnostics", {}).get(field)
+           for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+           if isinstance(getattr(answer, "diagnostics", None), dict)}})
     status["phase"] = "queue-advice-recorded"
     checkpoint(status["job_id"], status, slug)
     return strategy
@@ -5725,6 +5733,7 @@ def review_orchestrator_strategy(job_id: str, slug: str, status: dict,
     status["phase"] = "review-orchestration-reserved"
     checkpoint(job_id, status, slug)
     started = time.monotonic()
+    answer = None
     try:
         answer = complete("ORCHESTRATOR", system, user)
         strategy = agent_orchestrator.parse(answer, agent_orchestrator.REVIEW_STRATEGIES)
@@ -5735,7 +5744,10 @@ def review_orchestrator_strategy(job_id: str, slug: str, status: dict,
     entry.update(strategy=strategy, outcome=outcome, duration_ms=duration)
     execution_metrics.provider(status, {"role": "orchestrator",
         "request_chars": len(system) + len(user), "duration_ms": duration,
-        "outcome": "response" if outcome == "accepted" else "advice_error"})
+        "outcome": "response" if outcome == "accepted" else "advice_error",
+        **{field: getattr(answer, "diagnostics", {}).get(field)
+           for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+           if isinstance(getattr(answer, "diagnostics", None), dict)}})
     status["phase"] = "review-orchestration-recorded"
     checkpoint(job_id, status, slug)
     return strategy
