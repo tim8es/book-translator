@@ -194,8 +194,8 @@ def diagnostic(status):
     return result
 
 
-def redact_fixture_error(message, env):
-    """Only synthetic qualification errors; no raw provider responses or traceback."""
+def redact_fixture_excerpt(message, env):
+    """Redact sensitive configuration from internally authored fixture diagnostics."""
     text = str(message)
     sensitive = []
     for key, value in env.items():
@@ -208,7 +208,12 @@ def redact_fixture_error(message, env):
     text = re.sub(r"https?://\S+", "[redacted-url]", text)
     text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", text)
     text = re.sub(r"\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_\-]+", "[redacted-token]", text)
-    return " ".join(text.split())[:350]
+    return text
+
+
+def redact_fixture_error(message, env):
+    """Only synthetic qualification errors; no raw provider responses or traceback."""
+    return " ".join(redact_fixture_excerpt(message, env).split())[:350]
 
 
 def collect_fixture_error(report, status, checkpoint):

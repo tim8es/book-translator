@@ -118,3 +118,17 @@ findings and candidate rejection categories before its temporary state is
 deleted. No additional calls are spent on diagnostics, and an incomplete
 Auto result still cannot enter blind judging. These diagnostics must not
 be mistaken for independent literary evidence or a production rollout.
+
+
+The second live pair completed the protocol but Auto passed seven of ten
+consensus checks, failed literary style and dialogue in unit one, and had
+one fidelity disagreement. The exact temporary Auto text was not retained,
+so no particular wording defect can be established retrospectively.
+For this exact synthetic fixture only, the private paired report now retains
+bounded, redacted source and both target excerpts for nonpassing units, with
+original hashes and redaction/truncation flags. The generic comparator remains
+content-free. No extra model calls or changes to judgment rules are required.
+Protocol completion is explicitly separated from both modes passing every
+criterion; neither implies production-wide quality equivalence. The optional
+short PASS confirmation also explicitly checks target-language prose and
+dialogue in the existing second reviewer call. It does not relax any gate.
