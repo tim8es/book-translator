@@ -241,9 +241,33 @@ def audit_units(complete, book, chapters, report):
     return all(all(unit["checks"].values()) for unit in report["unit_audits"])
 
 
+def qualify_routes(revision, output):
+    """Explicit bounded route check; no books, literary text or production writes."""
+    from omniroute import complete
+    from route_readiness import probe
+    os.environ["BOOK_TRANSLATOR_LLM_BACKEND"] = "pi"
+    report = {"schema_version": 1, "workflow_revision": revision,
+              "profile": "routes", "qualification": "failed"}
+    try:
+        probe(os.environ, complete, report)
+        if report["all_fallbacks_ready"]:
+            report["qualification"] = "passed"
+    except Exception as exc:
+        report["failure_type"] = type(exc).__name__
+    finally:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", "utf-8")
+        print(json.dumps(report, ensure_ascii=False))
+    return 0 if report["qualification"] == "passed" else 1
+
+
 def qualify(revision, output, profile="smoke"):
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or git(PUBLIC, "rev-parse", "HEAD") != revision:
         raise RuntimeError("qualification requires exact checked-out revision")
+    if profile == "routes":
+        return qualify_routes(revision, output)
+    if profile not in {"smoke", "extended"}:
+        raise ValueError("unknown qualification profile")
     expected_units = 2 if profile == "smoke" else 6
     call_limit = 36 if profile == "smoke" else 100
     os.environ.update(BOOK_TRANSLATOR_LLM_BACKEND="pi", OMNIROUTE_MODEL_CALL_LIMIT=str(call_limit),
@@ -327,6 +351,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--revision", required=True)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--profile", choices=("smoke", "extended"), default="smoke")
+    parser.add_argument("--profile", choices=("smoke", "extended", "routes"), default="smoke")
     args = parser.parse_args()
     raise SystemExit(qualify(args.revision, args.output.resolve(), args.profile))
