@@ -24,6 +24,75 @@ class PiTransportFailure(RuntimeError):
         self.code = code
 
 
+MAX_EVENT_CHARS = 64_000_000
+
+
+def parse_json_events(output: str) -> tuple[str, dict]:
+    """Extract one authoritative tool-free assistant message (Pi v1.6 JSONL).
+
+    Provider counts may be absent or default to zeros. Do not treat a
+    successful nonempty response with zero output tokens as measured usage.
+    Never expose raw event bodies, provider identifiers, or SDK cost guesses.
+    """
+    if len(output) > MAX_EVENT_CHARS:
+        raise PiTransportFailure("pi_oversize_event_stream")
+    records = []
+    starts = turns = 0
+    settled = False
+    for line in output.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            raise PiTransportFailure("pi_invalid_event_stream") from None
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise PiTransportFailure("pi_invalid_event_stream")
+        kind = event["type"]
+        if kind == "agent_start":
+            starts += 1
+        if kind == "turn_start":
+            turns += 1
+        if (kind.startswith(("tool_execution_", "auto_retry_", "compaction_", "summarization_retry_"))
+                or (kind == "agent_end" and event.get("willRetry") is True)):
+            raise PiTransportFailure("pi_unexpected_extra_work")
+        if kind == "message_end":
+            message = event.get("message")
+            if not isinstance(message, dict):
+                raise PiTransportFailure("pi_invalid_event_stream")
+            if message.get("role") == "assistant":
+                records.append(message)
+        if kind == "agent_settled":
+            if settled or event.get("aborted") is not False:
+                raise PiTransportFailure("pi_invalid_event_stream")
+            settled = True
+    if not settled or starts != 1 or turns != 1 or len(records) != 1:
+        raise PiTransportFailure("pi_unexpected_extra_work")
+    message = records[0]
+    if message.get("stopReason") != "stop":
+        raise PiTransportFailure("pi_incomplete_assistant_message")
+    content = message.get("content")
+    if not isinstance(content, list) or any(
+            not isinstance(block, dict) or block.get("type") != "text"
+            or not isinstance(block.get("text"), str) for block in content):
+        raise PiTransportFailure("pi_invalid_assistant_content")
+    answer = "".join(block["text"] for block in content).strip()
+    if not answer or len(answer) > MAX_OUTPUT_CHARS:
+        raise PiTransportFailure("pi_empty_or_oversize_output")
+    diagnostics = {"finish_reason": "stop", "response_format": "pi_prompt_json",
+                   "response_chars": len(answer), "provider_refusal": False}
+    usage = message.get("usage")
+    fields = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
+    if isinstance(usage, dict) and all(
+            type(usage.get(k)) is int and 0 <= usage[k] <= 1_000_000_000 for k in fields):
+        total = usage["totalTokens"]
+        prompt = usage["input"] + usage["cacheRead"] + usage["cacheWrite"]
+        if usage["output"] > 0 and total == prompt + usage["output"] and total <= 1_000_000_000:
+            diagnostics.update(prompt_tokens=prompt, completion_tokens=usage["output"],
+                               total_tokens=total)
+    return answer + "\n", diagnostics
+
+
 def _token_limit(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         value = int(os.environ.get(name, str(default)))
@@ -50,6 +119,9 @@ def complete(base: str, model: str, key: str, system: str, user: str, *, role: s
     max_tokens = _token_limit("PI_AGENT_MAX_TOKENS", 32768, 256, 131072)
     if max_tokens >= context_window:
         raise PiTransportFailure("pi_invalid_token_limits")
+    event_mode = os.environ.get("BOOK_TRANSLATOR_PI_USAGE_EVENTS", "off")
+    if event_mode not in {"off", "on"}:
+        raise PiTransportFailure("pi_invalid_configuration")
     timeout = 90 if role == "ORCHESTRATOR" else 840
     with tempfile.TemporaryDirectory(prefix="bt-pi-") as workspace:
         root = Path(workspace)
@@ -103,6 +175,8 @@ def complete(base: str, model: str, key: str, system: str, user: str, *, role: s
             "--provider", "book-omniroute", "--model", model,
             "--system-prompt", str(system_path),
         ]
+        if event_mode == "on":
+            command += ["--mode", "json"]
         try:
             result = subprocess.run(
                 command, cwd=root, env=env, input=user, capture_output=True,
@@ -115,6 +189,8 @@ def complete(base: str, model: str, key: str, system: str, user: str, *, role: s
         # Do not print raw stderr: it can contain a prompt, response or URL.
         if result.returncode != 0:
             raise PiTransportFailure("pi_nonzero_exit")
+        if event_mode == "on":
+            return parse_json_events(result.stdout)
         answer = result.stdout.strip()
         if not answer or len(answer) > MAX_OUTPUT_CHARS:
             raise PiTransportFailure("pi_empty_or_oversize_output")

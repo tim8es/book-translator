@@ -87,5 +87,56 @@ class PiBackendTests(unittest.TestCase):
                 omniroute.complete("REVIEWER", "rules", "source")
 
 
+    def event_stream(self, usage=None, *, reason="stop", extra=(), settled=True):
+        message = {"role": "assistant", "stopReason": reason,
+                   "content": [{"type": "text", "text": '{"ok":true}'}],
+                   "usage": usage, "model": "private-model-sentinel"}
+        events = [{"type": "session"}, {"type": "agent_start"}, {"type": "turn_start"},
+                  {"type": "message_end", "message": {"role": "user", "content": "secret-prompt"}},
+                  {"type": "message_end", "message": message}, *extra,
+                  {"type": "agent_end", "willRetry": False}]
+        if settled:
+            events.append({"type": "agent_settled", "aborted": False})
+        return "\n".join(json.dumps(e) for e in events) + "\n"
+
+    def test_json_mode_extracts_one_message_and_usage(self):
+        usage = {"input": 10, "output": 3, "cacheRead": 5, "cacheWrite": 2,
+                 "totalTokens": 20, "cost": {"total": 0}}
+        with patch.dict("os.environ", {"BOOK_TRANSLATOR_PI_USAGE_EVENTS": "on"}), \
+                patch("pi_backend.shutil.which", return_value="/bin/pi"), \
+                patch("pi_backend.subprocess.run", return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=self.event_stream(usage), stderr="")) as run:
+            answer, diagnostics = pi_backend.complete("https://test.invalid/v1", "model", "key",
+                                                       "rules", "user", role="REVIEWER")
+        self.assertIn("--mode", run.call_args.args[0])
+        self.assertIn("json", run.call_args.args[0])
+        self.assertEqual(answer, '{"ok":true}\n')
+        self.assertEqual(diagnostics["prompt_tokens"], 17)
+        self.assertEqual(diagnostics["completion_tokens"], 3)
+        self.assertEqual(diagnostics["total_tokens"], 20)
+        self.assertNotIn("cost", diagnostics)
+        self.assertNotIn("private-model-sentinel", str(diagnostics))
+        self.assertNotIn("secret-prompt", str(diagnostics))
+
+    def test_missing_zero_or_inconsistent_usage_remains_unknown(self):
+        for usage in (None, {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                             "totalTokens": 0},
+                      {"input": 10, "output": 3, "cacheRead": 0, "cacheWrite": 0,
+                       "totalTokens": 99}):
+            _, diagnostics = pi_backend.parse_json_events(self.event_stream(usage))
+            self.assertNotIn("total_tokens", diagnostics)
+
+    def test_extra_turn_retry_and_incomplete_stream_fail_closed(self):
+        for output in (self.event_stream(extra=[{"type": "turn_start"}]),
+                       self.event_stream(extra=[{"type": "auto_retry_start"}]),
+                       self.event_stream(extra=[{"type": "tool_execution_start"}]),
+                       self.event_stream(settled=False),
+                       self.event_stream(reason="length"),
+                       "not-json-private-sentinel"):
+            with self.assertRaises(pi_backend.PiTransportFailure) as caught:
+                pi_backend.parse_json_events(output)
+            self.assertNotIn("private-sentinel", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

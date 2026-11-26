@@ -15,3 +15,13 @@ transport and compare measured usage with OmniRoute/provider billing. Only
 then compare cost per accepted source unit on matched quality fixtures,
 including retries and judging separately. No production config or literary
 revision is changed by this qualification report.
+
+## Experimental Pi JSONL transport
+
+With BOOK_TRANSLATOR_PI_USAGE_EVENTS=on, the adapter consumes the pinned Pi
+v1.6.0 JSON event protocol rather than plain print output. It accepts only one
+settled tool-free assistant turn, extracts its final text, and exposes consistent
+positive-output usage counters (prompt includes cache reads/writes). Missing,
+zero-filled or inconsistent usage remains unknown. SDK cost is not an invoice.
+The default remains off; qualify on a synthetic fixture before enabling it.
+See https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/json.md.
