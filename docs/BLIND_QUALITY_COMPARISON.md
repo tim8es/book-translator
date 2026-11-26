@@ -151,3 +151,14 @@ the ordinary CLI remains content-free. A valid quote does not prove the
 alleged defect. The judge prompt/schema changed, so comparisons to earlier
 runs must disclose that methodological change rather than claim a controlled
 improvement in translation quality.
+
+
+Fourth paired run (45860219834): 8/10 Auto checks, 10/10 ChatOps, no
+disagreements. Both anchored judges identified the same ambiguous Russian
+speech-to-narration boundary. The executor now supplies target-specific
+dialogue-boundary guidance in the existing translator, reviewer, corrector,
+and candidate-check contexts, including chunked review. It does not rewrite
+accepted text, require universal quotation styling, or split protected
+original-XHTML blocks. No additional model calls are mandated. A new live
+pair is required to test this targeted change; this is not an assertion
+that quality parity has already been achieved.

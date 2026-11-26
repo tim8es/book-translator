@@ -688,3 +688,38 @@ class LiteraryContextTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DialogueBoundaryGuidanceTests(unittest.TestCase):
+    def test_russian_guidance_is_target_specific_and_respects_protected_blocks(self):
+        for language in ("ru", "ru-RU", "RU"):
+            guidance = runner.dialogue_boundary_guidance(language)
+            self.assertIn("independent narrator", guidance)
+            self.assertIn("correctly closed inline", guidance)
+            self.assertIn("Do not split source-owned EPUB blocks", guidance)
+            self.assertIn("anchored style or structure defect", guidance)
+        for language in ("en", "fr", "", None):
+            self.assertEqual(runner.dialogue_boundary_guidance(language), "")
+
+    def test_real_role_prompts_include_dialogue_guidance_without_mutating_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = LiteraryContextTests().engine(root)
+            book = root / "books" / "test"
+            book.mkdir(parents=True)
+            source = "'I will come,' he said. She closed the window."
+            target = "— Я приду, — ответил он. Она закрыла окно."
+            (book / "source.md").write_text(source, encoding="utf-8")
+            (book / "target.md").write_text(target, encoding="utf-8")
+            (book / "metadata.json").write_text('{"target_language": "ru"}', encoding="utf-8")
+            (book / "glossary.md").write_text("# Glossary", encoding="utf-8")
+            (book / "style-guide.md").write_text("# Style", encoding="utf-8")
+            chapter = {"unit_id": "chapter-000001", "source_path": "source.md",
+                       "translation_path": "target.md", "status": "translated"}
+            with patch.object(runner, "ROOT", root), patch.object(
+                    runner, "chapter_data", return_value=({}, {}, [chapter])):
+                for role in ("translator", "reviewer"):
+                    system, user, _ = runner.context(engine, "test", chapter, role)
+                    self.assertIn("RUSSIAN DIRECT-SPEECH BOUNDARIES", system)
+                self.assertEqual((book / "target.md").read_text("utf-8"), target)
+                self.assertEqual((book / "source.md").read_text("utf-8"), source)
