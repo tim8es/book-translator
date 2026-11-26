@@ -123,3 +123,42 @@ class FailedPairedDiagnosticsTests(unittest.TestCase):
             (book / "t").write_text("Changed", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "accepted bytes mismatch"):
                 pair.failed_auto_evidence(root, status, {})
+
+
+class CompletedComparisonDiagnosticsTests(unittest.TestCase):
+    def test_nonpassing_samples_preserve_exact_hashes_without_extra_calls(self):
+        source = "He said no."
+        auto = "Он сказал нет. synthetic-secret"
+        chatops = "Он ответил: нет."
+        def artifact(text):
+            return {"text": text, "sha256": pair.export.sha(text.encode("utf-8"))}
+        original = artifact(source)
+        left, right = artifact(auto), artifact(chatops)
+        left["source_sha256"] = right["source_sha256"] = original["sha256"]
+        unit = {"unit_id": "chapter-000001", "source": original, "auto": left,
+                "chatops": right}
+        manifest = {"schema_version": 1, "target_language": "ru", "units": [unit]}
+        checks = dict.fromkeys(pair.CRITERIA, "pass")
+        row = {"unit_id": unit["unit_id"], "source_sha256": original["sha256"],
+               "candidate_sha256": {"auto": left["sha256"], "chatops": right["sha256"]},
+               "consensus": {"auto": dict(checks, dialogue="fail"), "chatops": checks}}
+        result = {"state": "complete", "units": [row]}
+        report = {}
+        with patch.dict(pair.os.environ, {"OMNIROUTE_API_KEY": "synthetic-secret"}):
+            pair.comparison_diagnostics(manifest, result, pair.FIXTURE_SHA256, report)
+        self.assertFalse(report["all_criteria_pass_both_modes"])
+        self.assertFalse(report["quality_equivalence_established"])
+        evidence = report["synthetic_comparison_samples"][0]["artifacts"]["auto"]
+        self.assertEqual(evidence["original_sha256"], left["sha256"])
+        self.assertTrue(evidence["redacted"])
+        self.assertNotIn("synthetic-secret", evidence["excerpt"])
+        row["consensus"]["auto"]["dialogue"] = "pass"
+        pair.comparison_diagnostics(manifest, result, pair.FIXTURE_SHA256, report)
+        self.assertTrue(report["all_criteria_pass_both_modes"])
+        self.assertEqual(report["synthetic_comparison_samples"], [])
+        self.assertFalse(report["quality_equivalence_established"])
+        with self.assertRaisesRegex(ValueError, "fixture identity"):
+            pair.comparison_diagnostics(manifest, result, "b"*64, {})
+        row["candidate_sha256"]["auto"] = "0"*64
+        with self.assertRaisesRegex(ValueError, "artifact mismatch"):
+            pair.comparison_diagnostics(manifest, result, pair.FIXTURE_SHA256, {})

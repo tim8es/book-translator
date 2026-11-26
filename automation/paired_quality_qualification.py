@@ -12,7 +12,7 @@ import time
 from uuid import uuid4
 
 import blind_quality_export as export
-from blind_quality_comparison import compare
+from blind_quality_comparison import compare, validate_manifest, CRITERIA
 import quality_qualification as qualification
 
 PUBLIC = Path(__file__).resolve().parents[1]
@@ -177,6 +177,42 @@ def failed_auto_evidence(root, status, report):
     report["auto_reviewed_units"] = sum(r["status"] == "reviewed" for r in report["auto_units"])
 
 
+def comparison_diagnostics(manifest, result, source_sha, report):
+    """Retain only the exact synthetic fixture's nonpassing comparison evidence."""
+    if source_sha != FIXTURE_SHA256:
+        raise ValueError("comparison diagnostic fixture identity mismatch")
+    validate_manifest(manifest)
+    if result.get("state") != "complete":
+        raise ValueError("comparison not complete")
+    by_id = {u["unit_id"]: u for u in manifest["units"]}
+    rows = result["units"]
+    if len(rows) != len(by_id) or {r["unit_id"] for r in rows} != set(by_id):
+        raise ValueError("comparison unit mismatch")
+    samples = []
+    for row in rows:
+        unit = by_id[row["unit_id"]]
+        if (row["source_sha256"] != unit["source"]["sha256"]
+                or row["candidate_sha256"] != {m: unit[m]["sha256"] for m in ("auto", "chatops")}):
+            raise ValueError("comparison artifact mismatch")
+        nonpassing = {m: {k: v for k, v in row["consensus"][m].items() if v != "pass"}
+                      for m in ("auto", "chatops")}
+        if not any(nonpassing.values()):
+            continue
+        sample = {"unit_id": row["unit_id"], "nonpassing": nonpassing, "artifacts": {}}
+        for key in ("source", "auto", "chatops"):
+            text = unit[key]["text"]
+            sanitized = qualification.redact_fixture_excerpt(text, os.environ)
+            sample["artifacts"][key] = {"original_sha256": unit[key]["sha256"],
+                "excerpt": sanitized[:5000], "redacted": sanitized != text,
+                "truncated": len(sanitized) > 5000}
+        samples.append(sample)
+    report["synthetic_comparison_samples"] = samples
+    report["all_criteria_pass_both_modes"] = not samples
+    # Protocol completion and quality are different outcomes; never promote
+    # a book from the comparison or claim parity from one fixture.
+    report["quality_equivalence_established"] = False
+
+
 def run(args, report):
     if not SHA.fullmatch(args.executor_revision) or export.git(PUBLIC, "rev-parse", "HEAD") != args.executor_revision:
         raise ValueError("immutable executor checkout required")
@@ -232,6 +268,7 @@ def run(args, report):
         result = {}
         report["comparison"] = result
         compare(manifest, lambda system, user: complete("REVIEWER", system, user), result)
+        comparison_diagnostics(manifest, result, chatops["source_sha256"], report)
     report.update(stage="complete", state="complete")
 
 

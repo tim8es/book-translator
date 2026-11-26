@@ -47,6 +47,9 @@ class ShortPassConfirmationTests(unittest.TestCase):
         self.mocks[2].assert_called_once_with(ROOT, "fixture", self.chapter,
                                              "reviewer", force_full_review=True)
         self.assertEqual(self.mocks[3].call_count, 2)
+        system = self.mocks[5].call_args.args[2]
+        self.assertIn("read the target alone as literary prose", system)
+        self.assertIn("Inspect each dialogue turn", system)
 
     def test_two_passes_return_second_full_evidence(self):
         self.mocks[6].return_value = self.first[:3]

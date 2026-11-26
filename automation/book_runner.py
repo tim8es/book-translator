@@ -5583,6 +5583,12 @@ def confirm_short_review_pass(job_id, slug, status, engine, chapter, owned,
         "agency, quantities, referents, exclusions, modality, chronology, "
         "omissions, additions and idiomatic literary wording. "
         "Check all passages, including those not changed since previous reviews. "
+        "Then read the target alone as literary prose: check natural syntax, collocation, "
+        "register, narrative restraint, rhythm, significant repetition and accidental calques. "
+        "Recompare any suspect wording with the original. Inspect each dialogue turn "
+        "separately for speaker, intent, modality, emotional force, idiomatic speech, "
+        "punctuation and voice; do not flatten differences or explain subtext. "
+        "A complete and semantically plausible draft can still fail literary review. "
         "Report concrete anchored defects, not interchangeable valid variants. "
         "Use the pinned review response schema. Never assume a PASS.")
     if len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS:
