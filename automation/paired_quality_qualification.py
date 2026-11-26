@@ -65,8 +65,13 @@ def verify_receipts(chapters, records, requests):
                    and export.sha(r["translation"].encode("utf-8")) == hashes["translation_sha256"]
                    for r in matched):
             raise ValueError("current ChatOps translation receipt missing")
+        quality_report = current.get("quality_report")
+        if (not isinstance(quality_report, dict)
+                or quality_report.get("context") != "independent_session"):
+            raise ValueError("independent ChatOps review context required")
         if not any(r["operation"] == "review-record" and r.get("session_id") == reviewer
-                   and r.get("outcome") == "PASS" for r in matched):
+                   and r.get("outcome") == "PASS"
+                   and r.get("quality_report") == quality_report for r in matched):
             raise ValueError("current ChatOps PASS receipt missing")
 
 
@@ -121,6 +126,8 @@ def run(args, report):
     report.update(chatops_commit=chatops["commit"], workflow_revision=chatops["workflow_revision"],
                   source_sha256=chatops["source_sha256"], chatops_unit_count=2,
                   chatops_model_calls=None, chatops_bridge_provenance=True,
+                  chatops_review_context="independent_session",
+                  chatops_context_independence_attested_not_proven=True,
                   auto_model_call_limit=AUTO_CAP, judge_call_limit=4,
                   judge_provider_independence_verified=False)
     os.environ.update(BOOK_TRANSLATOR_LLM_BACKEND="pi", OMNIROUTE_MODEL_CALL_LIMIT=str(AUTO_CAP),
