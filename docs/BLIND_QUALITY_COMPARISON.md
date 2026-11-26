@@ -52,3 +52,21 @@ sample including dialogue, negation, agency, omissions and long chapters.
 Do not substitute hand-authored reference translations for actual ChatOps
 execution. The benchmark is deliberately opt-in and does not add a new queue,
 a per-book Action or any production model calls.
+
+## Canonical export of completed paired workspaces
+
+Use the read-only exporter instead of manually constructing source hashes:
+
+    python automation/blind_quality_export.py --auto-root /state/auto --chatops-root /state/chatops --auto-slug fixture --chatops-slug fixture --output /secure/pairs.json
+
+The two state checkouts must be separate, clean, committed, and contain
+current reviewed units with matching source edition, workflow revision,
+target language and exact extracted source bytes. The local public Git checkout
+must contain that literary revision. Each snapshot is checked using its own
+disposable pinned CLI, corpus verification and canonical status. The exporter
+rejects active claims, stale review, changed bytes and source mismatches.
+It records both state commits in its stdout; preserve that provenance separately.
+The input labels still must be verified by the operator: the exporter cannot
+prove the history of literary decisions or the true execution mode. It does not
+create a completed translation or review evidence. Keep the generated manifest
+outside all repositories; only the sanitized comparison report may be published.
