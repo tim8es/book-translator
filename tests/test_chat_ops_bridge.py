@@ -387,6 +387,7 @@ class RequestTests(unittest.TestCase):
                              translation_sha256=hashlib.sha256(translated.encode()).hexdigest())
             self.assertEqual(recorded["status"], "ok", recorded["error"])
             self.assertEqual(issue("accept-review", "orchestrator-1")["status"], "ok")
+            self.assertEqual(issue("release", "reviewer-1")["status"], "ok")
             self.assertEqual(json.loads((book / "progress.json").read_text())[
                 "chapters"][0]["status"], "reviewed")
             # The engine override was runner-local; persisted global provenance
