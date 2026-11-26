@@ -68,3 +68,58 @@ class BlindComparisonTests(unittest.TestCase):
             bench.compare(manifest(), lambda *_: '{"A": {}, "B": {}}', report)
         self.assertEqual(report["state"], "incomplete")
         self.assertEqual(report["calls_started"], 1)
+
+
+class AnchoredBlindComparisonTests(unittest.TestCase):
+    def test_anchored_negative_evidence_remains_blind_and_bound_to_order(self):
+        calls = []
+        def judge(system, user):
+            payload = json.loads(user)
+            self.assertNotIn("chatops", system.lower())
+            self.assertNotIn("auto", system.lower())
+            calls.append(payload)
+            answer = {}
+            for label in ("A", "B"):
+                good = "семь" in payload[label]
+                checks = dict.fromkeys(bench.CRITERIA, True)
+                checks["fidelity"] = good
+                evidence = {} if good else {"fidelity": {
+                    "kind": "defect", "source_quote": "seven coins",
+                    "target_quote": "девять монет", "detail": "Wrong quantity"}}
+                answer[label] = {"checks": checks, "negative_evidence": evidence}
+            return json.dumps(answer)
+        report = {}
+        bench.compare(manifest(), judge, report, evidence_redactor=lambda s: s)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(report["judge_protocol"], "anchored-negative-evidence-v1")
+        self.assertEqual(report["summary"]["chatops"]["fail"], 1)
+        for e in report["units"][0]["negative_evidence"]:
+            self.assertEqual(e["auto"], {})
+            self.assertEqual(e["chatops"]["fidelity"]["target_quote"], "девять монет")
+
+    def test_invalid_or_missing_negative_evidence_is_not_pass(self):
+        payload = {"source": "Seven coins.", "A": "Семь монет.", "B": "Девять монет."}
+        answer = {label: {"checks": dict.fromkeys(bench.CRITERIA, True),
+                          "negative_evidence": {}} for label in ("A", "B")}
+        answer["B"]["checks"]["fidelity"] = False
+        with self.assertRaises(ValueError):
+            bench.parse_anchored_judgment(json.dumps(answer), payload)
+        item = {"kind": "defect", "source_quote": "Seven coins",
+                "target_quote": "Семь монет", "detail": "Wrong number"}
+        answer["B"]["negative_evidence"]["fidelity"] = item
+        with self.assertRaises(ValueError):
+            bench.parse_anchored_judgment(json.dumps(answer), payload)
+        item["target_quote"] = "Девять монет"
+        checks, evidence = bench.parse_anchored_judgment(json.dumps(answer), payload)
+        self.assertFalse(checks["B"]["fidelity"])
+        self.assertEqual(evidence["B"]["fidelity"]["kind"], "defect")
+        item.update(kind="uncertainty", target_quote="", detail="Cannot verify")
+        self.assertFalse(bench.parse_anchored_judgment(json.dumps(answer), payload)[0]["B"]["fidelity"])
+
+    def test_protocol_failure_does_not_retry_or_award_pass(self):
+        report = {}
+        with self.assertRaises(ValueError):
+            bench.compare(manifest(), lambda *_: '{"A": {}, "B": {}}', report,
+                          evidence_redactor=lambda s: s)
+        self.assertEqual(report["state"], "incomplete")
+        self.assertEqual(report["calls_started"], 1)
