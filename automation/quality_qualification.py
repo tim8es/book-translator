@@ -241,6 +241,44 @@ def audit_units(complete, book, chapters, report):
     return all(all(unit["checks"].values()) for unit in report["unit_audits"])
 
 
+def short_confirmation_coverage(status, chapters):
+    decisions = status.get("short_pass_confirmations", {})
+    return sum(
+        isinstance(decisions.get(ch["unit_id"]), dict)
+        and decisions[ch["unit_id"]].get("outcome") == "PASS"
+        and all(decisions[ch["unit_id"]].get("binding", {}).get(k)
+                == ch["translation_acceptance"][k]
+                for k in ("source_sha256", "translation_sha256"))
+        for ch in chapters)
+
+
+def failed_fixture_samples(book, chapters, report):
+    """Only the internally authored disposable fixture, never real book state."""
+    by_number = {c["number"]: c for c in chapters}
+    samples = []
+    for unit in report.get("unit_audits", []):
+        if all(unit.get("checks", {}).values()):
+            continue
+        chapter = by_number[unit["number"]]
+        source = (book / chapter["source_path"]).read_bytes()
+        target = (book / chapter["translation_path"]).read_bytes()
+        if (hashlib.sha256(source).hexdigest() != unit["source_sha256"]
+                or hashlib.sha256(target).hexdigest() != unit["translation_sha256"]):
+            raise RuntimeError("fixture sample changed after audit")
+        # Explicitly bounded diagnostic on authored synthetic material. Redact
+        # provider configuration even if a model unexpectedly echoed it.
+        text = target.decode("utf-8")[:5000]
+        for key, value in os.environ.items():
+            if key.startswith("OMNIROUTE_") and value and len(value) >= 4:
+                text = text.replace(value, "[redacted]")
+        text = re.sub(r"https?://\S+", "[redacted-url]", text)
+        samples.append({"number": unit["number"], "failed_checks": [
+            k for k, v in unit["checks"].items() if not v],
+            "translation_excerpt": text,
+            "truncated": len(target.decode("utf-8")) > 5000})
+    return samples
+
+
 def qualify_routes(revision, output):
     """Explicit bounded route check; no books, literary text or production writes."""
     from omniroute import complete
@@ -274,6 +312,7 @@ def qualify(revision, output, profile="smoke"):
         BOOK_TRANSLATOR_INCREMENTAL_REVIEW="on", BOOK_TRANSLATOR_ADAPTIVE_BUDGET="on",
         BOOK_TRANSLATOR_COHERENT_BATCHES="on", BOOK_TRANSLATOR_CONTINUE_CORRECTIONS="on",
         BOOK_TRANSLATOR_CORRECTION_FEEDBACK="on", BOOK_TRANSLATOR_MARKER_ALIGNMENT="on")
+    os.environ["BOOK_TRANSLATOR_CONFIRM_SHORT_PASS"] = "on" if profile == "extended" else "off"
     report = {"schema_version": 1, "workflow_revision": revision,
               "fixture": "authored-two-unit-known-defects" if profile == "smoke" else "authored-six-unit-known-defects",
               "profile": profile, "model_call_limit": call_limit, "qualification": "failed"}
@@ -304,6 +343,8 @@ def qualify(revision, output, profile="smoke"):
             chapters = json.loads((book / "progress.json").read_text("utf-8"))["chapters"]
             records = json.loads((book / "review-ledger.json").read_text("utf-8"))["records"]
             report["reviewed"] = sum(c["status"] == "reviewed" for c in chapters)
+            report["short_pass_confirmation_calls"] = status.get("short_pass_confirmation_calls", 0)
+            report["short_pass_confirmed_units"] = short_confirmation_coverage(status, chapters)
             report["rejected_reviews"] = sum(r["outcome"] == "CORRECTIONS_REQUIRED" for r in records)
             detected = {r["unit_id"] for r in records if r["unit_id"] in seeded and r["outcome"] == "CORRECTIONS_REQUIRED"
                 and any(not f["resolved"] and f["category"] in {"meaning", "modality", "omission", "addition", "referent"}
@@ -333,7 +374,11 @@ def qualify(revision, output, profile="smoke"):
             # versa). Extended qualification has six extra bounded calls.
             unit_pass = audit_units(complete, book, chapters, report) if profile == "extended" else True
             if not all(audit.values()) or not unit_pass:
+                if profile == "extended":
+                    report["synthetic_failure_samples"] = failed_fixture_samples(book, chapters, report)
                 raise RuntimeError("independent final audit rejected the translation")
+            if profile == "extended" and report["short_pass_confirmed_units"] != expected_units:
+                raise RuntimeError("independent PASS confirmation coverage incomplete")
             report["qualification"] = "passed"
     except Exception as exc:
         report["failure_type"] = type(exc).__name__

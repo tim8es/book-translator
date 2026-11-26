@@ -5549,6 +5549,68 @@ def arbitrate_quality_review(job_id, slug, status, engine, chapter, owned, previ
     return new_outcome, new_report
 
 
+SHORT_PASS_CONFIRMATION_CHARS = 12000
+
+
+def confirm_short_review_pass(job_id, slug, status, engine, chapter, owned,
+                              previous, source, target, outcome, report, style, glossary):
+    """Optional second full comparison, never an inference from the first PASS.
+
+    Scope is deliberately limited to short units; long/chunked review parity
+    must be qualified separately. No first-review answer is sent to the judge.
+    All calls, including interrupted confirmations, consume the durable cap.
+    """
+    if (os.environ.get("BOOK_TRANSLATOR_CONFIRM_SHORT_PASS") != "on"
+            or outcome != "PASS" or not quality_controller.supported(engine)
+            or max(len(source), len(target)) > SHORT_PASS_CONFIRMATION_CHARS):
+        return outcome, report, style, glossary
+    binding = quality_review_binding(chapter, owned, previous, status)
+    if (review_chunks.sha(source) != binding["source_sha256"]
+            or review_chunks.sha(target) != binding["translation_sha256"]):
+        raise JobError("PASS confirmation artifact changed")
+    system, user, current_source = context(engine, slug, chapter, "reviewer",
+                                            force_full_review=True)
+    if current_source != source:
+        raise JobError("PASS confirmation source changed")
+    system += (
+        "\n\nINDEPENDENT FULL COMPARISON: Start from the source again. "
+        "Map each meaningful clause to the target, in order; check negation, "
+        "agency, quantities, referents, exclusions, modality, chronology, "
+        "omissions, additions and idiomatic literary wording. "
+        "Check all passages, including those not changed since previous reviews. "
+        "Report concrete anchored defects, not interchangeable valid variants. "
+        "Use the pinned review response schema. Never assume a PASS.")
+    if len(system) + len(user) > MAX_REVIEW_PROMPT_CHARS:
+        raise ModelError("full short PASS confirmation exceeds safe prompt limit")
+    count = status.get("model_calls_started", 0)
+    confirmations = status.setdefault("short_pass_confirmations", {})
+    calls = status.get("short_pass_confirmation_calls", 0)
+    if (type(count) is not int or count < 0 or type(calls) is not int or calls < 0
+            or not isinstance(confirmations, dict)):
+        raise JobError("invalid PASS confirmation state")
+    if count >= model_call_limit():
+        raise ModelError("independent PASS confirmation exhausted model budget")
+    item = {"binding": binding, "outcome": "reserved"}
+    confirmations[chapter["unit_id"]] = item
+    status["model_calls_started"] = count + 1
+    status["short_pass_confirmation_calls"] = calls + 1
+    status["phase"] = "short-pass-confirmation-reserved"
+    checkpoint(job_id, status, slug)
+    answer = complete_for_job(status, "REVIEWER", system, user)
+    second_outcome, second_report, second_style = checked_reviewer_response(
+        answer, review_context="independent_session", source=source,
+        translation=target.encode("utf-8"), previous_record=previous, claim=owned)
+    second_glossary = reviewer_glossary_proposals(answer)
+    if second_outcome == "PASS" and any(not f["resolved"] for f in second_report["findings"]):
+        raise ModelError("reviewer evidence is invalid: PASS contains unresolved defects")
+    # A rejection goes to the ordinary correction path. Do not arbitrate it
+    # away or merge incompatible reports from two independent calls.
+    item["outcome"] = second_outcome
+    status["phase"] = "short-pass-confirmation-recorded"
+    checkpoint(job_id, status, slug)
+    return second_outcome, second_report, second_style, second_glossary
+
+
 def review_orchestrator_strategy(job_id: str, slug: str, status: dict,
                                  engine: Path, chapter: dict, previous: dict | None,
                                  source: str, target: str) -> str:
@@ -5901,6 +5963,9 @@ def process_claim(job_id: str, slug: str, status: dict, engine: Path) -> None:
             outcome, report = arbitrate_quality_review(job_id, slug, status, engine,
                 chapter, owned, previous_record, source, quality_target, outcome, report,
                 reviewed_style, reviewed_glossary, existing=quality_stage)
+            outcome, report, reviewed_style, reviewed_glossary = confirm_short_review_pass(
+                job_id, slug, status, engine, chapter, owned, previous_record,
+                source, quality_target, outcome, report, reviewed_style, reviewed_glossary)
         if role != "reviewer":
             if (not preserve_links and not patch_mode and structural_plan is None
                     and editorial_candidate is None):

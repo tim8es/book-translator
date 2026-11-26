@@ -102,3 +102,23 @@ review, correction, attention and promotion gates remain authoritative.
 The agent sees only technical sizes and budgets, never literary passages.
 This capability does not make a model an unrestricted repository operator.
 Keep the option off in production until live qualification on long units.
+
+## Independent confirmation of short PASS (experimental)
+
+The second extended run had a whole-book 11/11 audit but only two of six
+unit-local passes. A new opt-in BOOK_TRANSLATOR_CONFIRM_SHORT_PASS gate
+requires a fresh full-source reviewer invocation for an otherwise accepted
+short unit (at most 12,000 characters in either artifact). It uses the pinned
+role, exact current artifact and prior canonical lineage, not the first
+reviewer's answer. Rejection enters the ordinary correction path, while
+invalid/unavailable responses fail closed. Both invocations consume the
+durable global cap; an interrupted call is not free. A same-model invocation
+is independent context, not independent underlying provider.
+
+Extended qualification enables the gate and verifies final per-unit hash-bound
+confirmation coverage. For diagnosis only, failed unit-local checks now retain
+a bounded redacted target excerpt from the internally authored synthetic
+fixture in the private qualification report. No production book text is
+exported by this change. This intentionally changes the earlier synthetic
+report content policy to permit debugging that fixture. Production remains
+default-off; long-unit confirmation and live quality must be qualified separately.
