@@ -97,3 +97,11 @@ The judge uses a fresh reviewer invocation, not a distinct underlying provider
 unless separately verified. Results from this two-unit pilot are not sufficient
 for production-wide quality equivalence. The CLI does not dispatch an Action;
 a separate explicit private invocation is required after ChatOps completion.
+
+
+The paired qualification additionally requires the latest canonical review
+report and matching successful bridge request to contain the same
+independent_session context. The documented same-chat bounded-context
+fallback is valid for ordinary translation but not this independent-review
+benchmark. Session identifiers and structured reports attest context; they
+cannot prove that the operator actually used a separate conversation.

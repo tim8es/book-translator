@@ -16,12 +16,17 @@ class PairProvenanceTests(unittest.TestCase):
                        "translation_sha256": pair.export.sha(self.target.encode("utf-8"))}
         self.chapters = [{"number": 1, "unit_id": "chapter-000001",
                          "translation_acceptance": dict(self.hashes, session_id="chat-translator")}]
+        self.report = {"evidence_version": 2, "context": "independent_session",
+                       "checks": dict.fromkeys(("coverage", "meaning", "terminology",
+                                                "style", "structure"), True), "findings": []}
         self.records = [dict(self.hashes, unit_id="chapter-000001", sequence=1,
-                             outcome="PASS", reviewer_session_id="chat-reviewer")]
+                             outcome="PASS", reviewer_session_id="chat-reviewer",
+                             quality_report=copy.deepcopy(self.report))]
         self.requests = [dict(self.hashes, chapter=1, session_id="chat-translator",
                               operation="accept-translation", translation=self.target),
                          dict(self.hashes, chapter=1, session_id="chat-reviewer",
-                              operation="review-record", outcome="PASS")]
+                              operation="review-record", outcome="PASS",
+                              quality_report=copy.deepcopy(self.report))]
 
     def verify(self):
         pair.verify_receipts(self.chapters, self.records, self.requests)
@@ -57,3 +62,17 @@ class PairProvenanceTests(unittest.TestCase):
                 pair.run(args, report)
         step.assert_not_called()
         self.assertEqual(report["stage"], "chatops-preflight")
+
+
+    def test_bounded_or_missing_context_cannot_claim_independent_review(self):
+        for context in ("bounded_context", None):
+            with self.subTest(context=context):
+                self.records[0]["quality_report"]["context"] = context
+                self.requests[1]["quality_report"]["context"] = context
+                with self.assertRaisesRegex(ValueError, "independent ChatOps review context"):
+                    self.verify()
+
+    def test_receipt_must_match_current_canonical_report(self):
+        self.requests[1]["quality_report"]["checks"]["style"] = False
+        with self.assertRaisesRegex(ValueError, "PASS receipt"):
+            self.verify()
