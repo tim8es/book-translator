@@ -76,3 +76,50 @@ class PairProvenanceTests(unittest.TestCase):
         self.requests[1]["quality_report"]["checks"]["style"] = False
         with self.assertRaisesRegex(ValueError, "PASS receipt"):
             self.verify()
+
+
+class FailedPairedDiagnosticsTests(unittest.TestCase):
+    def test_exact_fixture_only(self):
+        with patch.object(pair.export, "clean_head") as clean:
+            with self.assertRaisesRegex(ValueError, "benchmark identity mismatch"):
+                pair.admit_chatops(Path("."), "a" * 40, "b" * 32, "c" * 64)
+            clean.assert_not_called()
+
+    def test_failed_auto_evidence_is_bound_to_current_record(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = root / "books" / "fixture"
+            book.mkdir(parents=True)
+            (book / "s").write_text("Source.", encoding="utf-8")
+            (book / "t").write_text("Перевод.", encoding="utf-8")
+            hashes = {"source_sha256": pair.export.sha((book / "s").read_bytes()),
+                      "translation_sha256": pair.export.sha((book / "t").read_bytes())}
+            unit = "chapter-000001"
+            record = "a" * 32
+            payloads = {
+                "metadata.json": {"source": {"sha256": pair.FIXTURE_SHA256}},
+                "progress.json": {"chapters": [{"unit_id": unit, "status": "translated",
+                    "source_path": "s", "translation_path": "t", "translation_acceptance": hashes}]},
+                "review-ledger.json": {"records": [dict(hashes, unit_id=unit, record_id=record,
+                    sequence=1, outcome="CORRECTIONS_REQUIRED", quality_report={"findings": [
+                        {"id": "f", "category": "meaning", "severity": "major", "detail": "Wrong meaning",
+                         "resolved": False}]})]}}
+            for name, value in payloads.items():
+                (book / name).write_text(json.dumps(value), encoding="utf-8")
+            status = {"book_slug": "fixture", "correction_regression_rejections": [
+                {"unit_id": unit, "review_record_id": record, "finding_id": "f",
+                 "reason": "quality-candidate-veto", "risk": "meaning", "patch_sha256": "b"*64},
+                {"unit_id": unit, "review_record_id": "c"*32, "finding_id": "f",
+                 "reason": "unrelated"}]}
+            report = {}
+            pair.failed_auto_evidence(root, status, report)
+            self.assertEqual(report["auto_reviewed_units"], 0)
+            evidence = report["auto_units"][0]
+            self.assertEqual(evidence["findings"][0]["detail"], "Wrong meaning")
+            self.assertEqual(len(evidence["candidate_rejections"]), 1)
+            self.assertEqual(evidence["candidate_rejections"][0]["risk"], "meaning")
+            (book / "t").write_text("Changed", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "accepted bytes mismatch"):
+                pair.failed_auto_evidence(root, status, {})
