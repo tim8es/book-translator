@@ -5663,6 +5663,11 @@ def review_orchestrator_strategy(job_id: str, slug: str, status: dict,
         review_chunks.validate_plan(plan, source, target)
     except ValueError:
         return fallback
+    # plan_aligned intentionally has a legacy paragraph-length fallback for
+    # mandatory oversized reviews. It is not a source-owned aligned plan,
+    # so it must not be offered as optional agent advice or incur a paid call.
+    if plan["helper_revision"] != review_chunks.STABLE_ALIGNMENT_REVISION:
+        return fallback
     chunks = len(plan["chunks"])
     if not 2 <= chunks <= 4:
         return fallback
