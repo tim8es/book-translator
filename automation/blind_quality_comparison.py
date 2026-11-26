@@ -134,6 +134,8 @@ def main():
     try:
         if args.manifest.resolve() == args.output.resolve():
             raise ValueError("output must differ from the manifest")
+        if args.output.exists():
+            return 1
         manifest = json.loads(args.manifest.read_text("utf-8"))
         if args.judge_role == "REVIEWER_FALLBACK":
             if config("REVIEWER")[2].strip() == config(args.judge_role)[2].strip():
@@ -145,7 +147,9 @@ def main():
     if args.manifest.resolve() == args.output.resolve():
         return 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    # The benchmark may create a new report but cannot overwrite existing state.
+    with args.output.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     return 0 if report["state"] == "complete" else 1
 
 
