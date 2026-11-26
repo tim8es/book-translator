@@ -111,3 +111,38 @@ class QualificationFixtureTests(unittest.TestCase):
                 self.assertEqual(set(qual.extended.SEEDED), {1, 3, 5})
                 self.assertEqual(set(qual.extended.FRESH), {2, 4, 6})
                 self.assertEqual(len(qual.extended.AUDIT), 11)
+
+
+class IndependentAuditTests(unittest.TestCase):
+    def test_strict_boolean_protocol(self):
+        for bad in ('{"fact": 1}', '{"fact": true, "extra": true}', '{}'):
+            with self.assertRaisesRegex(RuntimeError, "protocol invalid"):
+                qual.checked_audit(lambda *args: bad, {"fact": "fact"}, "s", "t")
+        self.assertEqual(qual.checked_audit(
+            lambda *args: '{"fact": false}', {"fact": "fact"}, "s", "t"), {"fact": False})
+
+    def test_unit_audit_retains_local_failure_and_checks_every_unit(self):
+        import json
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chapters = []
+            for n in range(1, 7):
+                (root / f"s{n}").write_text(f"source {n}", encoding="utf-8")
+                (root / f"t{n}").write_text(f"target {n}", encoding="utf-8")
+                chapters.append({"number": n, "unit_id": f"chapter-{n:06}",
+                                 "source_path": f"s{n}", "translation_path": f"t{n}"})
+            def complete(role, system, user):
+                self.assertEqual(role, "REVIEWER")
+                n = int(json.loads(user)["source"].split()[-1])
+                keys = qual.UNIT_FACTS.get(n, ()) + ("complete_and_fluent", "dialogue_voice")
+                return json.dumps({k: k != "empty_envelope" for k in keys})
+            report = {"independent_audit_calls": 1}
+            self.assertFalse(qual.audit_units(complete, root, chapters, report))
+            self.assertEqual(report["independent_audit_calls"], 7)
+            self.assertEqual(len(report["unit_audits"]), 6)
+            self.assertFalse(report["unit_audits"][4]["checks"]["empty_envelope"])
+            self.assertNotIn("empty_envelope", report["unit_audits"][3]["checks"])
+            self.assertEqual(report["unit_audits"][4]["translation_sha256"],
+                             hashlib.sha256(b"target 5").hexdigest())
+            self.assertNotIn("target 5", json.dumps(report))

@@ -247,8 +247,10 @@ def complete_for_job(status: dict, role: str, system: str, user: str) -> str:
                          and retry.get("role") == current_role
                          and type(retry.get("attempts")) is int
                          and retry["attempts"] >= FALLBACK_AFTER_TRANSIENTS)
+    primary = os.environ.get(f"OMNIROUTE_{role}_MODEL", "").strip()
+    backup = os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()
     if ((repeated_provider or attempts >= FALLBACK_AFTER_TRANSIENTS)
-            and os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()):
+            and primary and backup and primary != backup):
         route = role + "_FALLBACK"
     if quality_controller.escalation_route(status, role, current_unit, os.environ):
         route = role + "_FALLBACK"
@@ -3554,15 +3556,12 @@ def focused_review_context(slug: str, chapter: dict, previous: dict,
         return None
     if delta.get("previous_record_id") != previous.get("record_id"):
         raise JobError("review-delta baseline does not match the latest anchored review")
-    # Minor, explicitly anchored register/style/voice findings may be checked
-    # against the immutable preceding full review and its source-grounded
-    # changed paragraphs. Keep full-scope comparison for nonlocal or
-    # significant perspective, structure and voice risks.
-    if any(item.get("category") in {"referent", "register", "style", "structure", "voice"}
-           and item.get("severity") != "minor"
+    # A focused comparison inherits the earlier review's unexamined regions.
+    # Do not inherit potentially missed fidelity defects after a substantive
+    # correction. Only anchored minor editorial findings qualify.
+    if any(item.get("severity") != "minor"
+           or item.get("category") not in {"register", "style", "voice"}
            for item in findings):
-        return None
-    if any(item.get("category") == "structure" for item in findings):
         return None
     sections = delta.get("sections")
     if not isinstance(sections, list):
