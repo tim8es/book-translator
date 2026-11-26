@@ -267,15 +267,15 @@ def failed_fixture_samples(book, chapters, report):
             raise RuntimeError("fixture sample changed after audit")
         # Explicitly bounded diagnostic on authored synthetic material. Redact
         # provider configuration even if a model unexpectedly echoed it.
-        text = target.decode("utf-8")[:5000]
+        text = target.decode("utf-8")
         for key, value in os.environ.items():
             if key.startswith("OMNIROUTE_") and value and len(value) >= 4:
                 text = text.replace(value, "[redacted]")
         text = re.sub(r"https?://\S+", "[redacted-url]", text)
         samples.append({"number": unit["number"], "failed_checks": [
             k for k, v in unit["checks"].items() if not v],
-            "translation_excerpt": text,
-            "truncated": len(target.decode("utf-8")) > 5000})
+            "translation_excerpt": text[:5000],
+            "truncated": len(text) > 5000})
     return samples
 
 
