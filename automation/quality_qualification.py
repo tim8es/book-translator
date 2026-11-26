@@ -415,6 +415,9 @@ def qualify(revision, output, profile="smoke"):
         raise RuntimeError("qualification requires exact checked-out revision")
     if profile == "routes":
         return qualify_routes(revision, output)
+    if profile == "long-agent":
+        from long_agent_qualification import qualify_long
+        return qualify_long(revision, output)
     if profile not in {"smoke", "extended"}:
         raise ValueError("unknown qualification profile")
     expected_units = 2 if profile == "smoke" else 6
@@ -509,6 +512,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--revision", required=True)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--profile", choices=("smoke", "extended", "routes"), default="smoke")
+    parser.add_argument("--profile", choices=("smoke", "extended", "routes", "long-agent"), default="smoke")
     args = parser.parse_args()
     raise SystemExit(qualify(args.revision, args.output.resolve(), args.profile))
