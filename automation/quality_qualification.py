@@ -185,13 +185,7 @@ def diagnostic(status):
     # Initialization is before any model call. Preserve its canonical error,
     # but redact all provider configuration and URLs even in this fixture.
     if status.get("model_calls_started", 0) == 0 and isinstance(status.get("last_error"), str):
-        message = status["last_error"]
-        for k in ("OMNIROUTE_API_KEY", "OMNIROUTE_BASE_URL"):
-            value = os.environ.get(k)
-            if value:
-                message = message.replace(value, "[redacted]")
-        message = re.sub(r"https?://\S+", "[redacted-url]", message)
-        result["initialization_error"] = message[:400]
+        result["initialization_error"] = redact_fixture_error(status["last_error"], os.environ)
     return result
 
 
