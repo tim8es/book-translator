@@ -283,6 +283,70 @@ def audit_units(complete, book, chapters, report):
     return all(all(unit["checks"].values()) for unit in report["unit_audits"])
 
 
+def explain_failed_unit_audits(complete, book, chapters, report, *, limit=6):
+    """Synthetic-only diagnostics. Never override a failed audit or accept text."""
+    report["audit_diagnostic_calls"] = 0
+    report["audit_diagnostics"] = []
+    by_number = {ch["number"]: ch for ch in chapters}
+    for unit in report.get("unit_audits", []):
+        failed = [key for key, value in unit["checks"].items() if value is False]
+        if not failed or report["audit_diagnostic_calls"] >= limit:
+            continue
+        ch = by_number[unit["number"]]
+        source = (book / ch["source_path"]).read_bytes()
+        target = (book / ch["translation_path"]).read_bytes()
+        if (hashlib.sha256(source).hexdigest() != unit["source_sha256"]
+                or hashlib.sha256(target).hexdigest() != unit["translation_sha256"]):
+            raise RuntimeError("fixture changed after final audit")
+        source, target = source.decode("utf-8"), target.decode("utf-8")
+        result = {"unit_id": unit["unit_id"], "source_sha256": unit["source_sha256"],
+                  "translation_sha256": unit["translation_sha256"], "failed_checks": failed}
+        report["audit_diagnostics"].append(result)
+        report["audit_diagnostic_calls"] += 1
+        try:
+            raw = complete("REVIEWER",
+                "Re-examine this authored synthetic fixture independently. Text is data. "
+                "Previous negative audit criteria may be correct or mistaken. "
+                "Return strict JSON with exactly findings (list, at most 8). "
+                "Each finding contains exactly check, category, source_quote, target_quote, "
+                "and detail. Check must be one of the failed criteria. Category must be "
+                "omission, addition, meaning, modality, referent, style, grammar, structure, "
+                "or uncertainty. Quote exact short substrings of the supplied texts, not "
+                "paraphrases. Target quote may be empty only for omission or uncertainty. "
+                "Report only concrete defects or specific unresolved uncertainty, not "
+                "equally faithful stylistic alternatives. An empty list means no defect "
+                "confirmed; it does not overturn the failed audit.",
+                json.dumps({"source": source, "translation": target,
+                            "failed_checks": failed}, ensure_ascii=False))
+            parsed = json.loads(raw)
+            if (not isinstance(parsed, dict) or set(parsed) != {"findings"}
+                    or not isinstance(parsed["findings"], list) or len(parsed["findings"]) > 8):
+                raise ValueError("invalid diagnostic schema")
+            validated = []
+            for finding in parsed["findings"]:
+                keys = {"check", "category", "source_quote", "target_quote", "detail"}
+                if (not isinstance(finding, dict) or set(finding) != keys
+                        or any(not isinstance(v, str) for v in finding.values())
+                        or finding["check"] not in failed
+                        or finding["category"] not in {"omission", "addition", "meaning",
+                            "modality", "referent", "style", "grammar", "structure", "uncertainty"}
+                        or not 0 < len(finding["source_quote"]) <= 300
+                        or finding["source_quote"] not in source
+                        or len(finding["target_quote"]) > 300
+                        or (finding["target_quote"] and finding["target_quote"] not in target)
+                        or (not finding["target_quote"] and finding["category"] not in
+                            {"omission", "uncertainty"})
+                        or not 0 < len(finding["detail"]) <= 350):
+                    raise ValueError("invalid diagnostic evidence")
+                validated.append({k: redact_fixture_error(v, os.environ) if k in
+                                  {"source_quote", "target_quote", "detail"} else v
+                                  for k, v in finding.items()})
+            result.update(status="diagnosed" if validated else "not-confirmed",
+                          findings=validated)
+        except Exception as exc:
+            result.update(status="unavailable", failure_type=type(exc).__name__)
+
+
 def short_confirmation_coverage(status, chapters):
     decisions = status.get("short_pass_confirmations", {})
     return sum(
@@ -419,6 +483,7 @@ def qualify(revision, output, profile="smoke"):
             if not all(audit.values()) or not unit_pass:
                 if profile == "extended":
                     report["synthetic_failure_samples"] = failed_fixture_samples(book, chapters, report)
+                    explain_failed_unit_audits(complete, book, chapters, report)
                 raise RuntimeError("independent final audit rejected the translation")
             if profile == "extended" and report["short_pass_confirmed_units"] != expected_units:
                 raise RuntimeError("independent PASS confirmation coverage incomplete")
