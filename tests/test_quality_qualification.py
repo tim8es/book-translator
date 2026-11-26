@@ -222,3 +222,35 @@ class SyntheticFailureDiagnosticsTests(unittest.TestCase):
         report = {}
         qual.collect_fixture_error(report, {"phase": "reviewer-completed"}, 1)
         self.assertEqual(report, {})
+
+
+class AnchoredAuditDiagnosticsTests(unittest.TestCase):
+    def test_failed_audit_stays_failed_and_diagnostic_requires_real_quotes(self):
+        import hashlib
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = "The box had seven coins."
+            target = "В коробке было девять монет."
+            (root / "s").write_text(source, encoding="utf-8")
+            (root / "t").write_text(target, encoding="utf-8")
+            chapters = [{"number": 1, "source_path": "s", "translation_path": "t"}]
+            report = {"unit_audits": [{"number": 1, "unit_id": "chapter-000001",
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "translation_sha256": hashlib.sha256(target.encode()).hexdigest(),
+                "checks": {"complete_and_fluent": False}}]}
+            finding = {"check": "complete_and_fluent", "category": "meaning",
+                "source_quote": "seven coins", "target_quote": "девять монет",
+                "detail": "Wrong count"}
+            qual.explain_failed_unit_audits(lambda *a: json.dumps({"findings": [finding]}),
+                                           root, chapters, report)
+            self.assertEqual(report["audit_diagnostic_calls"], 1)
+            self.assertEqual(report["audit_diagnostics"][0]["status"], "diagnosed")
+            self.assertFalse(report["unit_audits"][0]["checks"]["complete_and_fluent"])
+            finding["source_quote"] = "invented evidence"
+            qual.explain_failed_unit_audits(lambda *a: json.dumps({"findings": [finding]}),
+                                           root, chapters, report)
+            self.assertEqual(report["audit_diagnostics"][0]["status"], "unavailable")
+            qual.explain_failed_unit_audits(lambda *a: '{"findings":[]}', root, chapters, report)
+            self.assertEqual(report["audit_diagnostics"][0]["status"], "not-confirmed")
+            self.assertFalse(report["unit_audits"][0]["checks"]["complete_and_fluent"])
