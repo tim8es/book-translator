@@ -131,3 +131,12 @@ capacity alongside the growing pinned reviewer contract. Preserve the full
 role contract; bound evidence/user prompt to 38,000 characters and the
 combined request to 80,000 characters. Existing batch reduction remains
 mandatory. Never truncate evidence, skip the veto or grant PASS.
+
+
+Optional aligned-review advice requires a real stable source-owned marker
+plan, not the legacy independent paragraph-cut fallback returned by
+plan_aligned for unmarked artifacts. Ineligible or mismatched markers cause
+the optional planner to choose direct review without spending an advice call.
+Mandatory large-unit partitioning retains its existing rules. Offline
+regressions exercise the actual planner on long unequal-length marked and
+unmarked artifacts; this does not replace a live long-unit qualification.

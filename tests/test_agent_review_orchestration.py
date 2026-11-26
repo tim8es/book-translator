@@ -28,7 +28,9 @@ class ReviewOrchestratorTests(unittest.TestCase):
             patch.object(runner.quality_controller, "supported", return_value=True),
             patch.object(runner, "review_chunk_stage_path", return_value=ROOT / "nonexistent-stage"),
             patch.object(runner, "quality_stage_path", return_value=ROOT / "nonexistent-stage"),
-            patch.object(runner.review_chunks, "plan_aligned", return_value={"chunks": [{}, {}]}),
+            patch.object(runner.review_chunks, "plan_aligned", return_value={
+                "helper_revision": runner.review_chunks.STABLE_ALIGNMENT_REVISION,
+                "chunks": [{}, {}]}),
             patch.object(runner.review_chunks, "validate_plan"),
             patch.object(runner, "role_contracts", return_value=("rules", [])),
             patch.object(runner, "model_call_limit", return_value=10),
@@ -77,4 +79,60 @@ class ReviewOrchestratorTests(unittest.TestCase):
     def test_disabled_by_default(self):
         with patch.dict(os.environ, {"BOOK_TRANSLATOR_AGENT_REVIEW_PLANNING": "off"}):
             self.assertEqual(self.choose(), "full_direct")
+        self.mocks[-1].assert_not_called()
+
+
+    def use_real_planner(self, source, target):
+        # Remove only these two mocks. The actual planner and validator must
+        # exercise complete coverage and real alignment, not a fabricated plan.
+        self.patchers[4].stop()
+        self.patchers[5].stop()
+        self.source, self.target = source, target
+        self.chapter["translation_acceptance"] = {
+            "source_sha256": runner.review_chunks.sha(source),
+            "translation_sha256": runner.review_chunks.sha(target)}
+
+    def test_real_long_unmarked_text_never_pays_for_alignment_advice(self):
+        source = "\n\n".join(f"Passage {i}: " + "The harbour was quiet. " * 30
+                             for i in range(25))
+        target = "\n\n".join(f"Отрывок {i}: " + "В гавани было тихо. " * 40
+                             for i in range(25))
+        self.assertGreater(len(source), runner.review_chunks.TARGET_CHARS)
+        self.use_real_planner(source, target)
+        plan = runner.review_chunks.plan_aligned(source, target, stable=True)
+        self.assertEqual(plan["helper_revision"], runner.review_chunks.HELPER_REVISION)
+        self.assertEqual(self.choose(), "full_direct")
+        self.assertEqual(self.status["model_calls_started"], 3)
+        self.mocks[-1].assert_not_called()
+
+    def test_real_long_marked_artifacts_allow_one_bounded_advice_call(self):
+        source = "\n\n".join(f"<!-- bt-block:{i:06d} -->\n" +
+                             f"Passage {i}: " + "The harbour was quiet. " * 30
+                             for i in range(1, 26))
+        target = "\n\n".join(f"<!-- bt-block:{i:06d} -->\n" +
+                             f"Отрывок {i}: " + "В гавани было тихо. " * (20 + i)
+                             for i in range(1, 26))
+        self.use_real_planner(source, target)
+        plan = runner.review_chunks.plan_aligned(source, target, stable=True)
+        self.assertEqual(plan["helper_revision"], runner.review_chunks.STABLE_ALIGNMENT_REVISION)
+        self.assertTrue(2 <= len(plan["chunks"]) <= 4)
+        runner.review_chunks.validate_plan(plan, source, target)
+        for chunk in plan["chunks"][1:]:
+            s = source[chunk["source_core"][0]:]
+            t = target[chunk["translation_core"][0]:]
+            self.assertEqual(runner.review_chunks.BLOCK_MARKER.match(s).group(1),
+                             runner.review_chunks.BLOCK_MARKER.match(t).group(1))
+        self.assertEqual(self.choose(), "aligned_chunks")
+        self.assertEqual(self.choose(), "aligned_chunks")
+        self.assertEqual(self.status["model_calls_started"], 4)
+        self.mocks[-1].assert_called_once()
+        self.assertEqual(self.status["review_orchestrator_decisions"][self.unit]["chunk_count"],
+                         len(plan["chunks"]))
+
+    def test_mismatched_markers_do_not_pay_for_advice(self):
+        source = "\n\n".join(f"<!-- bt-block:{i:06d} -->\n" +
+                             "The harbour was quiet. " * 30 for i in range(1, 26))
+        target = source.replace("bt-block:000012", "bt-block:999999")
+        self.use_real_planner(source, target)
+        self.assertEqual(self.choose(), "full_direct")
         self.mocks[-1].assert_not_called()
