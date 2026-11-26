@@ -182,3 +182,43 @@ class ShortConfirmationQualificationTests(unittest.TestCase):
             (root / "t").write_bytes(b"changed")
             with self.assertRaisesRegex(RuntimeError, "changed"):
                 qual.failed_fixture_samples(root, chapters, report)
+
+
+class SyntheticFailureDiagnosticsTests(unittest.TestCase):
+    def test_model_retry_and_terminal_block_preserve_actual_cause(self):
+        report = {}
+        status = {"state": "running", "phase": "model-retry",
+                  "model_calls_started": 2, "failures": 1,
+                  "blocked_unit_id": "chapter-000001",
+                  "last_error": "corrector returned unchanged translation and memory",
+                  "prompt_context": {"role": "corrector", "correction_mode": "anchored-patches",
+                                     "user": "never include this prompt"}}
+        qual.collect_fixture_error(report, status, 4)
+        status.update(state="blocked", phase="model-blocked", failures=3)
+        qual.collect_fixture_error(report, status, 8)
+        history = report["synthetic_error_history"]
+        self.assertEqual([v["checkpoint"] for v in history], [4, 8])
+        self.assertEqual(history[-1]["error"], status["last_error"])
+        self.assertEqual(history[-1]["failures"], 3)
+        self.assertNotIn("never include this prompt", str(report))
+
+    def test_error_redaction_and_bounded_history(self):
+        env = {"OMNIROUTE_API_KEY": "synthetic-secret", "OMNIROUTE_REVIEWER_MODEL": "hidden-route",
+               "OTHER_TOKEN": "another-secret"}
+        error = "hidden-route synthetic-secret another-secret https://provider.invalid/path Bearer token123 sk-private123"
+        with patch.dict(os.environ, env):
+            report = {}
+            for n in range(20):
+                qual.collect_fixture_error(report, {"phase": "model-blocked",
+                    "last_error": error, "model_calls_started": 2}, n)
+        history = report["synthetic_error_history"]
+        self.assertEqual(len(history), 12)
+        self.assertEqual(history[0]["checkpoint"], 8)
+        for secret in ("hidden-route", "synthetic-secret", "another-secret",
+                       "provider.invalid", "token123", "sk-private123"):
+            self.assertNotIn(secret, str(history))
+
+    def test_successful_checkpoint_not_recorded(self):
+        report = {}
+        qual.collect_fixture_error(report, {"phase": "reviewer-completed"}, 1)
+        self.assertEqual(report, {})
