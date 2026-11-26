@@ -25,3 +25,12 @@ positive-output usage counters (prompt includes cache reads/writes). Missing,
 zero-filled or inconsistent usage remains unknown. SDK cost is not an invoice.
 The default remains off; qualify on a synthetic fixture before enabling it.
 See https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/json.md.
+
+## Live transport qualification
+
+The explicit `usage` profile enables JSONL only within four synthetic
+one-turn probes (one per primary role). It passes only with valid JSON and
+complete consistent numeric usage for all four roles. No book is opened,
+no additional audit, fallback or retry is invoked, and no provider identifiers
+or response content are published. A passing report proves transport usage
+availability only, not literary parity or monetary billing accuracy.
