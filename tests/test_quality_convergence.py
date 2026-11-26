@@ -227,6 +227,7 @@ class QualityRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             book = root / "books" / "test"
             book.mkdir(parents=True)
+            (book / "metadata.json").write_text(json.dumps({"target_language": "ru"}), "utf-8")
             (book / "glossary.md").write_text("Glossary", "utf-8")
             (book / "style-guide.md").write_text("Style", "utf-8")
             with patch.object(runner, "ROOT", root), patch.object(runner, "checkpoint"), \
