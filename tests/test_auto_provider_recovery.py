@@ -235,6 +235,17 @@ class ProviderRecoveryTests(unittest.TestCase):
             self.assertEqual(config("TRANSLATOR_FALLBACK")[2], "test-backup")
 
 
+    def test_same_model_alias_does_not_count_as_fallback(self):
+        self.status["active"]["unit_id"] = self.chapter["unit_id"]
+        self.status["role_protocol_failures"] = {
+            self.chapter["unit_id"] + ":translator": 2}
+        env = {**self.env, "OMNIROUTE_TRANSLATOR_FALLBACK_MODEL": " test-primary "}
+        with patch.dict(os.environ, env), \
+             patch.object(worker, "complete", return_value="{}") as post:
+            worker.complete_for_job(self.status, "TRANSLATOR", "system", "source")
+        post.assert_called_once_with("TRANSLATOR", "system", "source")
+        self.assertEqual(self.status["provider_model_route"], "primary")
+
     def test_repeated_same_unit_protocol_failures_select_backup(self):
         self.status["active"]["unit_id"] = self.chapter["unit_id"]
         self.status["active"]["role"] = "translator"

@@ -70,3 +70,19 @@ checkpoint may use source-first reconstruction. At most three completely
 unusable groups per exact source/target/review identity are admitted. If that
 bound is exhausted, defer through the canonical attention queue, without PASS.
 Partial groups shrink strictly; the overall model budget remains mandatory.
+
+## Full review after substantive correction
+
+Focused review is restricted to minor anchored style, register and voice
+findings. Any other unresolved category or severity requires a new full-source
+comparison (partitioned when necessary), not inherited coverage from an earlier
+review. This is a conservative response to extended qualification finding a
+missed fidelity defect after internal acceptance; it does not establish the
+root cause or guarantee a successful live qualification.
+
+Extended synthetic qualification requires both the existing whole-book audit
+and six unit-local audits. Each unit verdict is bound to exact source and
+target hashes; any failed check keeps qualification failed. Audit model calls
+are reported separately from the bounded runner calls. No source or translated
+passages are added to the qualification report. A configured backup identical
+to the primary route is not a fallback.
