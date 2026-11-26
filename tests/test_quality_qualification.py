@@ -146,3 +146,39 @@ class IndependentAuditTests(unittest.TestCase):
             self.assertEqual(report["unit_audits"][4]["translation_sha256"],
                              hashlib.sha256(b"target 5").hexdigest())
             self.assertNotIn("target 5", json.dumps(report))
+
+
+class ShortConfirmationQualificationTests(unittest.TestCase):
+    def test_final_coverage_requires_exact_accepted_hashes(self):
+        chapters = [{"unit_id": "chapter-000001", "translation_acceptance":
+                     {"source_sha256": "a" * 64, "translation_sha256": "b" * 64}}]
+        decision = {"outcome": "PASS", "binding": dict(chapters[0]["translation_acceptance"])}
+        status = {"short_pass_confirmations": {"chapter-000001": decision}}
+        self.assertEqual(qual.short_confirmation_coverage(status, chapters), 1)
+        decision["binding"]["translation_sha256"] = "c" * 64
+        self.assertEqual(qual.short_confirmation_coverage(status, chapters), 0)
+        decision["binding"] = dict(chapters[0]["translation_acceptance"])
+        decision["outcome"] = "reserved"
+        self.assertEqual(qual.short_confirmation_coverage(status, chapters), 0)
+
+    def test_failed_fixture_sample_redacts_before_truncation_and_checks_hashes(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = b"Authored synthetic source."
+            target = ("x" * 4997 + "fake-secret-value https://example.invalid").encode()
+            (root / "s").write_bytes(source)
+            (root / "t").write_bytes(target)
+            chapters = [{"number": 1, "source_path": "s", "translation_path": "t"}]
+            audit = {"number": 1, "checks": {"complete_and_fluent": False},
+                     "source_sha256": hashlib.sha256(source).hexdigest(),
+                     "translation_sha256": hashlib.sha256(target).hexdigest()}
+            report = {"unit_audits": [audit]}
+            with patch.dict(os.environ, {"OMNIROUTE_API_KEY": "fake-secret-value"}):
+                sample = qual.failed_fixture_samples(root, chapters, report)[0]
+            self.assertEqual(len(sample["translation_excerpt"]), 5000)
+            self.assertNotIn("fake", sample["translation_excerpt"])
+            self.assertTrue(sample["truncated"])
+            (root / "t").write_bytes(b"changed")
+            with self.assertRaisesRegex(RuntimeError, "changed"):
+                qual.failed_fixture_samples(root, chapters, report)
