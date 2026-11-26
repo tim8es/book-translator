@@ -267,7 +267,10 @@ def run(args, report):
         from omniroute import complete
         result = {}
         report["comparison"] = result
-        compare(manifest, lambda system, user: complete("REVIEWER", system, user), result)
+        # Only the allowlisted synthetic source may produce content-bearing
+        # judge evidence; source admission has already verified its exact bytes.
+        compare(manifest, lambda system, user: complete("REVIEWER", system, user), result,
+                evidence_redactor=lambda value: qualification.redact_fixture_excerpt(value, os.environ))
         comparison_diagnostics(manifest, result, chatops["source_sha256"], report)
     report.update(stage="complete", state="complete")
 

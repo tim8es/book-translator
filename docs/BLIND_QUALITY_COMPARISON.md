@@ -132,3 +132,22 @@ Protocol completion is explicitly separated from both modes passing every
 criterion; neither implies production-wide quality equivalence. The optional
 short PASS confirmation also explicitly checks target-language prose and
 dialogue in the existing second reviewer call. It does not relax any gate.
+
+
+## Anchored synthetic judge protocol
+
+The third live pair completed with Auto 7 passes, 0 fails and 3 disagreements;
+the unchanged ChatOps candidate had 9 passes and 1 disagreement. This shows
+judge variability as well as potential translation defects. In subsequent
+live pairs, the explicitly versioned anchored-negative-evidence-v1 protocol
+requires an exact source anchor and target anchor (except omission or
+uncertainty) plus a concise explanation for each negative criterion.
+Each quote is validated against the exact candidate shown in that invocation,
+and evidence is mapped back after reversing A/B. Invalid or missing evidence
+stops the protocol; no retries, vote replacement, or automatic PASS.
+The existing four-call cap and consensus rule are unchanged.
+Only the allowlisted synthetic fixture enables this private redacted evidence;
+the ordinary CLI remains content-free. A valid quote does not prove the
+alleged defect. The judge prompt/schema changed, so comparisons to earlier
+runs must disclose that methodological change rather than claim a controlled
+improvement in translation quality.
