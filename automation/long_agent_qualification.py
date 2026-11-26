@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import time
@@ -109,6 +110,109 @@ def final_decision(status, chapter, records, source, target):
     return {"strategy": decision["strategy"], "chunk_count": decision["chunk_count"], **hashes}
 
 
+def failed_evidence(status, chapter, records, source, target):
+    """Bounded diagnostics for the authored synthetic long fixture only.
+
+    Historical review counts are context; only the current accepted bytes
+    and exact matching record may supply passage-level findings.
+    """
+    unit = chapter["unit_id"]
+    hashes = {"source_sha256": review_chunks.sha(source),
+              "translation_sha256": review_chunks.sha(target)}
+    acceptance = chapter.get("translation_acceptance", {})
+    if not all(acceptance.get(k) == v for k, v in hashes.items()):
+        raise ValueError("diagnostic accepted bytes mismatch")
+
+    def identifier(value, pattern):
+        return value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+
+    def anchor(value, text):
+        if not isinstance(value, dict):
+            return None
+        quote, occurrence = value.get("quote"), value.get("occurrence")
+        if (not isinstance(quote, str) or not 1 <= len(quote) <= 300
+                or type(occurrence) is not int or not 0 <= occurrence < 10000):
+            return None
+        hits = text.count(quote)
+        if hits <= occurrence or (hits > 1 and occurrence == 0):
+            return None
+        return {"quote": qual.redact_fixture_excerpt(quote, os.environ),
+                "occurrence": occurrence}
+
+    same_source = sorted((r for r in records if r.get("unit_id") == unit
+                          and r.get("source_sha256") == hashes["source_sha256"]),
+                         key=lambda r: r["sequence"])
+    row = {"unit_id": unit, **hashes, "review_history": []}
+    for r in same_source[-12:]:
+        findings = r.get("quality_report", {}).get("findings", [])
+        row["review_history"].append({
+            "sequence": r["sequence"], "record_id": identifier(r.get("record_id"), r"[0-9a-f]{32}"),
+            "translation_sha256": identifier(r.get("translation_sha256"), r"[0-9a-f]{64}"),
+            "outcome": r["outcome"] if r.get("outcome") in ("PASS", "CORRECTIONS_REQUIRED") else None,
+            "unresolved_count": sum(f.get("resolved") is False for f in findings)})
+    decision = status.get("review_orchestrator_decisions", {}).get(unit, {})
+    if isinstance(decision, dict) and decision:
+        binding = decision.get("binding", {})
+        row["agent_advice"] = {
+            "outcome": identifier(decision.get("outcome"), r"accepted|fallback|reserved"),
+            "strategy": identifier(decision.get("strategy"), r"full_direct|aligned_chunks"),
+            "chunk_count": decision.get("chunk_count") if type(decision.get("chunk_count")) is int else None,
+            "current_binding": all(binding.get(k) == v for k, v in hashes.items())
+                and binding.get("workflow_revision") == status.get("workflow_revision")}
+    matching = [r for r in same_source if r.get("translation_sha256") == hashes["translation_sha256"]]
+    if not matching:
+        return row
+    latest = matching[-1]
+    row["current_review_record_id"] = identifier(latest.get("record_id"), r"[0-9a-f]{32}")
+    open_findings = [f for f in latest.get("quality_report", {}).get("findings", [])
+                     if f.get("resolved") is False]
+    row["unresolved_count"] = len(open_findings)
+    row["findings"] = []
+    for f in open_findings[:30]:
+        source_anchor = anchor(f.get("source_anchor"), source)
+        target_anchor = anchor(f.get("translation_anchor"), target)
+        category = identifier(f.get("category"), r"omission|addition|meaning|modality|referent|terminology|register|voice|style|structure")
+        # Never report unverified passages as evidence.
+        if not source_anchor or (not target_anchor and not
+                (category == "omission" and f.get("translation_anchor") is None)):
+            continue
+        row["findings"].append({
+            "id": identifier(f.get("id"), r"[a-z][a-z0-9-]{0,31}"),
+            "category": category, "severity": identifier(f.get("severity"), r"minor|major|critical"),
+            "source_anchor": source_anchor, "translation_anchor": target_anchor,
+            "detail": qual.redact_fixture_error(f.get("detail", ""), os.environ)})
+    row["unreported_findings"] = len(open_findings) - len(row["findings"])
+    ids = {f["id"] for f in row["findings"] if f["id"]}
+    row["candidate_rejections"] = [
+        {"finding_id": x["finding_id"],
+         "reason": qual.redact_fixture_error(x.get("reason", ""), os.environ),
+         "patch_sha256": identifier(x.get("patch_sha256"), r"[0-9a-f]{64}")}
+        for x in status.get("correction_regression_rejections", [])
+        if x.get("unit_id") == unit and x.get("review_record_id") == latest["record_id"]
+        and x.get("finding_id") in ids][-20:]
+    plan = status.get("quality_recovery_strategy", {})
+    if plan.get("unit_id") == unit and plan.get("record_id") == latest["record_id"]:
+        row["recovery_plan"] = [
+            {"finding_id": fid, "level": v.get("level") if type(v.get("level")) is int else None,
+             "strategy": identifier(v.get("strategy"), r"[a-z0-9_-]{1,60}")}
+            for fid, v in plan.get("findings", {}).items() if fid in ids and isinstance(v, dict)]
+    return row
+
+
+def capture_failed_evidence(book, status, chapter, source, report):
+    # This function is called only within the temporary authored fixture.
+    # No production path or external book is accepted by this entrypoint.
+    try:
+        target_path = (book / chapter["translation_path"]).resolve()
+        if not target_path.is_relative_to(book.resolve()):
+            raise ValueError("diagnostic target path outside fixture")
+        target = target_path.read_text("utf-8")
+        records = json.loads((book / "review-ledger.json").read_text("utf-8"))["records"]
+        report["failure_evidence"] = failed_evidence(status, chapter, records, source, target)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        report["failure_evidence_error"] = type(exc).__name__
+
+
 def qualify_long(revision, output):
     report = {"schema_version": 1, "workflow_revision": revision, "profile": "long-agent",
               "qualification": "failed", "model_call_limit": CALL_CAP,
@@ -151,6 +255,7 @@ def qualify_long(revision, output):
             report["runner_usage"] = qualification_usage(status)
             ch = json.loads((book / "progress.json").read_text("utf-8"))["chapters"][0]
             if status["state"] != "done" or ch["status"] != "reviewed" or not 0 <= report["model_calls"] <= CALL_CAP:
+                capture_failed_evidence(book, status, ch, source, report)
                 raise RuntimeError("long runner did not finish")
             target = (book / ch["translation_path"]).read_text("utf-8")
             if review_chunks.BLOCK_MARKER.findall(source) != review_chunks.BLOCK_MARKER.findall(target):
