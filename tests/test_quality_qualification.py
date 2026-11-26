@@ -166,6 +166,15 @@ class RouteConfigurationTests(unittest.TestCase):
         self.assertFalse(report["fallback_live_execution_verified"])
         self.assertNotIn("private-route", str(report))
 
+    def test_backup_shared_with_another_primary_is_not_independent(self):
+        with patch.dict(os.environ, {
+            "OMNIROUTE_TRANSLATOR_MODEL": "primary",
+            "OMNIROUTE_REVIEWER_MODEL": "shared",
+            "OMNIROUTE_TRANSLATOR_FALLBACK_MODEL": "shared",
+        }, clear=True):
+            report = qual.route_configuration()
+        self.assertEqual(report["fallbacks"]["translator"], "shared_primary_route")
+
     def test_distinct_alias_is_configuration_only(self):
         with patch.dict(os.environ, {
             "OMNIROUTE_TRANSLATOR_MODEL": "primary",

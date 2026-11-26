@@ -176,6 +176,43 @@ def create_state(root, remote, revision, job, profile="smoke"):
     git(root, "push", "origin", "main")
 
 
+def route_configuration():
+    """Report configured route diversity without exposing provider identifiers.
+
+    Distinct aliases do not establish distinct underlying providers/models or
+    successful failover. This is configuration evidence, not a live probe.
+    """
+    roles = ("TRANSLATOR", "REVIEWER", "CORRECTOR", "ORCHESTRATOR")
+    routes = {role: os.environ.get(f"OMNIROUTE_{role}_MODEL", "").strip()
+              for role in roles}
+    configured = {role.lower(): bool(route) for role, route in routes.items()}
+    primary_routes = set(routes.values()) - {""}
+    fallbacks = {}
+    for role in roles[:3]:
+        primary = routes[role]
+        backup = os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()
+        if not primary:
+            state = "primary_missing"
+        elif not backup:
+            state = "not_configured"
+        elif backup == primary:
+            state = "same_route"
+        elif backup in primary_routes:
+            state = "shared_primary_route"
+        else:
+            state = "distinct_route_configured"
+        fallbacks[role.lower()] = state
+    return {
+        "primary_configured": configured,
+        "distinct_primary_route_count": len(primary_routes),
+        "fallbacks": fallbacks,
+        "audit_role": "reviewer",
+        "audit_uses_same_configured_role": True,
+        "provider_independence_verified": False,
+        "fallback_live_execution_verified": False,
+    }
+
+
 def diagnostic(status):
     """Report only small, non-content coordination fields from synthetic state."""
     if not isinstance(status, dict):
@@ -239,40 +276,6 @@ def audit_units(complete, book, chapters, report):
         evidence["checks"] = checked_audit(
             complete, criteria, source.decode("utf-8"), target.decode("utf-8"))
     return all(all(unit["checks"].values()) for unit in report["unit_audits"])
-
-
-def route_configuration():
-    """Report configured route diversity without exposing provider identifiers.
-
-    Distinct aliases do not establish distinct underlying providers/models or
-    successful failover. This is configuration evidence, not a live probe.
-    """
-    roles = ("TRANSLATOR", "REVIEWER", "CORRECTOR", "ORCHESTRATOR")
-    routes = {role: os.environ.get(f"OMNIROUTE_{role}_MODEL", "").strip()
-              for role in roles}
-    configured = {role.lower(): bool(route) for role, route in routes.items()}
-    fallbacks = {}
-    for role in roles[:3]:
-        primary = routes[role]
-        backup = os.environ.get(f"OMNIROUTE_{role}_FALLBACK_MODEL", "").strip()
-        if not primary:
-            state = "primary_missing"
-        elif not backup:
-            state = "not_configured"
-        elif backup == primary:
-            state = "same_route"
-        else:
-            state = "distinct_route_configured"
-        fallbacks[role.lower()] = state
-    return {
-        "primary_configured": configured,
-        "distinct_primary_route_count": len(set(routes.values()) - {""}),
-        "fallbacks": fallbacks,
-        "audit_role": "reviewer",
-        "audit_uses_same_configured_role": True,
-        "provider_independence_verified": False,
-        "fallback_live_execution_verified": False,
-    }
 
 
 def qualify(revision, output, profile="smoke"):

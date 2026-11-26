@@ -107,7 +107,7 @@ Keep the option off in production until live qualification on long units.
 
 The qualification report records whether each primary role is configured, the
 number of distinct configured primary route strings, and whether each fallback
-is absent, identical to its primary, or separately configured. It never records
+is absent, identical to its primary, shared with another primary, or separately configured. It never records
 route names, provider URLs or credentials. Distinct aliases alone do not prove
 independent underlying models or successful failover. The existing final audit
 uses the reviewer role in a fresh invocation; the report makes explicit that
