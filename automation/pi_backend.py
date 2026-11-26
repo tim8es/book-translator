@@ -72,11 +72,22 @@ def parse_json_events(output: str) -> tuple[str, dict]:
     if message.get("stopReason") != "stop":
         raise PiTransportFailure("pi_incomplete_assistant_message")
     content = message.get("content")
-    if not isinstance(content, list) or any(
-            not isinstance(block, dict) or block.get("type") != "text"
-            or not isinstance(block.get("text"), str) for block in content):
+    if not isinstance(content, list):
         raise PiTransportFailure("pi_invalid_assistant_content")
-    answer = "".join(block["text"] for block in content).strip()
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            raise PiTransportFailure("pi_invalid_assistant_content")
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+        elif block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+            # Pi print mode discards documented thinking blocks. Keep the
+            # same visible response in JSON mode; never retain reasoning.
+            continue
+        else:
+            # In particular, a tool call is never a valid response.
+            raise PiTransportFailure("pi_invalid_assistant_content")
+    answer = "\n".join(parts).strip()
     if not answer or len(answer) > MAX_OUTPUT_CHARS:
         raise PiTransportFailure("pi_empty_or_oversize_output")
     diagnostics = {"finish_reason": "stop", "response_format": "pi_prompt_json",
