@@ -138,5 +138,42 @@ class BlockRuntimeTests(unittest.TestCase):
                 self.assertEqual(status["quality_block_attempts"][0]["outcome"], "independent-veto")
 
 
+
+class BlockBatchTests(unittest.TestCase):
+    def test_disjoint_reconstruction_preserves_markers_and_checks_combined_context(self):
+        current, _ = fixture()
+        first = dict(current["quality_report"]["findings"][0], id="door",
+                     source_anchor={"quote": "blue", "occurrence": 0},
+                     translation_anchor={"quote": "синей", "occurrence": 0})
+        current["quality_report"]["findings"].append(first)
+        strategy = {"modality": {"level": 1, "issue_id": "key"},
+                    "door": {"level": 1, "issue_id": "door"}}
+        plan = block.select_batch(SOURCE, TARGET, current, strategy, [],
+                                  position=runner._anchor_position)
+        self.assertEqual(plan["schema_version"], 2)
+        self.assertEqual(set(plan["finding_ids"]), {"door", "modality"})
+        replacements = {"1": "Дверь была голубой.", "2": "Возможно, он найдёт ключ."}
+        result = block.apply_batch(plan, SOURCE, TARGET, current, replacements,
+                                   position=runner._anchor_position)
+        runner.check_markers(SOURCE, result)
+        self.assertIn(replacements["1"], result)
+        self.assertIn(replacements["2"], result)
+        cases = block.review_batch_cases(plan, SOURCE, TARGET, current, replacements,
+                                         position=runner._anchor_position)
+        self.assertEqual(len(cases), 2)
+        self.assertIn(replacements["2"], cases[0]["candidate_context_after"])
+        self.assertIn(replacements["1"], cases[1]["candidate_context_before"])
+        with self.assertRaises(ValueError):
+            block.apply_batch(plan, SOURCE, TARGET, current, {"1": replacements["1"]},
+                              position=runner._anchor_position)
+        with self.assertRaises(ValueError):
+            block.apply_batch(plan, SOURCE, TARGET, current,
+                              {**replacements, "2": "<!-- bt-block:3 -->"},
+                              position=runner._anchor_position)
+        with self.assertRaises(ValueError):
+            block.apply_batch(plan, SOURCE, TARGET + "changed", current, replacements,
+                              position=runner._anchor_position)
+
+
 if __name__ == "__main__":
     unittest.main()

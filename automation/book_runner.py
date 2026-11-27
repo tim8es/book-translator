@@ -2895,16 +2895,23 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
         plan = stage["plan"]
     else:
         try:
-            plan = quality_block_repair.select(source, translation, record, strategy,
+            selector = (quality_block_repair.select_batch
+                        if (engine / "docs/COHERENT_BLOCK_RECOVERY.md").is_file()
+                        else quality_block_repair.select)
+            plan = selector(source, translation, record, strategy,
                 [a for a in attempts if a.get("unit_id") == unit], position=_anchor_position)
         except (ValueError, KeyError, TypeError) as exc:
             raise JobError("invalid block reconstruction evidence") from exc
         if plan is None:
             return False, None
     book = ROOT / "books" / slug
+    batched = plan.get("schema_version") == 2
+    if batched and not (engine / "docs/COHERENT_BLOCK_RECOVERY.md").is_file():
+        raise JobError("block batch not admitted by pinned workflow")
     def candidate(replacement):
-        value = quality_block_repair.apply(plan, source, translation, record,
-                                            replacement, position=_anchor_position)
+        apply = quality_block_repair.apply_batch if batched else quality_block_repair.apply
+        value = apply(plan, source, translation, record,
+                      replacement, position=_anchor_position)
         check_markers(source, value)
         correction_regression.require_candidate_repetitions(source, translation, value,
             source_aligned=correction_regression.source_aligned_supported(engine) and quality_controller.supported(engine))
@@ -2932,7 +2939,8 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
     if stage is None:
         instructions, _ = role_contracts(engine, "translator")
         try:
-            system, user = quality_block_repair.prompt(plan, source, translation, record,
+            prompt = quality_block_repair.prompt_batch if batched else quality_block_repair.prompt
+            system, user = prompt(plan, source, translation, record,
                 instructions, (book / "glossary.md").read_text("utf-8"),
                 (book / "style-guide.md").read_text("utf-8"))
         except ValueError:
@@ -2952,7 +2960,8 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
             return False, None
         try:
             answer = complete_for_job(status, "TRANSLATOR", system, user)
-            replacement = quality_block_repair.parse(answer)
+            parser = quality_block_repair.parse_batch if batched else quality_block_repair.parse
+            replacement = parser(answer)
             candidate(replacement)
         except TransientModelError:
             raise
@@ -2969,8 +2978,10 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
         return True, (value, [], [])
     instructions, _ = role_contracts(engine, "reviewer")
     try:
-        cases = [quality_block_repair.review_case(plan, source, translation, record,
-                                                   stage["replacement"])]
+        cases = (quality_block_repair.review_batch_cases(plan, source, translation, record,
+                    stage["replacement"], position=_anchor_position) if batched else
+                 [quality_block_repair.review_case(plan, source, translation, record,
+                                                   stage["replacement"])])
         system, user = candidate_review.build_prompt(cases, instructions, require_resolution=True)
     except (ValueError, candidate_review.CandidateReviewError):
         retire("review-context-too-large")
@@ -2985,7 +2996,7 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
         return False, None
     try:
         answer = complete_for_job(status, "REVIEWER", system, user)
-        rejected = candidate_review.parse_verdict(answer, ["block-reconstruction"])
+        rejected = candidate_review.parse_verdict(answer, [case["finding_id"] for case in cases])
     except TransientModelError:
         raise
     except (ModelError, ValueError, candidate_review.CandidateReviewError):
