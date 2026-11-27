@@ -134,3 +134,37 @@ class CoherentTests(unittest.TestCase):
                 row = live.run_arm(root,one.read_bytes(),"off",3)
             self.assertEqual(row["calls_reserved"],0)
             self.assertFalse(row["epub_verified"])
+
+
+    def test_indexed_repeated_anchors_batch_without_weakening_risk_boundaries(self):
+        phrase = "Repeated exact sentence."
+        translation = "Unique first sentence. " + " ".join([phrase] * 26)
+        findings = [{"id": "first", "category": "style", "severity": "minor",
+                     "translation_anchor": {"quote": "Unique first sentence.", "occurrence": 0}}]
+        findings += [{"id": str(i), "category": "style", "severity": "minor",
+                      "translation_anchor": {"quote": phrase, "occurrence": i}}
+                     for i in range(1, 26)]
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_COHERENT_BATCHES": "on"}):
+            def run(indexed):
+                pending = findings[:]
+                calls = 0
+                while pending:
+                    selected = coherent.correction_selection(pending, translation,
+                        pending[:1], [], "u", "r", indexed_anchors=indexed)
+                    self.assertEqual(selected, pending[:len(selected)])
+                    pending = pending[len(selected):]
+                    calls += 1
+                return calls
+            self.assertEqual((run(False), run(True)), (26, 4))
+            ambiguous = dict(findings[1], translation_anchor={"quote": phrase, "occurrence": 0})
+            absent = dict(findings[1], translation_anchor={"quote": phrase, "occurrence": 26})
+            duplicate = dict(findings[2], translation_anchor=findings[1]["translation_anchor"])
+            critical = dict(findings[2], severity="critical")
+            for invalid in (ambiguous, absent):
+                self.assertEqual(coherent.correction_selection([findings[0], invalid],
+                    translation, findings[:1], [], "u", "r", indexed_anchors=True), findings[:1])
+            for invalid in (duplicate, critical):
+                self.assertEqual(coherent.correction_selection([findings[1], invalid],
+                    translation, findings[1:2], [], "u", "r", indexed_anchors=True), findings[1:2])
+            self.assertEqual(coherent.correction_selection(findings, translation,
+                findings[:1], [], "u", "r", pressure=1, indexed_anchors=True), findings[:1])
