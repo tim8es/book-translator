@@ -25,7 +25,8 @@ SLUG = re.compile(r"[^\W_][\w-]{0,99}\Z")
 SESSION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 OPERATIONS = {"claim", "renew-claim", "release", "accept-translation",
               "review-record", "accept-review", "cleanup-claims",
-              "defer-review", "pause-auto", "resume-auto"}
+              "defer-review", "pause-auto", "resume-auto",
+              "proposal-submit", "proposal-reconcile"}
 REQUESTS = Path(".chat-ops/requests")
 RESULTS = Path(".chat-ops/results")
 
@@ -85,15 +86,35 @@ def validate(raw: dict, file_id: str) -> dict:
                                "source_sha256", "claim_sha256"},
         "review-record": {"outcome", "quality_report", "source_sha256",
                           "translation_sha256", "claim_sha256"},
+        "proposal-submit": {"role", "target", "suggestion", "rationale",
+                            "source_sha256", "translation_sha256", "claim_sha256"},
+        "proposal-reconcile": {"proposal_id", "decision", "reason"},
         "accept-review": set(),
         "cleanup-claims": set(),
         "defer-review": {"reason"},
         "pause-auto": set(),
         "resume-auto": set(),
     }[op]
-    require(set(raw) == common | extras if op in {"accept-translation", "review-record"}
+    require(set(raw) == common | extras if op in {"accept-translation", "review-record", "proposal-submit"}
             else set(raw).issuperset(common) and set(raw).issubset(common | extras),
             "missing or unexpected request fields")
+    if op == "proposal-submit":
+        require(raw["role"] in {"translator", "reviewer"}, "invalid proposal role")
+        require(raw["target"] in {"glossary", "style_guide"}, "invalid proposal target")
+        for field, limit in (("suggestion", 200000), ("rationale", 16000)):
+            value = raw[field]
+            require(isinstance(value, str) and value.strip() and
+                    len(value.encode("utf-8")) <= limit, "invalid proposal " + field)
+    if op == "proposal-reconcile":
+        require(isinstance(raw.get("proposal_id"), str) and
+                HEX32.fullmatch(raw["proposal_id"]) is not None, "invalid proposal id")
+        require(raw.get("decision") in {"accept", "reject"}, "invalid proposal decision")
+        if raw["decision"] == "accept":
+            require("reason" not in raw, "accepted proposal cannot include reason")
+        else:
+            reason = raw.get("reason")
+            require(isinstance(reason, str) and reason.strip() and
+                    len(reason.encode("utf-8")) <= 16000, "rejection requires reason")
     if op == "defer-review":
         require(raw.get("reason") in {
             "correction-limit", "review-round-limit", "model-anchor-retries",
@@ -122,11 +143,11 @@ def validate(raw: dict, file_id: str) -> dict:
         require(type(raw["quality_report"]) is dict, "quality report is required")
         require(len(json.dumps(raw["quality_report"]).encode("utf-8")) <= 32768,
                 "quality report exceeds 32 KiB")
-    if op in {"accept-translation", "review-record"}:
+    if op in {"accept-translation", "review-record", "proposal-submit"}:
         for name in ("source_sha256", "claim_sha256"):
             require(isinstance(raw[name], str) and re.fullmatch(r"[0-9a-f]{64}", raw[name]),
                     "invalid " + name)
-    if op == "review-record":
+    if op in {"review-record", "proposal-submit"}:
         require(isinstance(raw["translation_sha256"], str) and
                 re.fullmatch(r"[0-9a-f]{64}", raw["translation_sha256"]),
                 "invalid translation SHA-256")
@@ -161,6 +182,31 @@ def cli(root: Path, script: str, *args: str) -> dict:
         return json.loads(output) if output.startswith("{") else {"message": output[-700:]}
     except ValueError:
         raise RequestError("canonical command returned invalid JSON") from None
+
+
+def proposal_cli(root: Path, request: dict) -> dict:
+    """Invoke the book-pinned ProposalManager in a fresh isolated process."""
+    active = _ACTIVE_PINNED_RUNTIME
+    require(active is not None, "proposal operation requires a pinned runtime")
+    pinned, revision, bound_root = active
+    require(root.resolve() == bound_root, "pinned runtime belongs to another book-state checkout")
+    with tempfile.TemporaryDirectory() as temp:
+        payload = Path(temp) / "proposal-request.json"
+        payload.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+        command = Path(__file__).resolve().with_name("pinned_cli.py")
+        result = subprocess.run(
+            [sys.executable, str(command), "--engine", str(pinned),
+             "--state", str(root), "--revision", revision, "proposal", str(payload)],
+            cwd=root, text=True, capture_output=True)
+        if result.returncode:
+            # Errors in proposal handling must not echo the literary payload.
+            raise RequestError("canonical proposal command failed")
+        try:
+            output = json.loads(result.stdout)
+            require(type(output) is dict, "invalid proposal receipt")
+            return output
+        except ValueError:
+            raise RequestError("canonical proposal command returned invalid JSON") from None
 
 
 def expected_book(root: Path, request: dict) -> tuple[Path, dict]:
@@ -296,6 +342,17 @@ def execute(root: Path, engine: Path, request: dict) -> dict:
                    "--reason", request["reason"], "--json")
     if op in {"renew-claim", "release"}:
         return cli(root, "book.py", op, slug, chapter, "--session-id", session, "--json")
+    if op == "proposal-submit":
+        unit = chapter_and_claim(book, request, role=request["role"])
+        require(unit.get("status") in {"translated", "reviewed"},
+                "proposal requires an accepted translation")
+        translation = book / unit["translation_path"]
+        require(translation.is_file() and not translation.is_symlink() and
+                sha256(translation.read_bytes()) == request["translation_sha256"],
+                "translation artifact changed")
+        return proposal_cli(root, request)
+    if op == "proposal-reconcile":
+        return proposal_cli(root, request)
     if op == "accept-translation":
         unit = chapter_and_claim(book, request, role="translator")
         path = book / unit["translation_path"]

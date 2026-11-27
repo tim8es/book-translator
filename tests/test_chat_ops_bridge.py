@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,13 @@ def sample(operation="claim"):
         base.update({"translation": "Русский текст\n",
                      "translation_sha256": hashlib.sha256("Русский текст\n".encode()).hexdigest(),
                      "source_sha256": "a" * 64, "claim_sha256": "b" * 64})
+    if operation == "proposal-submit":
+        base.update({"role": "translator", "target": "glossary",
+                     "suggestion": "# Glossary\nnew\n", "rationale": "Source-supported decision",
+                     "source_sha256": "a" * 64, "translation_sha256": "c" * 64,
+                     "claim_sha256": "b" * 64})
+    if operation == "proposal-reconcile":
+        base.update({"proposal_id": "d" * 32, "decision": "accept"})
     if operation == "defer-review":
         base["reason"] = "correction-limit"
     if operation == "review-record":
@@ -166,6 +174,121 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(result["unit_id"], "chapter-000004")
             cli.assert_any_call(root, "book.py", "defer-review", "test-book", "4",
                                 "--reason", "correction-limit", "--json")
+
+    def test_proposal_request_schema_rejects_unsafe_or_unbound_fields(self):
+        for field, value in (("role", "orchestrator"), ("target", "../metadata.json"),
+                             ("suggestion", ""), ("rationale", ""), ("claim_sha256", "bad"),
+                             ("translation_sha256", "bad"), ("source_sha256", "bad")):
+            with self.subTest(field=field), self.assertRaises(bridge.RequestError):
+                obj = sample("proposal-submit")
+                obj[field] = value
+                bridge.validate(obj, RID)
+        for field, value in (("proposal_id", "../x"), ("decision", "write"),
+                             ("replacement", "arbitrary replacement")):
+            with self.subTest(field=field), self.assertRaises(bridge.RequestError):
+                obj = sample("proposal-reconcile")
+                obj[field] = value
+                bridge.validate(obj, RID)
+        rejected = sample("proposal-reconcile")
+        rejected["decision"] = "reject"
+        with self.assertRaises(bridge.RequestError):
+            bridge.validate(rejected, RID)
+        rejected["reason"] = "Not supported by the source."
+        self.assertEqual(bridge.validate(rejected, RID), rejected)
+
+    def test_proposal_reconcile_runs_pinned_transport_only(self):
+        payload = bridge.validate(sample("proposal-reconcile"), RID)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(bridge, "expected_book", return_value=(root, {})), \
+                 patch.object(bridge, "pinned_engine"), \
+                 patch.object(bridge, "cli"), \
+                 patch.object(bridge, "proposal_cli", return_value={"status": "accepted"}) as command:
+                self.assertEqual(bridge.execute(root, root, payload), {"status": "accepted"})
+            command.assert_called_once_with(root, payload)
+
+    def test_proposal_submit_checks_live_claim_and_accepted_translation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "translated").mkdir()
+            artifact = root / "translated/004.md"
+            artifact.write_bytes(b"translation\n")
+            payload = sample("proposal-submit")
+            payload["translation_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            with patch.object(bridge, "expected_book", return_value=(root, {})), \
+                 patch.object(bridge, "pinned_engine"), patch.object(bridge, "cli"), \
+                 patch.object(bridge, "chapter_and_claim", return_value={
+                     "status": "translated", "translation_path": "translated/004.md"}) as claim, \
+                 patch.object(bridge, "proposal_cli", return_value={"proposal_id": "d" * 32}) as command:
+                self.assertEqual(bridge.execute(root, root, payload)["proposal_id"], "d" * 32)
+                claim.assert_called_once_with(root, payload, role="translator")
+                command.assert_called_once_with(root, payload)
+                artifact.write_bytes(b"changed\n")
+                with self.assertRaisesRegex(bridge.RequestError, "translation artifact changed"):
+                    bridge.execute(root, root, payload)
+                self.assertEqual(command.call_count, 1)
+
+    def test_pinned_proposal_manager_submit_accept_stale_and_scope(self):
+        # Real pinned filesystem manager; no mock shared-state mutation.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            book = root / "books/test-book"
+            book.mkdir(parents=True)
+            (book / "metadata.json").write_text(json.dumps({
+                "workflow": {"resolved_revision": REV}}), encoding="utf-8")
+            (book / "progress.json").write_text(json.dumps({"chapters": [
+                {"number": 4, "unit_id": "chapter-000004"},
+                {"number": 5, "unit_id": "chapter-000005"}]}), encoding="utf-8")
+            glossary = book / "glossary.md"
+            style = book / "style-guide.md"
+            glossary.write_text("# Glossary\n", encoding="utf-8")
+            style.write_text("# Style Guide\n", encoding="utf-8")
+            claim_path = book / ".workflow/claims/chapter-000004.json"
+            claim_path.parent.mkdir(parents=True)
+            claim = {"schema_version": 1, "claim_id": "c" * 32,
+                     "unit_id": "chapter-000004", "role": "translator",
+                     "session_id": "chat-test-session", "base_revision": "base-revision",
+                     "base_commit": "base-commit", "workflow_revision": REV,
+                     "shared_state_revisions": {
+                         "glossary": hashlib.sha256(glossary.read_bytes()).hexdigest(),
+                         "style_guide": hashlib.sha256(style.read_bytes()).hexdigest()},
+                     "claimed_at": "2020-01-01T00:00:00Z",
+                     "expires_at": "2099-01-01T00:00:00Z"}
+            claim_path.write_text(json.dumps(claim), encoding="utf-8")
+            def pinned(payload, ok=True):
+                request_path = root / "request.json"
+                request_path.write_text(json.dumps(payload), encoding="utf-8")
+                # A fresh process imports the exact engine's modules just as
+                # the runtime adapter does, without a network checkout.
+                command = (
+                    "import sys; from pathlib import Path; "
+                    "sys.path.insert(0, sys.argv[1]); "
+                    "from pinned_cli import run_proposal; "
+                    "run_proposal(Path(sys.argv[2]), sys.argv[3], [sys.argv[4]])"
+                )
+                result = subprocess.run(
+                    [sys.executable, "-c", command, str(SCRIPT.parent),
+                     str(root), REV, str(request_path)], capture_output=True, text=True)
+                if ok:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    return json.loads(result.stdout)
+                self.assertNotEqual(result.returncode, 0)
+                return result
+            submit = sample("proposal-submit")
+            submit["suggestion"] = "# Glossary\n| Original | Translation | Type | Notes |\n| --- | --- | --- | --- |\n| Moon | Луна | term | |\n"
+            first = pinned(submit)
+            second = pinned(dict(submit, target="style_guide", suggestion="# Style Guide\nNew evidence.\n"))
+            self.assertEqual(glossary.read_text(), "# Glossary\n")
+            accept = dict(sample("proposal-reconcile"), proposal_id=first["proposal_id"],
+                          session_id="orchestrator-chat")
+            pinned(dict(accept, chapter=5), ok=False)
+            self.assertEqual(pinned(accept)["status"], "accepted")
+            self.assertEqual(glossary.read_text(), submit["suggestion"])
+            self.assertEqual(pinned(accept)["status"], "accepted")
+            self.assertEqual(pinned(dict(accept, proposal_id=second["proposal_id"]))["status"], "stale")
+            self.assertEqual(style.read_text(), "# Style Guide\n")
+            pinned(submit, ok=False)
+            self.assertEqual(len(list((book / ".workflow/proposals").glob("*.resolution.json"))), 2)
 
     def test_unknown_operation_fails(self):
         obj = sample()
