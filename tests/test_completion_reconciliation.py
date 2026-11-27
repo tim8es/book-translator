@@ -161,16 +161,39 @@ class CompletionReconciliationTests(unittest.TestCase):
     def test_queue_selects_blocked_completion_and_runner_does_not_call_model(self):
         self.status_file(self.previous)
         with patch.object(runner, "ROOT", self.root), \
-             patch.object(runner, "git", return_value=""), \
+             patch.object(runner, "git", side_effect=lambda *args: "c"*40 if args[0] == "rev-parse" else ""), \
              patch.object(runner, "checkpoint") as checkpoint, \
-             patch.object(runner, "install_engine") as engine, \
+             patch.object(runner, "install_engine", return_value=(self.root / "unused-engine", self.pin)) as engine, \
+             patch.object(runner, "cli", return_value=json.dumps({
+                 "state": "current", "preview": False, "artifact_path": "output/book.epub",
+                 "artifact_sha256": self.read("output/manifest.json")["artifact_sha256"]})) as cli, \
              patch.object(runner, "complete") as model:
             self.assertEqual(runner.ready_jobs(), [{"job_id": self.job, "book_key": self.slug}])
             result = runner.run(self.job)
             self.assertEqual(result["state"], "done")
             checkpoint.assert_called_once_with(self.job, result, self.slug)
-            engine.assert_not_called()
+            engine.assert_called_once_with(self.pin)
+            cli.assert_called_once_with("build-status", self.slug, "--json")
             model.assert_not_called()
+
+    def test_pinned_build_preflight_failure_does_not_requeue_unchanged_tree(self):
+        self.status_file(self.previous)
+        with patch.object(runner, "ROOT", self.root), \
+             patch.object(runner, "git", side_effect=lambda *args: "c"*40 if args[0] == "rev-parse" else ""), \
+             patch.object(runner, "checkpoint") as checkpoint, \
+             patch.object(runner, "install_engine", return_value=(self.root / "unused-engine", self.pin)), \
+             patch.object(runner, "cli", return_value='{"state":"stale"}'), \
+             patch.object(runner, "complete") as model:
+            result = runner.run(self.job)
+            self.assertEqual(result["state"], "blocked")
+            self.assertEqual(result["phase"], "completion-reconciliation-preflight-failed")
+            self.assertEqual(result["reconciliation_failed_tree"], "c"*40)
+            checkpoint.assert_called_once()
+            model.assert_not_called()
+            self.status_file(result)
+            self.assertEqual(runner.ready_jobs(), [])
+            self.assertEqual(runner.run(self.job), result)
+            checkpoint.assert_called_once()
 
     def test_new_intake_uses_existing_book_concurrency_lane(self):
         with patch.object(runner, "ROOT", self.root):
