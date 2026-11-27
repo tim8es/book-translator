@@ -219,6 +219,16 @@ def inspect(root: Path, job_id: str, now: datetime, include_missing: bool) -> di
     elif state == "done":
         try:
             total, reviewed, kind = verify_done(root, status)
+            if status.get("phase") == "reconciled-completed":
+                # Re-check the exact intake and current manifest binding at
+                # notification time, not only when the queue was reconciled.
+                from completion_reconciliation import verified_completion
+                request = read_json(root / "intake" / "auto" / job_id / "request.json")
+                fields = verified_completion(root, request, status, status["book_slug"])
+                if any(status.get(k) != fields[k] for k in (
+                        "book_slug", "source_sha256", "workflow_revision",
+                        "artifact_path", "artifact_sha256", "review_provenance")):
+                    raise ValueError("reconciled status no longer matches verified output")
         except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
             kind = "integrity_failed"
             reason = "Reported done but verification failed: " + str(exc)[:180]
