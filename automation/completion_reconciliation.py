@@ -67,6 +67,8 @@ def verified_completion(root: Path, request: dict, status: dict | None,
     source = metadata["source"]
     pin = metadata["workflow"]["resolved_revision"]
     source_sha = request["source_sha256"]
+    if (request.get("schema_version") != 1 or not re.fullmatch(r"[0-9a-f]{32}", request["job_id"])):
+        raise ValueError("invalid immutable intake identity")
     intake = root / "intake" / "auto" / request["job_id"] / "source.epub"
     if not intake.is_file() or intake.is_symlink() or job_monitor.digest(intake) != source_sha:
         raise ValueError("immutable intake source bytes changed")
@@ -85,6 +87,8 @@ def verified_completion(root: Path, request: dict, status: dict | None,
                 or status.get("superseded_by_job_id")
                 or str(status.get("phase", "")).startswith("superseded-")):
             raise ValueError("status belongs to another identity or is retired")
+    if Path(source["filename"]).name != source["filename"] or source["filename"] in ("", ".", ".."):
+        raise ValueError("unsafe original filename")
     original = _file(book, "source/" + source["filename"])
     if job_monitor.digest(original) != source_sha:
         raise ValueError("preserved source bytes changed")
@@ -111,6 +115,18 @@ def verified_completion(root: Path, request: dict, status: dict | None,
             or not chapters or len(chapters) != len(extracted)
             or len(chapters) != metadata["chapter_count"]):
         raise ValueError("source corpus/progress mismatch")
+    coverage = job_monitor.read_json(_file(book, "source-coverage.json"))
+    if (coverage.get("state") != "verified" or coverage.get("source_sha256") != source_sha
+            or coverage.get("chapter_count") != len(chapters)
+            or len(coverage["extracted"]) != len(chapters)):
+        raise ValueError("source coverage is absent or stale")
+    coverage_hashes = {item["number"]: item["sha256"] for item in coverage["extracted"]}
+    if len(coverage_hashes) != len(chapters):
+        raise ValueError("duplicate source coverage units")
+    ledger = job_monitor.read_json(_file(book, "review-ledger.json"))
+    if ledger.get("book_slug") != slug:
+        raise ValueError("review ledger identity mismatch")
+    latest = job_monitor.recent_review_records(ledger)
     sources = {item["unit_id"]: item for item in extracted}
     if len(sources) != len(chapters):
         raise ValueError("duplicate source units")
@@ -119,14 +135,21 @@ def verified_completion(root: Path, request: dict, status: dict | None,
         uid = unit["unit_id"]
         entry = sources[uid]
         acceptance = unit["translation_acceptance"]
+        review = latest[uid]
+        checks = review["quality_report"]["checks"]
         source_hash = job_monitor.digest(_file(book, unit["source_path"]))
         target_hash = job_monitor.digest(_file(book, unit["translation_path"]))
         if (uid in seen or unit["status"] != "reviewed"
                 or entry["path"] != unit["source_path"]
                 or source_hash != entry["sha256"]
+                or source_hash != coverage_hashes[unit["number"]]
                 or source_hash != acceptance["source_sha256"]
                 or target_hash != acceptance["translation_sha256"]
-                or acceptance["workflow_revision"] != pin):
+                or acceptance["workflow_revision"] != pin
+                or review["workflow_revision"] != pin
+                or review["review_contract_revision"] != "docs/TRANSLATION.md@" + pin
+                or not all(checks.get(key) is True for key in
+                           ("coverage", "meaning", "terminology", "style", "structure"))):
             raise ValueError("unit is incomplete or its accepted bytes changed")
         seen.add(uid)
     artifact = _file(book, manifest["artifact_path"])
