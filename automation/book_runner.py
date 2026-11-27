@@ -2031,6 +2031,49 @@ def init(job_id: str, request: dict, slug: str, revision: str) -> dict:
             "workflow_revision": revision}
 
 
+def initialize_pi_html_only(job_id: str) -> dict:
+    """Create one new canonical HTML workspace; never dispatch a literary role.
+
+    The caller holds the book-operation lane. No batch, retry, reconciliation,
+    existing workspace, or model call is admitted by this entrypoint.
+    """
+    request = request_for(job_id)
+    if request.get("source_format") not in {"html", "xhtml"}:
+        raise JobError("initialization-only requires HTML/XHTML intake")
+    if status_path(job_id).exists() or status_path(job_id).is_symlink():
+        raise JobError("initialization-only refuses an existing job status")
+    if executor_ownership.selected(ROOT, job_id, request["source_sha256"]) != "pi":
+        raise JobError("initialization-only requires explicit Pi ownership")
+    if os.environ.get("BOOK_TRANSLATOR_LLM_BACKEND") != "pi":
+        raise JobError("initialization-only requires Pi backend")
+    if chatops_admission_requested(job_id, request):
+        raise JobError("initialization-only refuses ChatOps admission")
+    source = intake_source(job_id, request)
+    title, author = intake_identity(source, request)
+    slug, existing = locate_book(title, author, request.get("source_filename", source.name),
+                                 request["target_language"], source_sha256=request["source_sha256"])
+    folder = ROOT / "books" / slug
+    if existing or folder.exists() or folder.is_symlink():
+        raise BookIdentityError("initialization-only refuses an existing workspace")
+    if git("diff", "--cached", "--name-only"):
+        raise JobError("initialization-only requires a clean index")
+    revision = request.get("workflow_revision")
+    if not revision:
+        raise JobError("initialization-only requires an explicit workflow revision")
+    engine, actual = install_engine(revision)
+    try:
+        if actual != revision:
+            raise JobError("initialization-only workflow pin mismatch")
+        status = init(job_id, request, slug, actual)
+        if status.get("state") != "running" or status.get("phase") != "initialized":
+            raise JobError("initialization-only did not initialize a new Pi workspace")
+        status["source_sha256"] = request["source_sha256"]
+        checkpoint(job_id, status, slug)
+        return status
+    finally:
+        shutil.rmtree(engine, ignore_errors=True)
+
+
 def chapter_data(slug: str) -> tuple[dict, dict, list]:
     folder = ROOT / "books" / slug
     progress = read_json(folder / "progress.json")
@@ -6979,7 +7022,23 @@ def main() -> int:
     parser.add_argument("--resume-interrupted", action="store_true")
     parser.add_argument("--batch", action="store_true")
     parser.add_argument("--admit-pi", action="store_true")
+    parser.add_argument("--initialize-pi-html-only", action="store_true")
     args = parser.parse_args()
+    if args.initialize_pi_html_only:
+        if (args.admit_pi or args.batch or args.select or args.book_key or args.retry_status
+                or args.retry_at or args.list_ready_json or args.resume_blocked
+                or args.resume_interrupted or args.retry_executor != "auto"):
+            parser.error("--initialize-pi-html-only only accepts --job-id")
+        try:
+            status = initialize_pi_html_only(safe_id(args.job_id))
+        except (executor_ownership.OwnershipError, JobError, OSError, ValueError,
+                KeyError, subprocess.TimeoutExpired) as exc:
+            print("Pi initialization refused: " + type(exc).__name__ + ": " + str(exc)[:180],
+                  file=sys.stderr)
+            return 1
+        print(json.dumps({"job_id": status["job_id"], "phase": status["phase"],
+                          "state": status["state"]}))
+        return 0
     if args.admit_pi:
         if (args.batch or args.select or args.book_key or args.retry_status
                 or args.retry_at or args.list_ready_json
