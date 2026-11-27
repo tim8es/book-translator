@@ -1473,6 +1473,9 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                 completed = completion_reconciliation.candidate(ROOT, request, state)
                 if completed is not None:
                     slug = completed["book_slug"]
+                    if (state and state.get("phase") == "completion-reconciliation-preflight-failed"
+                            and state.get("reconciliation_failed_tree") == git("rev-parse", f"HEAD:books/{slug}")):
+                        continue
                     if selection_executor(job_id, slug) == "auto":
                         reconciliations.setdefault(slug, ("", job_id,
                             {"job_id": job_id, "book_key": slug}))
@@ -6427,7 +6430,50 @@ def run(job_id: str, *, resume_blocked: bool = False,
                 raise JobError("completion reconciliation requires a clean book snapshot")
             if git("diff", "--cached", "--name-only"):
                 raise JobError("completion reconciliation requires a clean index")
+            tree = git("rev-parse", f"HEAD:books/{slug}")
+            if (status and status.get("phase") == "completion-reconciliation-preflight-failed"
+                    and status.get("reconciliation_failed_tree") == tree):
+                return status
+            # The exact book-pinned builder validates its own input fingerprint,
+            # EPUB content and source corpus. The shared runtime never emulates
+            # a historical build contract or rebuilds an artifact in this path.
+            engine, actual = install_engine(completed["workflow_revision"])
+            try:
+                if actual != completed["workflow_revision"]:
+                    raise JobError("completion reconciliation workflow pin mismatch")
+                try:
+                    build = json.loads(cli("build-status", slug, "--json"))
+                    if (build.get("state") != "current" or build.get("preview") is not False
+                            or build.get("artifact_sha256") != completed["artifact_sha256"]
+                            or f"books/{slug}/" + build.get("artifact_path", "") != completed["artifact_path"]):
+                        raise JobError("canonical build status did not confirm the exact current EPUB")
+                except (JobError, ValueError, TypeError, AttributeError):
+                    # Quarantine this evidence snapshot, not the entire book.
+                    # A changed book tree can be checked again automatically.
+                    result = dict(status or {"schema_version": 1, "job_id": job_id,
+                                             "failures": 0, "correction_rounds": {}})
+                    result["completion_reconciliation_failure"] = {
+                        "previous_state": result.get("state", "missing"),
+                        "previous_phase": result.get("phase"),
+                        "previous_error": result.get("last_error")}
+                    result.update({"state": "blocked",
+                                   "phase": "completion-reconciliation-preflight-failed",
+                                   "book_slug": slug,
+                                   "source_sha256": completed["source_sha256"],
+                                   "workflow_revision": actual,
+                                   "reconciliation_failed_tree": tree,
+                                   "last_error": "Pinned build-status did not confirm the current reviewed EPUB"})
+                    if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
+                        raise JobError("read-only reconciliation unexpectedly changed the book")
+                    checkpoint(job_id, result, slug)
+                    return result
+            finally:
+                shutil.rmtree(engine, ignore_errors=True)
+            if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
+                raise JobError("read-only reconciliation unexpectedly changed the book")
             result = completion_reconciliation.reconciled_status(job_id, status, completed)
+            result["completion_reconciliation"]["book_tree"] = tree
+            result.pop("reconciliation_failed_tree", None)
             checkpoint(job_id, result, slug)
             return result
     if not resume_blocked and not resume_interrupted and status:
