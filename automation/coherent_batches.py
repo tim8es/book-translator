@@ -33,8 +33,34 @@ def structural_selection(helper, plan, completed, legacy_limit, pressure=0, fall
         chars += size
     return chosen
 
+def _exact_replacement_range(text, anchor, *, indexed=False):
+    if not isinstance(anchor, dict):
+        return None
+    quote, occurrence = anchor.get("quote"), anchor.get("occurrence")
+    if (not isinstance(quote, str) or not quote
+            or type(occurrence) is not int or not 0 <= occurrence < 10000
+            or "<!--" in quote or "](" in quote):
+        return None
+    if not indexed:
+        if occurrence != 0 or text.count(quote) != 1:
+            return None
+        start = text.index(quote)
+        return start, start + len(quote)
+    # Same non-overlapping occurrence convention as the canonical patch applier.
+    # Occurrence zero never disambiguates repeated text in the pinned contract.
+    if occurrence == 0 and text.count(quote) != 1:
+        return None
+    offset = 0
+    for _ in range(occurrence + 1):
+        start = text.find(quote, offset)
+        if start < 0:
+            return None
+        offset = start + len(quote)
+    return start, offset
+
+
 def correction_selection(pending, translation, baseline, rejected, unit_id, record_id,
-                         failures=0, pressure=0, isolated=False):
+                         failures=0, pressure=0, isolated=False, *, indexed_anchors=False):
     # Only distinct, exact, non-overlapping replacement anchors may expand a batch.
     # Insertion, structural, critical and previously rejected work retains the old path.
     if not enabled() or failures or pressure or isolated or not pending:
@@ -48,14 +74,12 @@ def correction_selection(pending, translation, baseline, rejected, unit_id, reco
         if (item["id"] in retry_ids or item.get("severity") == "critical"
                 or item.get("category") in {"structure", "omission"}
                 or (item.get("category") == "referent" and item.get("severity") == "major")
-                or not isinstance(anchor, dict) or anchor.get("occurrence") != 0):
+                or not isinstance(anchor, dict)):
             break
-        quote = anchor.get("quote")
-        if (not isinstance(quote, str) or not quote or translation.count(quote) != 1
-                or "<!--" in quote or "](" in quote):
+        bounds = _exact_replacement_range(translation, anchor, indexed=indexed_anchors)
+        if bounds is None:
             break
-        start = translation.index(quote)
-        end = start + len(quote)
+        start, end = bounds
         if any(start < b and a < end for a, b in ranges):
             break
         chosen.append(item)

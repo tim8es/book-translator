@@ -149,7 +149,11 @@ def failed_evidence(status, chapter, records, source, target):
             "sequence": r["sequence"], "record_id": identifier(r.get("record_id"), r"[0-9a-f]{32}"),
             "translation_sha256": identifier(r.get("translation_sha256"), r"[0-9a-f]{64}"),
             "outcome": r["outcome"] if r.get("outcome") in ("PASS", "CORRECTIONS_REQUIRED") else None,
-            "unresolved_count": sum(f.get("resolved") is False for f in findings)})
+            "unresolved_count": sum(f.get("resolved") is False for f in findings),
+            "indexed_target_anchor_count": sum(
+                f.get("resolved") is False and isinstance(f.get("translation_anchor"), dict)
+                and type(f["translation_anchor"].get("occurrence")) is int
+                and f["translation_anchor"]["occurrence"] > 0 for f in findings)})
     decision = status.get("review_orchestrator_decisions", {}).get(unit, {})
     if isinstance(decision, dict) and decision:
         binding = decision.get("binding", {})

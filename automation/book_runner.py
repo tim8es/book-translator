@@ -3116,7 +3116,9 @@ def process_correction_batches(job_id: str, slug: str, status: dict, engine: Pat
             selected = coherent_batches.correction_selection(
                 pending, translation, selected, status.get("correction_regression_rejections", []),
                 chapter["unit_id"], record["record_id"], failures=status.get("failures", 0),
-                pressure=pressure, isolated=bool(isolated))
+                pressure=pressure, isolated=bool(isolated),
+                indexed_anchors=(quality_controller.supported(engine)
+                    and (engine / "docs/INDEXED_CORRECTION_BATCHES.md").is_file()))
             if coherent_batches.enabled():
                 status["adaptive_correction_budget"]["current_selection_size"] = len(selected)
         if continue_batches and isolated and len(pending) > 1:
