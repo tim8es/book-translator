@@ -429,7 +429,19 @@ def extract_chapters(source: Path, source_format: str) -> tuple[list[Chapter], d
     fallback = source.stem.replace("_", " ").replace("-", " ").strip() or "Book"
     if source_format in {"html", "xhtml"}:
         # Standalone HTML navigation may be substantive and is not EPUB-certified.
-        return split_html_document(text, fallback, skip_navigation=False), {}
+        # Unlike an EPUB spine item, the original document may span many output
+        # units. Resolve its fragment links against the complete document.
+        chapters = split_html_document(text, fallback, skip_navigation=False,
+                                       document_path=source.name)
+        anchors: dict[str, int] = {}
+        targets: set[str] = set()
+        for chapter in chapters:
+            for marker in re.findall(r"(?m)^<!-- bt-anchor:([A-Za-z_][A-Za-z0-9_.:-]*) -->$", chapter.content):
+                anchors[marker] = anchors.get(marker, 0) + 1
+            targets.update(re.findall(r"(?<!\\)\[[^\[\]\n]+\]\(#([A-Za-z_][A-Za-z0-9_.:-]*)\)", chapter.content))
+        if any(anchors.get(target) != 1 for target in targets):
+            raise BookError("Standalone HTML has a missing or duplicate local fragment target")
+        return chapters, {}
     if source_format == "markdown":
         return split_markdown(text, fallback), {}
     if source_format == "txt":
