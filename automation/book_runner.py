@@ -1453,13 +1453,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                 continue
             if state and superseded_editorial_upgrade_job(job_id, state):
                 continue
-            # Legacy Auto must never discover an explicitly Pi-owned intake,
-            # including one awaiting its first canonical extraction checkpoint.
-            if selection_executor(
-                job_id, state.get("book_slug") if state else None,
-            ) != "auto":
-                continue
-            key = book_key(job_id)
+            # Verified completed output may be reconciled independently of
+            # the literary executor. No transfer or model admission occurs.
             # Completion reconciliation is read-only at selection time and may
             # bypass a stale blocked/paused status, not a live canonical claim.
             # Preserve old test/legacy queue behavior when intake is missing.
@@ -1474,10 +1469,15 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                     if (state and state.get("phase") == "completion-reconciliation-preflight-failed"
                             and state.get("reconciliation_failed_tree") == git("rev-parse", f"HEAD:books/{slug}")):
                         continue
-                    if selection_executor(job_id, slug) == "auto":
-                        reconciliations.setdefault(slug, ("", job_id,
-                            {"job_id": job_id, "book_key": slug}))
+                    reconciliations.setdefault(slug, ("", job_id,
+                        {"job_id": job_id, "book_key": slug}))
                     continue
+            # Incomplete jobs still require the exact literary executor.
+            if selection_executor(
+                job_id, state.get("book_slug") if state else None,
+            ) != "auto":
+                continue
+            key = book_key(job_id)
         except (OSError, ValueError, KeyError, JobError) as exc:
             print(f"Skipping invalid job {job_id}: {type(exc).__name__}", file=sys.stderr)
             continue
@@ -6170,8 +6170,6 @@ def run(job_id: str, *, resume_blocked: bool = False,
     request = request_for(job_id)
     current = status_path(job_id)
     status = read_json(current) if current.exists() else None
-    ensure_job_executor(job_id, request,
-                        slug=status.get("book_slug") if status else None)
     # Existing verified output wins over obsolete executor checkpoints.
     # This is deliberately before the blocked/paused/backoff gates, and
     # applies only to exact source identity and fully independent review.
@@ -6179,7 +6177,8 @@ def run(job_id: str, *, resume_blocked: bool = False,
         completed = completion_reconciliation.candidate(ROOT, request, status)
         if completed is not None:
             slug = completed["book_slug"]
-            ensure_job_executor(job_id, request, slug=slug)
+            # candidate() validated ownership records separately; no literary
+            # executor authority is acquired for this completed-output path.
             # The book lane and the checkpoint's disjoint replay comparison
             # protect the evidence snapshot; never stage unrelated book edits.
             if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
@@ -6232,6 +6231,8 @@ def run(job_id: str, *, resume_blocked: bool = False,
             result.pop("reconciliation_failed_tree", None)
             checkpoint(job_id, result, slug)
             return result
+    ensure_job_executor(job_id, request,
+                        slug=status.get("book_slug") if status else None)
     if not resume_blocked and not resume_interrupted and status:
         if auto_resume_requested(status):
             # A newer explicit Auto handoff for an operator-blocked live claim
@@ -6701,6 +6702,12 @@ def main() -> int:
         if args.job_id:
             job_id = safe_id(args.job_id)
             status = read_json(status_path(job_id)) if status_path(job_id).exists() else None
+            completed = None
+            if not args.resume_blocked and not args.resume_interrupted:
+                completed = completion_reconciliation.candidate(ROOT, request_for(job_id), status)
+            if completed is not None:
+                print(json.dumps([{"job_id": job_id, "book_key": completed["book_slug"]}]))
+                return 0
             owned = selection_executor(job_id, status.get("book_slug") if status else None)
             print(json.dumps([{"job_id": job_id, "book_key": book_key(job_id)}]
                              if owned == "auto" else []))
