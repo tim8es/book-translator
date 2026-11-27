@@ -124,9 +124,14 @@ def verify_done(root: Path, status: dict) -> tuple[int, int, str]:
                     not acceptance.get("session_id") or
                     record.get("reviewer_session_id") == acceptance.get("session_id")):
                 raise ValueError("translation was not independently reviewed")
-            if any(not finding.get("resolved") for finding in
-                   (record.get("quality_report") or {}).get("findings", [])):
-                raise ValueError("review PASS has unresolved findings")
+            # The canonical review contract permits a PASS with open minor
+            # observations. Unknown severities still fail closed; major and
+            # critical findings always block. Never rewrite review evidence.
+            if any(finding.get("resolved") is not True
+                   and not (finding.get("resolved") is False
+                            and finding.get("severity") == "minor")
+                   for finding in (record.get("quality_report") or {}).get("findings", [])):
+                raise ValueError("review PASS has unresolved blocking findings")
             reviewed += 1
         elif preview and unit.get("status") == "translated":
             match = approvals.get(uid) or {}

@@ -120,6 +120,20 @@ class CompletionReconciliationTests(unittest.TestCase):
                 self.assertIsNone(self.candidate(result))
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
 
+    def test_canonical_pass_allows_minor_observation_not_blocking_findings(self):
+        ledger = self.read("review-ledger.json")
+        manifest = self.read("output/manifest.json")
+        for severity, allowed in (("minor", True), ("major", False),
+                                  ("critical", False), ("unknown", False)):
+            with self.subTest(severity=severity):
+                ledger["records"][0]["quality_report"]["findings"] = [
+                    {"severity": severity, "resolved": False}]
+                self.write("review-ledger.json", ledger)
+                manifest["state_revisions"]["review_ledger"] = job_monitor.digest(
+                    self.book / "review-ledger.json")
+                self.write("output/manifest.json", manifest)
+                self.assertEqual(self.candidate() is not None, allowed)
+
     def test_reject_mismatched_edition_pin_or_ambiguous_workspace(self):
         self.assertIsNone(self.candidate({**self.previous, "source_sha256": "c"*64}))
         self.assertIsNone(self.candidate({**self.previous, "workflow_revision": "d"*40}))
