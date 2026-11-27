@@ -206,6 +206,27 @@ class RequestTests(unittest.TestCase):
                 self.assertEqual(bridge.execute(root, root, payload), {"status": "accepted"})
             command.assert_called_once_with(root, payload)
 
+    def test_proposal_submit_checks_live_claim_and_accepted_translation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "translated").mkdir()
+            artifact = root / "translated/004.md"
+            artifact.write_bytes(b"translation\n")
+            payload = sample("proposal-submit")
+            payload["translation_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            with patch.object(bridge, "expected_book", return_value=(root, {})), \
+                 patch.object(bridge, "pinned_engine"), patch.object(bridge, "cli"), \
+                 patch.object(bridge, "chapter_and_claim", return_value={
+                     "status": "translated", "translation_path": "translated/004.md"}) as claim, \
+                 patch.object(bridge, "proposal_cli", return_value={"proposal_id": "d" * 32}) as command:
+                self.assertEqual(bridge.execute(root, root, payload)["proposal_id"], "d" * 32)
+                claim.assert_called_once_with(root, payload, role="translator")
+                command.assert_called_once_with(root, payload)
+                artifact.write_bytes(b"changed\n")
+                with self.assertRaisesRegex(bridge.RequestError, "translation artifact changed"):
+                    bridge.execute(root, root, payload)
+                self.assertEqual(command.call_count, 1)
+
     def test_unknown_operation_fails(self):
         obj = sample()
         obj["operation"] = "shell"
