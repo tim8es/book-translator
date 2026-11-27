@@ -109,3 +109,46 @@ class LongAgentFixtureTests(unittest.TestCase):
         self.assertEqual(len(row["review_history"]), 1)
         self.assertNotIn("findings", row)
         self.assertNotIn("current_review_record_id", row)
+
+
+    def test_anchored_audit_records_negative_without_extra_calls(self):
+        import json
+        from unittest.mock import patch
+        source, target = "The light on the water.", "Свет на воде."
+        report, calls = {}, []
+        def complete(*args):
+            calls.append(args)
+            return json.dumps({"checks": {"coverage": True, "literary_style": False},
+                "findings": [{"check": "literary_style", "category": "style",
+                    "source_quote": source, "target_quote": target,
+                    "detail": "Concrete synthetic example private-sentinel"}]})
+        with patch.dict("os.environ", {"OMNIROUTE_API_KEY": "private-sentinel"}):
+            result = long.anchored_audit(complete, {"coverage": "complete",
+                "literary_style": "idiomatic"}, source, target, report)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["literary_style"])
+        self.assertEqual(report["audit_evidence"]["translation_sha256"], review_chunks.sha(target))
+        self.assertEqual(report["audit_evidence"]["findings"][0]["target_quote"], target)
+        self.assertNotIn("private-sentinel", str(report))
+
+    def test_invalid_negative_evidence_cannot_pass(self):
+        import json
+        criteria = {"style": "idiomatic"}
+        good = {"check": "style", "category": "style", "source_quote": "Source",
+                "target_quote": "Target", "detail": "Concrete issue"}
+        for checks, findings in [({"style": False}, []),
+                                 ({"style": False}, [{**good, "target_quote": "Invented"}]),
+                                 ({"style": True}, [good])]:
+            report = {}
+            with self.assertRaisesRegex(RuntimeError, "anchored audit evidence"):
+                long.anchored_audit(lambda *args: json.dumps({"checks": checks,
+                    "findings": findings}), criteria, "Source", "Target", report)
+            self.assertEqual(report["independent_audit"], checks)
+            self.assertNotIn("audit_evidence", report)
+
+    def test_all_true_requires_empty_evidence(self):
+        report = {}
+        self.assertEqual(long.anchored_audit(lambda *args:
+            '{"checks":{"style":true},"findings":[]}', {"style": "idiomatic"},
+            "Source", "Target", report), {"style": True})
+        self.assertEqual(report["audit_evidence"]["findings"], [])
