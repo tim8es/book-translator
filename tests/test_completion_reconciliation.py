@@ -244,6 +244,40 @@ class CompletionReconciliationTests(unittest.TestCase):
         self.put(".workflow/claims/chapter-000001.json", b"{}")
         self.assertIsNone(reconciliation.candidate(self.root, dup_request, None))
 
+    def test_adopted_historical_pass_requires_exact_upgrade_bridge(self):
+        old = "e"*40
+        progress = self.read("progress.json")
+        ledger = self.read("review-ledger.json")
+        acceptance = progress["chapters"][0]["translation_acceptance"]
+        acceptance.update({"workflow_revision": old, "unit_id": "chapter-000001",
+                           "role": "translator"})
+        review = ledger["records"][0]
+        review.update({"workflow_revision": old, "review_contract_revision": "docs/TRANSLATION.md@" + old,
+                       "record_id": "f"*32})
+        self.write("progress.json", progress)
+        self.write("review-ledger.json", ledger)
+        manifest = self.read("output/manifest.json")
+        manifest["state_revisions"] = {key: job_monitor.digest(self.book / name)
+                                       for key, name in reconciliation.REVISIONS.items()}
+        self.write("output/manifest.json", manifest)
+        self.assertIsNone(self.candidate())
+        bridge = {"schema_version": 1, "kind": "adopt-unchanged-historical-translation-and-review",
+                  "book_slug": self.slug, "source_workflow_revision": old,
+                  "target_workflow_revision": self.pin, "source_book_sha256": self.sha,
+                  "pre_upgrade_commit": "1"*40, "pre_upgrade_progress_blob_sha": "2"*40,
+                  "pre_upgrade_review_ledger_blob_sha": "3"*40,
+                  "entries": [{"unit_id": "chapter-000001",
+                               "source_sha256": acceptance["source_sha256"],
+                               "translation_sha256": acceptance["translation_sha256"],
+                               "acceptance_fingerprint": reconciliation._fingerprint(acceptance),
+                               "pass_record_id": review["record_id"],
+                               "pass_record_fingerprint": reconciliation._fingerprint(review)}]}
+        self.write(".workflow/workflow-upgrade-evidence.json", bridge)
+        self.assertIsNotNone(self.candidate())
+        bridge["entries"][0]["pass_record_fingerprint"] = "0"*64
+        self.write(".workflow/workflow-upgrade-evidence.json", bridge)
+        self.assertIsNone(self.candidate())
+
     def test_monitor_rejects_mutated_evidence_after_reconciliation(self):
         fields = self.candidate()
         done = reconciliation.reconciled_status(self.job, self.previous, fields)

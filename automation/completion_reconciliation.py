@@ -5,6 +5,8 @@ Only exact current source identity is eligible; previews are not reconciled.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import zipfile
 from pathlib import Path
@@ -77,6 +79,63 @@ def verify_completion_ownership(root: Path, request: dict, slug: str) -> None:
             or job_monitor.digest(owner_intake / "source.epub") != source_sha):
         raise ValueError("book executor owner is not bound to exact source intake")
     executor_ownership.selected(root, owner_id, source_sha, slug)
+
+
+def _fingerprint(value: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _review_binding(book: Path, metadata: dict, unit: dict, review: dict) -> bool:
+    """Read-only prefilter for pinned canonical historical-evidence adoption.
+
+    The canonical pinned build-status still performs the authoritative
+    resolution; the monitor repeats exact evidence binding before delivery.
+    Do not rewrite acceptance, review, bridge, or book pin.
+    """
+    pin = metadata["workflow"]["resolved_revision"]
+    acceptance = unit["translation_acceptance"]
+    accept_pin = acceptance["workflow_revision"]
+    review_pin = review["workflow_revision"]
+    if review["review_contract_revision"] != "docs/TRANSLATION.md@" + review_pin:
+        return False
+    if accept_pin == pin and review_pin == pin:
+        return True
+    bridge = job_monitor.read_json(_file(book, ".workflow/workflow-upgrade-evidence.json"))
+    old = bridge.get("source_workflow_revision")
+    if (bridge.get("schema_version") != 1
+            or bridge.get("kind") != "adopt-unchanged-historical-translation-and-review"
+            or bridge.get("book_slug") != book.name
+            or bridge.get("target_workflow_revision") != pin
+            or bridge.get("source_book_sha256") != metadata["source"]["sha256"]
+            or not isinstance(old, str) or not SHA40.fullmatch(old) or old == pin
+            or accept_pin != old
+            or review_pin not in (old, pin)
+            or acceptance.get("unit_id") != unit["unit_id"]
+            or acceptance.get("role") != "translator"
+            or not all(isinstance(bridge.get(key), str) and SHA40.fullmatch(bridge[key])
+                       for key in ("pre_upgrade_commit", "pre_upgrade_progress_blob_sha",
+                                   "pre_upgrade_review_ledger_blob_sha"))):
+        return False
+    entries = bridge["entries"]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 10000:
+        return False
+    matches = [entry for entry in entries if entry["unit_id"] == unit["unit_id"]]
+    if len(matches) != 1:
+        return False
+    entry = matches[0]
+    if (entry["source_sha256"] != acceptance["source_sha256"]
+            or entry["translation_sha256"] != acceptance["translation_sha256"]
+            or entry["acceptance_fingerprint"] != _fingerprint(acceptance)):
+        return False
+    if review_pin == pin:
+        return True
+    return (review.get("outcome") == "PASS"
+            and review.get("record_id") == entry["pass_record_id"]
+            and review.get("unit_id") == unit["unit_id"]
+            and entry["pass_record_fingerprint"] == _fingerprint(review))
 
 
 def verified_completion(root: Path, request: dict, status: dict | None,
@@ -175,9 +234,7 @@ def verified_completion(root: Path, request: dict, status: dict | None,
                 or source_hash != coverage_hashes[unit["number"]]
                 or source_hash != acceptance["source_sha256"]
                 or target_hash != acceptance["translation_sha256"]
-                or acceptance["workflow_revision"] != pin
-                or review["workflow_revision"] != pin
-                or review["review_contract_revision"] != "docs/TRANSLATION.md@" + pin
+                or not _review_binding(book, metadata, unit, review)
                 or not all(checks.get(key) is True for key in
                            ("coverage", "meaning", "terminology", "style", "structure"))):
             raise ValueError("unit is incomplete or its accepted bytes changed")
