@@ -41,6 +41,7 @@ import adaptive_budget
 import coherent_batches
 import execution_scheduler
 import execution_metrics
+import completion_reconciliation
 import agent_orchestrator
 import review_convergence
 import quality_controller
@@ -1374,6 +1375,9 @@ def book_key(job_id: str) -> str:
         if safe_book_slug(slug):
             return slug
     request = request_for(job_id)
+    matched = completion_reconciliation.exact_workspace(ROOT, request)
+    if matched is not None:
+        return matched
     # Before a workspace is initialized, identical source/language jobs share a lane.
     seed = request["source_sha256"] + ":" + request["target_language"]
     return "intake-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
@@ -1436,6 +1440,7 @@ def ready_jobs(limit: int = 6) -> list[dict]:
     if type(limit) is not int or not 1 <= limit <= 6:
         raise JobError("Auto selector limit must be between 1 and 6")
     candidates = []
+    reconciliations = {}
     keys = set()
     for path in sorted((ROOT / "intake" / "auto").glob("*/request.json")):
         job_id = path.parent.name
@@ -1455,6 +1460,24 @@ def ready_jobs(limit: int = 6) -> list[dict]:
             ) != "auto":
                 continue
             key = book_key(job_id)
+            # Completion reconciliation is read-only at selection time and may
+            # bypass a stale blocked/paused status, not a live canonical claim.
+            # Preserve old test/legacy queue behavior when intake is missing.
+            try:
+                request = request_for(job_id)
+            except (OSError, ValueError, KeyError, JobError):
+                request = None
+            if request is not None:
+                completed = completion_reconciliation.candidate(ROOT, request, state)
+                if completed is not None:
+                    slug = completed["book_slug"]
+                    if (state and state.get("phase") == "completion-reconciliation-preflight-failed"
+                            and state.get("reconciliation_failed_tree") == git("rev-parse", f"HEAD:books/{slug}")):
+                        continue
+                    if selection_executor(job_id, slug) == "auto":
+                        reconciliations.setdefault(slug, ("", job_id,
+                            {"job_id": job_id, "book_key": slug}))
+                    continue
         except (OSError, ValueError, KeyError, JobError) as exc:
             print(f"Skipping invalid job {job_id}: {type(exc).__name__}", file=sys.stderr)
             continue
@@ -1491,6 +1514,8 @@ def ready_jobs(limit: int = 6) -> list[dict]:
         candidates.append((updated, job_id, {"job_id": job_id, "book_key": key}))
     # Older last-served book first; do not repeatedly starve a newer job due
     # to lexically earlier job IDs. Each checkpoint refreshes updated_at.
+    candidates = [item for item in candidates if item[2]["book_key"] not in reconciliations]
+    candidates.extend(reconciliations.values())
     candidates.sort(key=lambda item: (item[0], item[1]))
     return [item for _, _, item in candidates[:limit]]
 
@@ -6147,6 +6172,66 @@ def run(job_id: str, *, resume_blocked: bool = False,
     status = read_json(current) if current.exists() else None
     ensure_job_executor(job_id, request,
                         slug=status.get("book_slug") if status else None)
+    # Existing verified output wins over obsolete executor checkpoints.
+    # This is deliberately before the blocked/paused/backoff gates, and
+    # applies only to exact source identity and fully independent review.
+    if not resume_blocked and not resume_interrupted:
+        completed = completion_reconciliation.candidate(ROOT, request, status)
+        if completed is not None:
+            slug = completed["book_slug"]
+            ensure_job_executor(job_id, request, slug=slug)
+            # The book lane and the checkpoint's disjoint replay comparison
+            # protect the evidence snapshot; never stage unrelated book edits.
+            if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
+                raise JobError("completion reconciliation requires a clean book snapshot")
+            if git("diff", "--cached", "--name-only"):
+                raise JobError("completion reconciliation requires a clean index")
+            tree = git("rev-parse", f"HEAD:books/{slug}")
+            if (status and status.get("phase") == "completion-reconciliation-preflight-failed"
+                    and status.get("reconciliation_failed_tree") == tree):
+                return status
+            # The exact book-pinned builder validates its own input fingerprint,
+            # EPUB content and source corpus. The shared runtime never emulates
+            # a historical build contract or rebuilds an artifact in this path.
+            engine, actual = install_engine(completed["workflow_revision"])
+            try:
+                if actual != completed["workflow_revision"]:
+                    raise JobError("completion reconciliation workflow pin mismatch")
+                try:
+                    build = json.loads(cli("build-status", slug, "--json"))
+                    if (build.get("state") != "current" or build.get("preview") is not False
+                            or build.get("artifact_sha256") != completed["artifact_sha256"]
+                            or f"books/{slug}/" + build.get("artifact_path", "") != completed["artifact_path"]):
+                        raise JobError("canonical build status did not confirm the exact current EPUB")
+                except (JobError, ValueError, TypeError, AttributeError):
+                    # Quarantine this evidence snapshot, not the entire book.
+                    # A changed book tree can be checked again automatically.
+                    result = dict(status or {"schema_version": 1, "job_id": job_id,
+                                             "failures": 0, "correction_rounds": {}})
+                    result["completion_reconciliation_failure"] = {
+                        "previous_state": result.get("state", "missing"),
+                        "previous_phase": result.get("phase"),
+                        "previous_error": result.get("last_error")}
+                    result.update({"state": "blocked",
+                                   "phase": "completion-reconciliation-preflight-failed",
+                                   "book_slug": slug,
+                                   "source_sha256": completed["source_sha256"],
+                                   "workflow_revision": actual,
+                                   "reconciliation_failed_tree": tree,
+                                   "last_error": "Pinned build-status did not confirm the current reviewed EPUB"})
+                    if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
+                        raise JobError("read-only reconciliation unexpectedly changed the book")
+                    checkpoint(job_id, result, slug)
+                    return result
+            finally:
+                shutil.rmtree(engine, ignore_errors=True)
+            if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
+                raise JobError("read-only reconciliation unexpectedly changed the book")
+            result = completion_reconciliation.reconciled_status(job_id, status, completed)
+            result["completion_reconciliation"]["book_tree"] = tree
+            result.pop("reconciliation_failed_tree", None)
+            checkpoint(job_id, result, slug)
+            return result
     if not resume_blocked and not resume_interrupted and status:
         if auto_resume_requested(status):
             # A newer explicit Auto handoff for an operator-blocked live claim
