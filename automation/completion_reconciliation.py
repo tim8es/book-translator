@@ -5,8 +5,6 @@ Only exact current source identity is eligible; previews are not reconciled.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import zipfile
 from pathlib import Path
@@ -69,6 +67,9 @@ def verified_completion(root: Path, request: dict, status: dict | None,
     source = metadata["source"]
     pin = metadata["workflow"]["resolved_revision"]
     source_sha = request["source_sha256"]
+    intake = root / "intake" / "auto" / request["job_id"] / "source.epub"
+    if not intake.is_file() or intake.is_symlink() or job_monitor.digest(intake) != source_sha:
+        raise ValueError("immutable intake source bytes changed")
     if (not SHA40.fullmatch(pin) or not SHA64.fullmatch(source_sha)
             or source["sha256"] != source_sha
             or source.get("storage_mode") != "embedded"
@@ -94,6 +95,8 @@ def verified_completion(root: Path, request: dict, status: dict | None,
                     "source-promotion.json", "waves/active.json"))):
         raise ValueError("book has active work")
     manifest = job_monitor.read_json(_file(book, "output/manifest.json"))
+    for report in ("FINAL_QUALITY_GATES.md", "REVIEW_REPORT.md"):
+        _file(book, report)
     revisions = {key: job_monitor.digest(_file(book, name))
                  for key, name in REVISIONS.items()}
     if (manifest.get("book_slug") != slug or manifest.get("format") != "epub"
