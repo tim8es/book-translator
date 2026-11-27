@@ -1,6 +1,7 @@
 """Regression tests for explicit, immutable HTML automatic intake."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -75,6 +76,71 @@ class HtmlAutoIntakeTests(unittest.TestCase):
         (self.folder / "source.epub").write_bytes(b"PK another")
         with self.assertRaises(runner.JobError):
             runner.request_for(self.job)
+
+
+    def prepare_pi(self):
+        self.request["workflow_revision"] = "b" * 40
+        self.save()
+        marker = runner.executor_ownership.marker(
+            self.job, self.request["source_sha256"], "pi")
+        (self.folder / "executor.json").write_text(json.dumps(marker), encoding="utf-8")
+
+    def test_initialization_only_never_dispatches_model(self):
+        self.prepare_pi()
+        engine = self.root / "engine"
+        engine.mkdir()
+        revision = self.request["workflow_revision"]
+        status = {"state": "running", "phase": "initialized",
+                  "job_id": self.job, "book_slug": "sample"}
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_BACKEND": "pi"}), \
+                patch.object(runner, "git", return_value=""), \
+                patch.object(runner, "install_engine", return_value=(engine, revision)), \
+                patch.object(runner, "init", return_value=status) as init, \
+                patch.object(runner, "checkpoint") as checkpoint, \
+                patch.object(runner, "run", side_effect=AssertionError("literary run forbidden")), \
+                patch.object(runner, "complete_for_job", side_effect=AssertionError("model forbidden")):
+            result = runner.initialize_pi_html_only(self.job)
+        init.assert_called_once_with(self.job, self.request, "sample", revision)
+        checkpoint.assert_called_once_with(self.job, result, "sample")
+        self.assertEqual(result["source_sha256"], self.request["source_sha256"])
+        self.assertFalse(engine.exists())
+
+    def test_initialization_only_requires_pi_ownership(self):
+        self.prepare_pi()
+        (self.folder / "executor.json").unlink()
+        with patch.object(runner, "install_engine") as install:
+            with self.assertRaises(runner.JobError):
+                runner.initialize_pi_html_only(self.job)
+        install.assert_not_called()
+
+    def test_initialization_only_refuses_existing_status(self):
+        self.prepare_pi()
+        path = runner.status_path(self.job)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        with patch.object(runner, "install_engine") as install:
+            with self.assertRaises(runner.JobError):
+                runner.initialize_pi_html_only(self.job)
+        install.assert_not_called()
+
+    def test_initialization_only_refuses_existing_workspace(self):
+        self.prepare_pi()
+        (self.root / "books" / "sample").mkdir(parents=True)
+        with patch.dict(os.environ, {"BOOK_TRANSLATOR_LLM_BACKEND": "pi"}), \
+                patch.object(runner, "install_engine") as install:
+            with self.assertRaises(runner.JobError):
+                runner.initialize_pi_html_only(self.job)
+        install.assert_not_called()
+
+    def test_initialization_only_refuses_epub(self):
+        self.request.pop("source_format")
+        self.data = b"PK legacy"
+        self.request["source_sha256"] = hashlib.sha256(self.data).hexdigest()
+        self.save("source.epub")
+        with patch.object(runner, "install_engine") as install:
+            with self.assertRaises(runner.JobError):
+                runner.initialize_pi_html_only(self.job)
+        install.assert_not_called()
 
 
 if __name__ == "__main__":
