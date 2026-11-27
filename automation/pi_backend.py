@@ -69,8 +69,15 @@ def parse_json_events(output: str) -> tuple[str, dict]:
     if not settled or starts != 1 or turns != 1 or len(records) != 1:
         raise PiTransportFailure("pi_unexpected_extra_work")
     message = records[0]
-    if message.get("stopReason") != "stop":
-        raise PiTransportFailure("pi_incomplete_assistant_message")
+    reason = message.get("stopReason")
+    if reason != "stop":
+        # Closed enum only: never expose SDK errorMessage, text, URL, or
+        # provider details. No partial message is accepted and no new retry
+        # is introduced. Unknown stop reasons retain the old generic error.
+        code = {"length": "pi_stop_length", "error": "pi_stop_error",
+                "aborted": "pi_stop_aborted", "toolUse": "pi_stop_tool_use"}
+        raise PiTransportFailure(code.get(reason, "pi_incomplete_assistant_message")
+                                 if isinstance(reason, str) else "pi_incomplete_assistant_message")
     content = message.get("content")
     if not isinstance(content, list):
         raise PiTransportFailure("pi_invalid_assistant_content")
