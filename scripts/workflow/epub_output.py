@@ -404,7 +404,8 @@ def _paragraph(lines: list[str]) -> str:
     return f"<p>{_render_inline(text)}</p>"
 
 
-def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
+def render_markdown_xhtml(title: str, markdown: str, *, language: str,
+                          defer_fragment_validation: bool = False) -> bytes:
     """Render a deterministic, escaped Markdown subset into EPUB-safe XHTML."""
 
     title = _nonempty_string(title, "chapter title")
@@ -526,7 +527,7 @@ def render_markdown_xhtml(title: str, markdown: str, *, language: str) -> bytes:
     # Neither translations nor previews may emit dangling local links.
     ids = re.findall(r'<span id="([A-Za-z_][A-Za-z0-9_.:-]*)"></span>', document)
     for fragment in re.findall(r'<a href="#([A-Za-z_][A-Za-z0-9_.:-]*)">', document):
-        if ids.count(fragment) != 1:
+        if ids.count(fragment) != 1 and (not defer_fragment_validation or ids.count(fragment) > 1):
             raise EpubOutputError(f"missing or duplicate local anchor target #{fragment}")
     return document.encode("utf-8")
 
@@ -600,8 +601,32 @@ def build_epub_bytes(
             raise EpubOutputError(f"unit {number} markdown must be text")
         filename = f"{number:03d}-{slug}.xhtml"
         chapter_files.append(
-            (filename, unit_title, render_markdown_xhtml(unit_title, markdown, language=language))
+            (filename, unit_title, render_markdown_xhtml(unit_title, markdown, language=language,
+                                                         defer_fragment_validation=True))
         )
+
+    # Standalone HTML may split one original document into several EPUB
+    # units. Keep unambiguous in-unit fragments; resolve missing local targets
+    # against the other rendered units, never against external resources.
+    anchor_files: dict[str, list[str]] = {}
+    for filename, _, content in chapter_files:
+        for fragment in re.findall(rb'<span id="([A-Za-z_][A-Za-z0-9_.:-]*)"></span>', content):
+            anchor_files.setdefault(fragment.decode("ascii"), []).append(filename)
+    resolved_files = []
+    for filename, unit_title, content in chapter_files:
+        def resolve_fragment(match):
+            fragment = match.group(1).decode("ascii")
+            candidates = anchor_files.get(fragment, [])
+            if filename in candidates:
+                if candidates.count(filename) != 1:
+                    raise EpubOutputError(f"duplicate local anchor target #{fragment}")
+                return match.group(0)
+            if len(candidates) != 1:
+                raise EpubOutputError(f"missing or ambiguous cross-unit anchor target #{fragment}")
+            return ('href="' + html_escape(candidates[0], quote=True) + "#" + fragment + '"').encode("utf-8")
+        content = re.sub(rb'(?<=<a )href="#([A-Za-z_][A-Za-z0-9_.:-]*)"', resolve_fragment, content)
+        resolved_files.append((filename, unit_title, content))
+    chapter_files = resolved_files
 
     cover_data = _cover_contract(cover)
     escaped_title = html_escape(title)
