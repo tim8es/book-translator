@@ -195,6 +195,71 @@ def _from_markdown(chapters: Sequence[Any]) -> list[str]:
     return _tokens(" ".join(parts))
 
 
+def audit_standalone_html(text: str, path: str, chapters: Sequence[Any]) -> None:
+    """Check the full standalone HTML prose/link inventory, including AO3 notes.
+
+    A separate event consumer inventories the document without using the
+    extraction parser's block buffers or chapter boundaries. HTML (unlike EPUB
+    XHTML) may have optional end tags; the source is never rewritten.
+    """
+    from html.parser import HTMLParser
+    from collections import Counter
+
+    class Inventory(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.in_body = False
+            self.body_count = 0
+            self.parts = []
+            self.links = []
+            self.allowed = ALLOWED_BODY | {"nav"}
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "body":
+                self.body_count += 1
+                self.in_body = True
+            if not self.in_body:
+                return
+            if tag not in self.allowed:
+                raise SourceCoverageError(f"{path}: unsupported standalone HTML element <{tag}>")
+            attributes = dict(attrs)
+            if "hidden" in attributes or "src" in attributes:
+                raise SourceCoverageError(f"{path}: unsupported hidden or embedded HTML content")
+            style = (attributes.get("style") or "").lower()
+            if re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", style):
+                raise SourceCoverageError(f"{path}: hidden HTML content requires explicit handling")
+            if tag in BLOCKS or tag == "br":
+                self.parts.append(" ")
+            if tag == "hr":
+                self.parts.append(" \uf8ff ")
+            if tag == "a" and attributes.get("href"):
+                self.links.append(_canonical_href(attributes["href"], path))
+
+        def handle_endtag(self, tag):
+            if self.in_body and tag in BLOCKS:
+                self.parts.append(" ")
+            if tag == "body":
+                self.in_body = False
+
+        def handle_data(self, data):
+            if self.in_body:
+                self.parts.append(data)
+
+    inventory = Inventory()
+    inventory.feed(text)
+    inventory.close()
+    if inventory.body_count != 1 or inventory.in_body:
+        raise SourceCoverageError(f"{path}: expected exactly one complete HTML body")
+    expected = _tokens("".join(inventory.parts))
+    actual = _from_markdown(chapters)
+    if expected != actual:
+        raise SourceCoverageError(f"{path}: standalone HTML text coverage mismatch")
+    actual_links = [match.group(2) for chapter in chapters
+                    for match in LINK_RE.finditer(chapter.content)]
+    if Counter(inventory.links) != Counter(actual_links):
+        raise SourceCoverageError(f"{path}: standalone HTML link coverage mismatch")
+
+
 def _navigation_is_exclusive(raw: bytes, path: str) -> None:
     """Navigation XHTML is excludable only if body has no non-navigation prose."""
     try:
