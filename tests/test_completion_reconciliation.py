@@ -182,12 +182,19 @@ class CompletionReconciliationTests(unittest.TestCase):
              patch.object(runner, "git", side_effect=lambda *args: "c"*40 if args[0] == "rev-parse" else ""), \
              patch.object(runner, "checkpoint") as checkpoint, \
              patch.object(runner, "install_engine", return_value=(self.root / "unused-engine", self.pin)), \
-             patch.object(runner, "cli", return_value='{"state":"stale"}'), \
+             patch.object(runner, "cli", side_effect=[json.dumps({"state": "stale"}), json.dumps({
+                 "valid": True, "book_slug": self.slug, "workflow_revision": self.pin,
+                 "errors": [], "claims": [], "finalization": {"active": False},
+                 "corpus": {"state": "verified"},
+                 "units": [{"lifecycle": "reviewed", "review": "pass"}]})]), \
              patch.object(runner, "complete") as model:
             result = runner.run(self.job)
             self.assertEqual(result["state"], "blocked")
             self.assertEqual(result["phase"], "completion-reconciliation-preflight-failed")
             self.assertEqual(result["reconciliation_failed_tree"], "c"*40)
+            self.assertEqual(result["literary_completion"]["state"], "reviewed")
+            self.assertEqual(result["literary_completion"]["delivery_state"], "validation-required")
+            self.assertEqual(result["queue_snapshot"]["reviewed"], 1)
             checkpoint.assert_called_once()
             model.assert_not_called()
             self.status_file(result)
