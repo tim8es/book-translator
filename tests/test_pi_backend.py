@@ -138,6 +138,21 @@ class PiBackendTests(unittest.TestCase):
             _, diagnostics = pi_backend.parse_json_events(self.event_stream(usage))
             self.assertNotIn("total_tokens", diagnostics)
 
+    def test_incomplete_stop_reasons_are_closed_and_sanitized(self):
+        expected = [("length", "pi_stop_length"), ("error", "pi_stop_error"),
+                    ("aborted", "pi_stop_aborted"), ("toolUse", "pi_stop_tool_use"),
+                    ("secret-sentinel", "pi_incomplete_assistant_message"),
+                    ({"private": "secret-sentinel"}, "pi_incomplete_assistant_message")]
+        for reason, code in expected:
+            events = [json.loads(line) for line in self.event_stream(reason=reason).splitlines()]
+            msg = next(e["message"] for e in events if e["type"] == "message_end"
+                       and e["message"]["role"] == "assistant")
+            msg["errorMessage"] = "private-error-sentinel"
+            with self.assertRaises(pi_backend.PiTransportFailure) as caught:
+                pi_backend.parse_json_events("\n".join(json.dumps(e) for e in events))
+            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(str(caught.exception), code)
+
     def test_extra_turn_retry_and_incomplete_stream_fail_closed(self):
         for output in (self.event_stream(extra=[{"type": "turn_start"}]),
                        self.event_stream(extra=[{"type": "auto_retry_start"}]),

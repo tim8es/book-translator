@@ -57,6 +57,8 @@ class UsageQualificationTests(unittest.TestCase):
             "Pi backend: pi_invalid_event_stream")), "pi_invalid_event_stream")
         self.assertEqual(usage.safe_failure_code(ModelError(
             "OmniRoute HTTPS base URL, key and role model must be configured")), "configuration")
+        for code in ("pi_stop_length", "pi_stop_error", "pi_stop_aborted", "pi_stop_tool_use"):
+            self.assertEqual(usage.safe_failure_code(ModelError("Pi backend: " + code)), code)
         self.assertEqual(usage.safe_failure_code(ModelError(
             "Pi backend: private-secret-sentinel")), "unclassified")
         self.assertEqual(usage.safe_failure_code(ModelError(

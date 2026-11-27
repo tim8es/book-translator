@@ -13,6 +13,7 @@ USER = "Return the requested JSON object."
 # Closed allowlist: never copy arbitrary exception messages or event contents.
 PI_CODES = {"pi_oversize_event_stream", "pi_invalid_event_stream",
             "pi_unexpected_extra_work", "pi_incomplete_assistant_message",
+            "pi_stop_length", "pi_stop_error", "pi_stop_aborted", "pi_stop_tool_use",
             "pi_invalid_assistant_content", "pi_empty_or_oversize_output",
             "pi_invalid_configuration", "pi_binary_missing", "pi_invalid_token_limits"}
 CONFIG_ERRORS = {"OmniRoute HTTPS base URL, key and role model must be configured",
