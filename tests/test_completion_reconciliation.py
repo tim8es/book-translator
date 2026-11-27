@@ -200,6 +200,50 @@ class CompletionReconciliationTests(unittest.TestCase):
             self.assertEqual(runner.book_key(self.job), self.slug)
             self.assertEqual(runner.ready_jobs(), [{"job_id": self.job, "book_key": self.slug}])
 
+    def test_pi_owned_completed_book_can_reconcile_original_and_duplicate(self):
+        import executor_ownership as ownership
+        self.write(".workflow/executor.json", ownership.marker(
+            self.job, self.sha, "pi", self.slug))
+        self.original.with_name("executor.json").write_text(json.dumps(
+            ownership.marker(self.job, self.sha, "pi")))
+        duplicate = "d" * 32
+        path = self.root / "intake/auto" / duplicate
+        path.mkdir(parents=True)
+        (path / "source.epub").write_bytes(self.original.read_bytes())
+        dup_request = {**self.request, "job_id": duplicate}
+        (path / "request.json").write_text(json.dumps(dup_request))
+        self.status_file(self.previous)
+        self.assertIsNotNone(self.candidate(self.previous))
+        self.assertIsNotNone(reconciliation.candidate(self.root, dup_request, None))
+        with self.assertRaises(ownership.OwnershipError):
+            ownership.selected(self.root, duplicate, self.sha, self.slug)
+        with patch.object(runner, "ROOT", self.root), \
+             patch.object(runner, "git", side_effect=lambda *args: "c"*40 if args[0] == "rev-parse" else ""), \
+             patch.object(runner, "checkpoint") as checkpoint, \
+             patch.object(runner, "install_engine", return_value=(self.root / "unused-engine", self.pin)), \
+             patch.object(runner, "cli", return_value=json.dumps({
+                 "state": "current", "preview": False, "artifact_path": "output/book.epub",
+                 "artifact_sha256": self.read("output/manifest.json")["artifact_sha256"]})), \
+             patch.object(runner, "complete") as model:
+            self.assertEqual(runner.ready_jobs(), [{"job_id": self.job, "book_key": self.slug}])
+            first = runner.run(self.job)
+            self.status_file(first)
+            self.assertEqual(runner.ready_jobs(), [{"job_id": duplicate, "book_key": self.slug}])
+            second = runner.run(duplicate)
+            self.assertEqual(second["state"], "done")
+            self.assertEqual(checkpoint.call_count, 2)
+            model.assert_not_called()
+        self.assertEqual(self.read(".workflow/executor.json"), ownership.marker(
+            self.job, self.sha, "pi", self.slug))
+        # Corrupting the actual owner binding fails closed.
+        self.original.with_name("executor.json").write_text("{}")
+        self.assertIsNone(reconciliation.candidate(self.root, dup_request, None))
+        # Reinstating the marker does not grant completion when work is active.
+        self.original.with_name("executor.json").write_text(json.dumps(
+            ownership.marker(self.job, self.sha, "pi")))
+        self.put(".workflow/claims/chapter-000001.json", b"{}")
+        self.assertIsNone(reconciliation.candidate(self.root, dup_request, None))
+
     def test_monitor_rejects_mutated_evidence_after_reconciliation(self):
         fields = self.candidate()
         done = reconciliation.reconciled_status(self.job, self.previous, fields)
