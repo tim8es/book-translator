@@ -29,6 +29,13 @@ def sample(operation="claim"):
         base.update({"translation": "Русский текст\n",
                      "translation_sha256": hashlib.sha256("Русский текст\n".encode()).hexdigest(),
                      "source_sha256": "a" * 64, "claim_sha256": "b" * 64})
+    if operation == "proposal-submit":
+        base.update({"role": "translator", "target": "glossary",
+                     "suggestion": "# Glossary\nnew\n", "rationale": "Source-supported decision",
+                     "source_sha256": "a" * 64, "translation_sha256": "c" * 64,
+                     "claim_sha256": "b" * 64})
+    if operation == "proposal-reconcile":
+        base.update({"proposal_id": "d" * 32, "decision": "accept"})
     if operation == "defer-review":
         base["reason"] = "correction-limit"
     if operation == "review-record":
@@ -166,6 +173,38 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(result["unit_id"], "chapter-000004")
             cli.assert_any_call(root, "book.py", "defer-review", "test-book", "4",
                                 "--reason", "correction-limit", "--json")
+
+    def test_proposal_request_schema_rejects_unsafe_or_unbound_fields(self):
+        for field, value in (("role", "orchestrator"), ("target", "../metadata.json"),
+                             ("suggestion", ""), ("rationale", ""), ("claim_sha256", "bad"),
+                             ("translation_sha256", "bad"), ("source_sha256", "bad")):
+            with self.subTest(field=field), self.assertRaises(bridge.RequestError):
+                obj = sample("proposal-submit")
+                obj[field] = value
+                bridge.validate(obj, RID)
+        for field, value in (("proposal_id", "../x"), ("decision", "write"),
+                             ("replacement", "arbitrary replacement")):
+            with self.subTest(field=field), self.assertRaises(bridge.RequestError):
+                obj = sample("proposal-reconcile")
+                obj[field] = value
+                bridge.validate(obj, RID)
+        rejected = sample("proposal-reconcile")
+        rejected["decision"] = "reject"
+        with self.assertRaises(bridge.RequestError):
+            bridge.validate(rejected, RID)
+        rejected["reason"] = "Not supported by the source."
+        self.assertEqual(bridge.validate(rejected, RID), rejected)
+
+    def test_proposal_reconcile_runs_pinned_transport_only(self):
+        payload = bridge.validate(sample("proposal-reconcile"), RID)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(bridge, "expected_book", return_value=(root, {})), \
+                 patch.object(bridge, "pinned_engine"), \
+                 patch.object(bridge, "cli"), \
+                 patch.object(bridge, "proposal_cli", return_value={"status": "accepted"}) as command:
+                self.assertEqual(bridge.execute(root, root, payload), {"status": "accepted"})
+            command.assert_called_once_with(root, payload)
 
     def test_unknown_operation_fails(self):
         obj = sample()
