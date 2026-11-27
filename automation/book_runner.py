@@ -3045,7 +3045,11 @@ def process_quality_block_repair(job_id, slug, status, engine, chapter, record,
                     stage["replacement"], position=_anchor_position) if batched else
                  [quality_block_repair.review_case(plan, source, translation, record,
                                                    stage["replacement"])])
-        system, user = candidate_review.build_prompt(cases, instructions, require_resolution=True)
+        shared = ({"glossary": (book / "glossary.md").read_text("utf-8"),
+                   "style_guide": (book / "style-guide.md").read_text("utf-8")}
+                  if (engine / "docs/TERMINOLOGY_PREFLIGHT_CONTEXT.md").is_file() else None)
+        system, user = candidate_review.build_prompt(cases, instructions, require_resolution=True,
+                                                       shared_context=shared)
     except (ValueError, candidate_review.CandidateReviewError):
         retire("review-context-too-large")
         return True, None
@@ -5479,12 +5483,20 @@ def verify_quality_candidate(job_id, slug, status, engine, chapter, record,
     instructions, paths = role_contracts(engine, "reviewer")
     instructions += dialogue_boundary_guidance(
         read_json(ROOT / "books" / slug / "metadata.json").get("target_language", ""))
+    shared = None
+    if (engine / "docs/TERMINOLOGY_PREFLIGHT_CONTEXT.md").is_file():
+        book = ROOT / "books" / slug
+        shared = {"glossary": (book / "glossary.md").read_text("utf-8"),
+                  "style_guide": (book / "style-guide.md").read_text("utf-8")}
+        if (hashlib.sha256(shared["glossary"].encode("utf-8")).hexdigest() != binding["glossary_sha256"]
+                or hashlib.sha256(shared["style_guide"].encode("utf-8")).hexdigest() != binding["style_guide_sha256"]):
+            raise JobError("candidate shared literary context changed")
     while selected:
         try:
             cases = candidate_review.cases(source, translation, selected, findings,
                                            position=_anchor_position, combined_patches=patches)
             system, user = candidate_review.build_prompt(cases, instructions,
-                                                          require_resolution=True)
+                                                          require_resolution=True, shared_context=shared)
             break
         except candidate_review.CandidateReviewError as exc:
             if len(selected) == 1:

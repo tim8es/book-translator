@@ -60,6 +60,24 @@ class CandidateReviewProtocolTests(unittest.TestCase):
         self.assertIn("never chapter PASS", user)
         self.assertIn("mod-1", user)
 
+    def test_shared_context_preserves_strict_gate_and_safe_bounds(self):
+        context = {"glossary": "harbour ledger = портовый журнал",
+                   "style_guide": "Use consistent terminology."}
+        cases = [{"finding_id": "term", "category": "terminology"}]
+        _, user = candidate_review.build_prompt(cases, "Pinned contract",
+            require_resolution=True, shared_context=context)
+        self.assertIn(context["glossary"], user)
+        self.assertIn(context["style_guide"], user)
+        self.assertIn("reject rather than guess", user)
+        self.assertIn("actually resolves", user)
+        self.assertIn("never chapter PASS", user)
+        with self.assertRaises(candidate_review.CandidateReviewError):
+            candidate_review.build_prompt(cases, "Pinned contract",
+                shared_context={"glossary": "x" * candidate_review.MAX_EVIDENCE_CHARS,
+                                "style_guide": ""})
+        with self.assertRaises(candidate_review.CandidateReviewError):
+            candidate_review.build_prompt(cases, "Pinned contract", shared_context={"glossary": ""})
+
     def test_strict_verdict_requires_all_cases_and_true_checks(self):
         self.assertEqual(candidate_review.parse_verdict(
             answer(("x", "approve"), ("y", "reject")), ["y", "x"]), ["y"])
