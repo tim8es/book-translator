@@ -918,11 +918,36 @@ def store_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def intake_source(job_id: str, request: dict) -> Path:
+    """Select an explicit, fixed source path; never trust a submitted filename."""
+    source_format = request.get("source_format", "epub")
+    if not isinstance(source_format, str) or source_format not in {"epub", "html", "xhtml"}:
+        raise JobError("unsupported intake source format")
+    root = job_path(job_id)
+    source = root / ("source." + source_format)
+    if any((root / ("source." + other)).exists() or
+           (root / ("source." + other)).is_symlink()
+           for other in {"epub", "html", "xhtml"} - {source_format}):
+        raise JobError("ambiguous immutable intake source")
+    return source
+
+
+def intake_identity(source: Path, request: dict) -> tuple[str, str]:
+    if request.get("source_format", "epub") == "epub":
+        return epub_identity(source)
+    # Standalone HTML has no standardized bibliographic package. The intake
+    # producer must supply a title; never infer identity from source.html.
+    title = request.get("title", "")
+    if not isinstance(title, str) or not title.strip():
+        raise JobError("HTML intake requires an explicit bibliographic title")
+    return title, request.get("author", "")
+
+
 def request_for(job_id: str) -> dict:
     root = job_path(job_id)
     request = read_json(root / "request.json")
     required = {"schema_version", "job_id", "source_sha256", "target_language"}
-    permitted = required | {"workflow_revision", "title", "author", "source_filename"}
+    permitted = required | {"workflow_revision", "title", "author", "source_filename", "source_format"}
     if (not required <= set(request) or not set(request) <= permitted or
             request["schema_version"] != 1 or request["job_id"] != job_id):
         raise JobError("invalid or mismatched immutable intake request")
@@ -939,14 +964,26 @@ def request_for(job_id: str) -> dict:
         if name in request and (not isinstance(request[name], str) or
                                 not 1 <= len(request[name]) <= 200):
             raise JobError("invalid bibliographic field")
-    source = root / "source.epub"
-    if not source.is_file() or source.stat().st_size > MAX_SOURCE_BYTES:
-        raise JobError("missing EPUB or source size exceeds configured safe limit")
+    source = intake_source(job_id, request)
+    if source.is_symlink() or not source.is_file() or source.stat().st_size > MAX_SOURCE_BYTES:
+        raise JobError("missing source or source size exceeds configured safe limit")
     data = source.read_bytes()
     if hashlib.sha256(data).hexdigest() != request["source_sha256"]:
         raise JobError("original source SHA-256 mismatch")
-    if not data.startswith(b"PK"):
-        raise JobError("source is not an EPUB ZIP")
+    if request.get("source_format", "epub") == "epub":
+        if not data.startswith(b"PK"):
+            raise JobError("source is not an EPUB ZIP")
+    else:
+        intake_identity(source, request)
+        # Restrict automatic intake to complete UTF-8 documents. The canonical
+        # extractor is responsible for structural validation, not this sniff.
+        try:
+            document = data.decode("utf-8-sig")
+        except UnicodeError as exc:
+            raise JobError("HTML intake requires UTF-8 source") from exc
+        if not re.match(r"\s*(?:<\?xml[^>]*\?>\s*)?(?:<!doctype\s+html\b[^>]*>\s*)?<html\b",
+                        document, re.IGNORECASE):
+            raise JobError("source is not a standalone HTML document")
     return request
 
 
@@ -1709,13 +1746,13 @@ def admit_pi_job(job_id: str) -> None:
         return
     if status_path(job_id).exists():
         raise executor_ownership.OwnershipError("cannot take over an existing Auto job")
-    source = job_path(job_id) / "source.epub"
-    title, author = epub_identity(source)
+    source = intake_source(job_id, request)
+    title, author = intake_identity(source, request)
     title = request.get("title") or title
     author = request.get("author") or author
     slug, old_book = locate_book(
         title, author, request.get("source_filename", source.name),
-        request["target_language"], source_epub=source,
+        request["target_language"], source_epub=source if request.get("source_format", "epub") == "epub" else None,
         source_sha256=request["source_sha256"],
     )
     if old_book or (ROOT / "books" / slug).exists():
@@ -1953,7 +1990,7 @@ def verify(slug: str) -> None:
 
 
 def init(job_id: str, request: dict, slug: str, revision: str) -> dict:
-    source = job_path(job_id) / "source.epub"
+    source = intake_source(job_id, request)
     args = ["extract", str(source), "--slug", slug,
             "--target-language", request["target_language"]]
     for field in ("title", "author"):
@@ -6522,16 +6559,16 @@ def run(job_id: str, *, resume_blocked: bool = False,
     if resume_interrupted and (status.get("phase") != "operator-intervention-required"
                                or not isinstance(status.get("active"), dict)):
         raise JobError("interrupted recovery requires the recorded active claim")
-    source = job_path(job_id) / "source.epub"
+    source = intake_source(job_id, request)
     try:
-        epub_title, epub_author = epub_identity(source)
+        epub_title, epub_author = intake_identity(source, request)
     except JobError as exc:
         raise BookIdentityError(str(exc)) from exc
     title = request.get("title") or epub_title
     author = request.get("author") or epub_author
     slug, metadata = locate_book(
         title, author, request.get("source_filename", source.name), request["target_language"],
-        source_epub=source, source_sha256=request["source_sha256"]
+        source_epub=source if request.get("source_format", "epub") == "epub" else None, source_sha256=request["source_sha256"]
     )
     folder = ROOT / "books" / slug
     ensure_job_executor(job_id, request, slug=slug)
@@ -6540,6 +6577,15 @@ def run(job_id: str, *, resume_blocked: bool = False,
     if not metadata and folder.exists():
         raise BookIdentityError("book workspace exists but cannot be matched safely")
     if metadata:
+        # HTML/XHTML source-edition promotion needs its own qualification.
+        # Exact-source resumes remain available; do not apply EPUB update rules
+        # to a different format or silently replace a historical source.
+        old_source = metadata.get("source") or {}
+        if (request.get("source_format", "epub") != "epub" or
+                old_source.get("format") in {"html", "xhtml"} or
+                str(old_source.get("filename", "")).lower().endswith((".html", ".xhtml", ".htm"))):
+            if old_source.get("sha256") != request["source_sha256"]:
+                raise BookIdentityError("HTML source-edition updates require explicit operator reconciliation")
         verify_legacy_reconciliation(folder, metadata)
     workflow = metadata.get("workflow") if metadata else None
     if metadata and (not isinstance(workflow, dict) or not SHA.fullmatch(workflow.get("resolved_revision", ""))):
