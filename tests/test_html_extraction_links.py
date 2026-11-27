@@ -7,7 +7,8 @@ import unittest
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from book import BookError, extract_chapters
+from book import BookError, extract_chapters, Chapter
+from workflow.source_coverage import audit_standalone_html, SourceCoverageError
 from workflow.epub_output import build_epub_bytes, EpubOutputError, render_markdown_xhtml
 
 FIXTURE = """<!DOCTYPE html><html><head><title>Sample</title></head><body>
@@ -39,6 +40,30 @@ class HtmlExtractionLinksTests(unittest.TestCase):
         self.assertIn("Chapter note.", chapters[2].content)
         self.assertIn("<!-- bt-anchor:endnotes -->", chapters[3].content)
         self.assertIn("Final note.", chapters[3].content)
+
+    def test_optional_html_end_tag_does_not_drop_prose(self):
+        text = FIXTURE.replace("<p>Second passage.</p>", "<p>Second passage.")
+        chapters = self.extract(text)
+        self.assertIn("Second passage.", chapters[2].content)
+        self.assertIn("Chapter note.", chapters[2].content)
+
+    def test_audit_rejects_lost_prose(self):
+        chapters = self.extract()
+        chapters[1] = Chapter(chapters[1].title,
+                              chapters[1].content.replace("First *passage*.", ""))
+        with self.assertRaises(SourceCoverageError):
+            audit_standalone_html(FIXTURE, "source.html", chapters)
+
+    def test_audit_rejects_lost_link_even_with_same_label(self):
+        chapters = self.extract()
+        chapters[0] = Chapter(chapters[0].title,
+                              chapters[0].content.replace("[notes](#endnotes)", "notes"))
+        with self.assertRaises(SourceCoverageError):
+            audit_standalone_html(FIXTURE, "source.html", chapters)
+
+    def test_unsupported_embedded_content_is_not_silently_omitted(self):
+        with self.assertRaises(BookError):
+            self.extract(FIXTURE.replace("Second passage.", "Second passage.<iframe></iframe>"))
 
     def test_missing_anchor_fails_closed(self):
         with self.assertRaises(BookError):
