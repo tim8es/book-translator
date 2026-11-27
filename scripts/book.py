@@ -40,7 +40,8 @@ from workflow.review_cli import ReviewCliError, register_review_commands
 from workflow.reviews import REVIEW_EVIDENCE_VERSION
 from workflow.schemas import SCHEMA_VERSION
 from workflow.source_updates import historical_extracted_paths
-from workflow.source_coverage import COVERAGE_PATH, SourceCoverageError, audit_epub, canonical_external_href
+from workflow.source_coverage import (COVERAGE_PATH, SourceCoverageError, audit_epub,
+                                      canonical_external_href, audit_standalone_html)
 from workflow.epub_preserve import (needs_preserved_xhtml, extract as preserve_extract,
     audit as preserve_audit, PreservedEpubError, MODE as PRESERVE_MODE)
 
@@ -441,6 +442,13 @@ def extract_chapters(source: Path, source_format: str) -> tuple[list[Chapter], d
             targets.update(re.findall(r"(?<!\\)\[[^\[\]\n]+\]\(#([A-Za-z_][A-Za-z0-9_.:-]*)\)", chapter.content))
         if any(anchors.get(target) != 1 for target in targets):
             raise BookError("Standalone HTML has a missing or duplicate local fragment target")
+        # Full documents are audited; preserve the historical manual fragment
+        # extractor for callers that supply only a snippet rather than a book.
+        if re.search(r"<html\b", text, re.IGNORECASE):
+            try:
+                audit_standalone_html(text, source.name, chapters)
+            except SourceCoverageError as exc:
+                raise BookError(f"HTML source coverage blocked: {exc}") from exc
         return chapters, {}
     if source_format == "markdown":
         return split_markdown(text, fallback), {}
