@@ -190,6 +190,7 @@ def failed_evidence(status, chapter, records, source, target):
     row["candidate_rejections"] = [
         {"finding_id": x["finding_id"],
          "reason": qual.redact_fixture_error(x.get("reason", ""), os.environ),
+         "risk": identifier(x.get("risk"), r"meaning|ambiguity|dialogue|names|structure|omission|other"),
          "patch_sha256": identifier(x.get("patch_sha256"), r"[0-9a-f]{64}")}
         for x in status.get("correction_regression_rejections", [])
         if x.get("unit_id") == unit and x.get("review_record_id") == latest["record_id"]
