@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 import job_monitor
+import executor_ownership
 
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -50,6 +51,34 @@ def _file(book: Path, relative: str) -> Path:
     return path
 
 
+def verify_completion_ownership(root: Path, request: dict, slug: str) -> None:
+    """Validate both immutable ownership records, without transferring either.
+
+    A completed artifact is shareable with another exact-source intake even
+    when Pi owns the literary execution lane. This is NOT permission to run
+    translation, review, recovery or source promotion for that other job.
+    """
+    job_id, source_sha = request["job_id"], request["source_sha256"]
+    executor_ownership.selected(root, job_id, source_sha)
+    path = executor_ownership.book_marker_path(root, slug)
+    if not path.exists() and not path.is_symlink():
+        executor_ownership.selected(root, job_id, source_sha, slug)
+        return
+    if path.is_symlink():
+        raise ValueError("book executor marker cannot be a symlink")
+    owner = job_monitor.read_json(path)
+    owner_id = owner["job_id"]
+    owner_intake = executor_ownership.job_marker_path(root, owner_id).parent
+    owner_request = job_monitor.read_json(owner_intake / "request.json")
+    if (owner_request.get("schema_version") != 1
+            or owner_request.get("job_id") != owner_id
+            or owner_request.get("source_sha256") != source_sha
+            or owner_request.get("target_language") != request["target_language"]
+            or job_monitor.digest(owner_intake / "source.epub") != source_sha):
+        raise ValueError("book executor owner is not bound to exact source intake")
+    executor_ownership.selected(root, owner_id, source_sha, slug)
+
+
 def verified_completion(root: Path, request: dict, status: dict | None,
                         slug: str) -> dict:
     """Return status fields only after current source, ledger and bytes agree.
@@ -78,6 +107,7 @@ def verified_completion(root: Path, request: dict, status: dict | None,
             or metadata["target_language"] != request["target_language"]
             or request.get("workflow_revision", pin) != pin):
         raise ValueError("source or workflow identity mismatch")
+    verify_completion_ownership(root, request, slug)
     if status is not None:
         if (status.get("job_id") != request["job_id"]
                 or status.get("state") not in {"running", "blocked", "paused", "done"}
