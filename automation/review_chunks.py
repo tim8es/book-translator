@@ -248,6 +248,26 @@ def new_stage(plan_value: dict, unit_id: str, revision: str) -> dict:
             "unit_id": unit_id, "workflow_revision": revision, "completed": {}}
 
 
+def _anchor_offset(text: str, anchor: dict) -> int:
+    """Resolve the same explicit occurrence as the canonical v2 verifier."""
+    if not isinstance(anchor, dict) or set(anchor) != {"quote", "occurrence"}:
+        raise ValueError("invalid review anchor")
+    quote, occurrence = anchor["quote"], anchor["occurrence"]
+    if (not isinstance(quote, str) or not 1 <= len(quote) <= 300
+            or not quote.strip() or type(occurrence) is not int
+            or not 0 <= occurrence < 10000):
+        raise ValueError("invalid review anchor")
+    start = 0
+    for _ in range(occurrence + 1):
+        offset = text.find(quote, start)
+        if offset < 0:
+            raise ValueError("review anchor occurrence absent")
+        start = offset + len(quote)
+    if occurrence == 0 and text.find(quote, start) >= 0:
+        raise ValueError("review anchor quote is repeated without disambiguation")
+    return offset
+
+
 def find_previous_for_chunk(previous: dict | None, chunk: dict, source: str) -> list[dict]:
     if not previous:
         return []
@@ -259,10 +279,7 @@ def find_previous_for_chunk(previous: dict | None, chunk: dict, source: str) -> 
         if item["resolved"]:
             continue
         anchor = item["source_anchor"]
-        quote = anchor["quote"]
-        if source.count(quote) != 1:
-            raise ValueError("previous review source quote is not unique")
-        offset = source.find(quote)
+        offset = _anchor_offset(source, anchor)
         if chunk["source_core"][0] <= offset < chunk["source_core"][1]:
             result.append({
                 "id": item["id"], "category": item["category"],
@@ -283,17 +300,15 @@ def validate_chunk_report(chunk: dict, report: dict, source: str,
         raise ValueError("chunk lacks complete reviewer checks")
     for item in report["findings"]:
         src = item["source_anchor"]
-        spos = source.find(src["quote"])
+        spos = _anchor_offset(source, src)
         if (spos < chunk["source_core"][0]
-                or spos >= chunk["source_core"][1]
-                or source.count(src["quote"]) != 1):
+                or spos >= chunk["source_core"][1]):
             raise ValueError("review finding not anchored to the assigned source core")
         tgt = item["translation_anchor"]
         if tgt is not None:
-            tpos = translation.find(tgt["quote"])
+            tpos = _anchor_offset(translation, tgt)
             if (tpos < chunk["translation_window"][0]
-                    or tpos >= chunk["translation_window"][1]
-                    or translation.count(tgt["quote"]) != 1):
+                    or tpos >= chunk["translation_window"][1]):
                 raise ValueError("review finding not anchored to the corresponding translation")
         if item["id"].startswith("chunk-"):
             raise ValueError("review chunk IDs must be local and unprefixed")

@@ -164,6 +164,51 @@ class ReviewChunkPlanTests(unittest.TestCase):
             chunks.validate_chunk_report(second, report, self.source, self.target)
 
 
+    def test_indexed_prior_finding_routes_to_exact_core_and_rechecks(self):
+        from workflow.review_anchors import verify_evidence_anchors, verify_correction_lineage
+        source = "First repeated passage.\\n\\nSecond repeated passage."
+        target = "First repeated target.\\n\\nSecond repeated target."
+        source = source.replace("\\n", "\n")
+        target = target.replace("\\n", "\n")
+        split_s, split_t = source.index("Second"), target.index("Second")
+        first = {"source_core": [0, split_s], "translation_window": [0, split_t]}
+        second = {"source_core": [split_s, len(source)],
+                  "translation_window": [split_t, len(target)]}
+        f = {"id": "repeat", "category": "style", "severity": "minor",
+             "detail": "Synthetic defect", "resolved": False,
+             "source_anchor": {"quote": "repeated passage", "occurrence": 1},
+             "translation_anchor": {"quote": "repeated target", "occurrence": 1},
+             "resolves": None}
+        previous = {"record_id": "a"*32, "source_sha256": chunks.sha(source),
+                    "translation_sha256": chunks.sha(target + " old"),
+                    "outcome": "CORRECTIONS_REQUIRED",
+                    "quality_report": {"evidence_version": 2, "findings": [f]}}
+        self.assertEqual(chunks.find_previous_for_chunk(previous, first, source), [])
+        self.assertEqual([x["id"] for x in chunks.find_previous_for_chunk(
+            previous, second, source)], ["repeat"])
+        recheck = {**f, "id": "recheck", "resolved": True,
+                   "resolves": {"record_id": "a"*32, "finding_id": "repeat"}}
+        report = {"evidence_version": 2, "checks": dict.fromkeys(
+            ("coverage", "meaning", "terminology", "style", "structure"), True),
+            "findings": [recheck]}
+        verify_evidence_anchors(report, source.encode(), target.encode())
+        chunks.validate_chunk_report(second, report, source, target)
+        verify_correction_lineage(report, previous=previous, source_sha256=chunks.sha(source),
+                                  translation_sha256=chunks.sha(target), outcome="PASS")
+        with self.assertRaisesRegex(ValueError, "assigned source core"):
+            chunks.validate_chunk_report(first, report, source, target)
+        for invalid in (0, 2, -1, True):
+            broken = {**recheck, "source_anchor": {"quote": "repeated passage",
+                                                   "occurrence": invalid}}
+            with self.assertRaises(ValueError):
+                chunks.validate_chunk_report(second, {**report, "findings": [broken]},
+                                             source, target)
+        wrong_target = {**recheck, "translation_anchor": {"quote": "First", "occurrence": 0}}
+        with self.assertRaisesRegex(ValueError, "corresponding translation"):
+            chunks.validate_chunk_report(second, {**report, "findings": [wrong_target]},
+                                         source, target)
+
+
 class ReviewChunkWorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
