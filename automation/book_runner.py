@@ -1469,6 +1469,7 @@ def ready_jobs(limit: int = 6) -> list[dict]:
                 if completed is not None:
                     slug = completed["book_slug"]
                     if (state and state.get("phase") == "completion-reconciliation-preflight-failed"
+                            and state.get("reconciliation_version") == 2
                             and state.get("reconciliation_failed_tree") == git("rev-parse", f"HEAD:books/{slug}")):
                         continue
                     reconciliations.setdefault(slug, ("", job_id,
@@ -6431,6 +6432,7 @@ def run(job_id: str, *, resume_blocked: bool = False,
                 raise JobError("completion reconciliation requires a clean index")
             tree = git("rev-parse", f"HEAD:books/{slug}")
             if (status and status.get("phase") == "completion-reconciliation-preflight-failed"
+                    and status.get("reconciliation_version") == 2
                     and status.get("reconciliation_failed_tree") == tree):
                 return status
             # The exact book-pinned builder validates its own input fingerprint,
@@ -6461,7 +6463,32 @@ def run(job_id: str, *, resume_blocked: bool = False,
                                    "source_sha256": completed["source_sha256"],
                                    "workflow_revision": actual,
                                    "reconciliation_failed_tree": tree,
+                                   "reconciliation_version": 2,
                                    "last_error": "Pinned build-status did not confirm the current reviewed EPUB"})
+                    # Literary completion and delivery are distinct. A
+                    # historical renderer mismatch must not imply retranslation.
+                    result.pop("literary_completion", None)
+                    try:
+                        snapshot = json.loads(cli("status", slug, "--json"))
+                        units = snapshot.get("units")
+                        if (snapshot.get("valid") is True
+                                and snapshot.get("book_slug") == slug
+                                and snapshot.get("workflow_revision") == actual
+                                and snapshot.get("errors") == []
+                                and snapshot.get("claims") == []
+                                and snapshot.get("finalization", {}).get("active") is False
+                                and snapshot.get("corpus", {}).get("state") == "verified"
+                                and not snapshot.get("needs_attention")
+                                and isinstance(units, list) and units
+                                and len(units) == completed["queue_snapshot"]["reviewed"]
+                                and all(u.get("lifecycle") == "reviewed" and u.get("review") == "pass" for u in units)):
+                            result["literary_completion"] = {
+                                "state": "reviewed", "reviewed_units": len(units),
+                                "book_tree": tree, "workflow_revision": actual,
+                                "delivery_state": "validation-required"}
+                            result["queue_snapshot"] = completed["queue_snapshot"]
+                    except (JobError, ValueError, TypeError, AttributeError):
+                        pass
                     if git("status", "--porcelain", "--untracked-files=all", "--", f"books/{slug}"):
                         raise JobError("read-only reconciliation unexpectedly changed the book")
                     checkpoint(job_id, result, slug)
